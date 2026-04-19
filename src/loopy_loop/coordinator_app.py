@@ -400,11 +400,14 @@ def _read_signal(*, path: Path, model: type[SignalModel]) -> SignalModel | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        logger.warning("Ignoring unreadable signal file at %s", path)
         return None
     try:
         signal = model.model_validate(payload)
     except Exception:
+        logger.warning("Ignoring invalid signal schema at %s", path)
         return None
     if getattr(signal, "schema_version", None) != 1:
+        logger.warning("Ignoring unsupported signal schema_version at %s", path)
         return None
     return signal

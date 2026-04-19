@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 from pydantic import Field
+from pydantic import field_validator
 
 DEFAULT_LEASE_SECONDS = 600
 DEFAULT_LOCK_TIMEOUT_SECONDS = 30.0
@@ -110,7 +111,14 @@ class FinishedRequest(BaseModel):
 class ControlSignal(BaseModel):
     unresolvable_error: bool = Field(...)
     reason: str = Field(...)
-    schema_version: int = Field(default=CONTROL_SCHEMA_VERSION)
+    schema_version: int = Field(...)
+
+    @field_validator("schema_version")
+    @classmethod
+    def validate_schema_version(cls, value: int) -> int:
+        if value != CONTROL_SCHEMA_VERSION:
+            raise ValueError(f"schema_version must equal {CONTROL_SCHEMA_VERSION}")
+        return value
 
 
 class GoalCheckSignal(BaseModel):

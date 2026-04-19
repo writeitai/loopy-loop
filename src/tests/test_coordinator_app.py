@@ -93,6 +93,64 @@ def test_control_signal_sets_unresolvable_error(
     assert updated.unresolvable_error is True
 
 
+def test_control_json_requires_schema_version(
+    repo_builder: Any, monkeypatch: Any, assignment_factory: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    app = create_coordinator_app(repo_root=repo_root, resume=False)
+    client = TestClient(app)
+    store = StateStore(repo_root=repo_root)
+    state = store.read_state()
+    assert state is not None
+    state.workers["worker_1"] = WorkerState(
+        status="busy", registered_at=utc_now(), last_seen_at=utc_now()
+    )
+    state.active_assignment = assignment_factory(
+        worker_id="worker_1",
+        workflow_id="planner",
+        session_id=state.active_session_id,
+        iteration=1,
+    )
+    store.write_state(state=state)
+    control_path = (
+        repo_root
+        / ".loopy_loop"
+        / "sessions"
+        / state.active_session_id
+        / "iterations"
+        / "0001_planner"
+        / "control.json"
+    )
+    control_path.parent.mkdir(parents=True, exist_ok=True)
+    control_path.write_text(
+        json.dumps(
+            {
+                "unresolvable_error": True,
+                "reason": "missing schema version",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/workers/worker_1/finished",
+        json={
+            "assignment_id": state.active_assignment.assignment_id,
+            "session_id": state.active_assignment.session_id,
+            "workflow_id": "planner",
+            "success": True,
+            "text": "done",
+            "error": None,
+        },
+    ).json()
+    updated = store.read_state()
+
+    assert response["stop_reason"] != "unresolvable_error"
+    assert updated is not None
+    assert updated.unresolvable_error is False
+
+
 def test_invalid_goal_check_output_stops_at_failure_cap(
     repo_builder: Any,
     monkeypatch: Any,
