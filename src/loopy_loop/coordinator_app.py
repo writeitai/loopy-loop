@@ -154,8 +154,8 @@ class CoordinatorService:
 
             if self._has_unresolvable_error_signal(active_assignment=active_assignment):
                 current.unresolvable_error = True
-                current.stop_reason = "unresolvable_error"
-                current.status = "failed"
+            if current.stop_reason != "goal_check_broken":
+                self._apply_stop_precedence(state=current)
 
             current.history.append(
                 HistoryEntry(
@@ -304,31 +304,33 @@ class CoordinatorService:
             worker.status = "idle"
         state.active_assignment = None
 
-    def _stop_response_if_needed(
-        self, *, state: LoopState
-    ) -> NextActionResponse | None:
+    def _apply_stop_precedence(self, *, state: LoopState) -> str | None:
         if state.goal_met:
             state.status = "goal_met"
             state.stop_reason = "goal_met"
-            return NextActionResponse(action=STOP_ACTION, stop_reason="goal_met")
+            return "goal_met"
         if state.stop_requested:
             state.status = "stopped"
             state.stop_reason = "stop_requested"
-            return NextActionResponse(action=STOP_ACTION, stop_reason="stop_requested")
+            return "stop_requested"
         if state.unresolvable_error:
             state.status = "failed"
             state.stop_reason = "unresolvable_error"
-            return NextActionResponse(
-                action=STOP_ACTION, stop_reason="unresolvable_error"
-            )
+            return "unresolvable_error"
         if state.iteration_count >= state.max_turns:
             state.status = "max_turns"
             state.stop_reason = "max_turns"
-            return NextActionResponse(action=STOP_ACTION, stop_reason="max_turns")
+            return "max_turns"
         if state.status in {"stopped", "goal_met", "failed", "max_turns"}:
-            return NextActionResponse(
-                action=STOP_ACTION, stop_reason=state.stop_reason or state.status
-            )
+            return state.stop_reason or state.status
+        return None
+
+    def _stop_response_if_needed(
+        self, *, state: LoopState
+    ) -> NextActionResponse | None:
+        stop_reason = self._apply_stop_precedence(state=state)
+        if stop_reason is not None:
+            return NextActionResponse(action=STOP_ACTION, stop_reason=stop_reason)
         return None
 
     def _run_response(
