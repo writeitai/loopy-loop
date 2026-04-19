@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from datetime import timedelta
 import json
+import logging
 from pathlib import Path
 from typing import TypeVar
 import uuid
@@ -33,6 +34,8 @@ from loopy_loop.sessions import create_session_dir
 from loopy_loop.sessions import create_session_id
 from loopy_loop.sessions import goal_check_path
 from loopy_loop.state_store import StateStore
+
+logger = logging.getLogger(__name__)
 
 
 def create_coordinator_app(*, repo_root: Path, resume: bool) -> FastAPI:
@@ -99,9 +102,7 @@ class CoordinatorService:
     def next_action(self, *, worker_id: str) -> NextActionResponse:
         def mutator(state: LoopState | None) -> tuple[LoopState, NextActionResponse]:
             current = _require_state(state=state)
-            response = self._dispatch_next_action(
-                state=current, worker_id=worker_id, update_last_seen=True
-            )
+            response = self._dispatch_next_action(state=current, worker_id=worker_id)
             return current, response
 
         return self.state_store.mutate(mutator)
@@ -115,10 +116,14 @@ class CoordinatorService:
             now = utc_now()
             worker.last_seen_at = now
             if current.active_assignment is None:
-                return current, self._peek_action(state=current, worker_id=worker_id)
+                return current, self._dispatch_next_action(
+                    state=current, worker_id=worker_id
+                )
             active_assignment = current.active_assignment
             if request.assignment_id != active_assignment.assignment_id:
-                return current, self._peek_action(state=current, worker_id=worker_id)
+                return current, self._dispatch_next_action(
+                    state=current, worker_id=worker_id
+                )
 
             success = request.success
             error = request.error
@@ -174,9 +179,7 @@ class CoordinatorService:
                     action=STOP_ACTION, stop_reason="goal_check_broken"
                 )
 
-            response = self._dispatch_next_action(
-                state=current, worker_id=worker_id, update_last_seen=False
-            )
+            response = self._dispatch_next_action(state=current, worker_id=worker_id)
             return current, response
 
         return self.state_store.mutate(mutator)
@@ -221,13 +224,11 @@ class CoordinatorService:
         self.state_store.write_state(state=state)
 
     def _dispatch_next_action(
-        self, *, state: LoopState, worker_id: str, update_last_seen: bool
+        self, *, state: LoopState, worker_id: str
     ) -> NextActionResponse:
         worker = self._require_worker(state=state, worker_id=worker_id)
         now = utc_now()
-        if update_last_seen:
-            worker.last_seen_at = now
-
+        worker.last_seen_at = now
         self._reclaim_expired_assignment(state=state, now=now)
         stop_response = self._stop_response_if_needed(state=state)
         if stop_response is not None:
@@ -272,16 +273,18 @@ class CoordinatorService:
         active_assignment = state.active_assignment
         if active_assignment is None:
             return
-        worker = self._require_worker(
-            state=state, worker_id=active_assignment.worker_id
-        )
+        worker = state.workers.get(active_assignment.worker_id)
         lease_deadline = active_assignment.assigned_at + timedelta(
             seconds=active_assignment.lease_seconds
         )
-        worker_deadline = worker.last_seen_at + timedelta(
-            seconds=active_assignment.lease_seconds
-        )
-        if now <= lease_deadline and now <= worker_deadline:
+        worker_deadline = None
+        if worker is not None:
+            worker_deadline = worker.last_seen_at + timedelta(
+                seconds=active_assignment.lease_seconds
+            )
+        if now <= lease_deadline and (
+            worker_deadline is None or now <= worker_deadline
+        ):
             return
         state.history.append(
             HistoryEntry(
@@ -297,21 +300,9 @@ class CoordinatorService:
             )
         )
         state.iteration_count += 1
-        worker.status = "idle"
+        if worker is not None:
+            worker.status = "idle"
         state.active_assignment = None
-
-    def _peek_action(self, *, state: LoopState, worker_id: str) -> NextActionResponse:
-        self._require_worker(state=state, worker_id=worker_id)
-        stop_response = self._stop_response_if_needed(state=state)
-        if stop_response is not None:
-            return stop_response
-        if state.active_assignment is None:
-            return NextActionResponse(action=WAIT_ACTION)
-        if state.active_assignment.worker_id == worker_id:
-            return self._run_response(
-                assignment=state.active_assignment, snapshot=state.config_snapshot
-            )
-        return NextActionResponse(action=WAIT_ACTION)
 
     def _stop_response_if_needed(
         self, *, state: LoopState
