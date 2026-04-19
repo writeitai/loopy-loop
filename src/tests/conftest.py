@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 import yaml
 
-from loopy_loop.models import ActiveAssignment
+from loopy_loop.models import CurrentTask
 from loopy_loop.models import HistoryEntry
 from loopy_loop.models import LoopState
 from loopy_loop.models import RootConfigSnapshot
@@ -112,10 +112,8 @@ def history_entry_factory():
     def factory(**overrides: Any) -> HistoryEntry:
         now = utc_now()
         data = {
-            "assignment_id": "assignment-1",
             "iteration": 1,
             "workflow_id": "planner",
-            "worker_id": "worker_1",
             "session_id": "goal_20260419_143022_ab12cd34",
             "success": True,
             "error": None,
@@ -124,6 +122,21 @@ def history_entry_factory():
         }
         data.update(overrides)
         return HistoryEntry.model_validate(data)
+
+    return factory
+
+
+@pytest.fixture()
+def current_task_factory():
+    def factory(**overrides: Any) -> CurrentTask:
+        data = {
+            "workflow_id": "planner",
+            "session_id": "goal_20260419_143022_ab12cd34",
+            "iteration": 1,
+            "started_at": utc_now(),
+        }
+        data.update(overrides)
+        return CurrentTask.model_validate(data)
 
     return factory
 
@@ -143,30 +156,11 @@ def state_factory(snapshot_factory: Any):
             "stop_reason": None,
             "iteration_count": 0,
             "goal_check_consecutive_failures": 0,
-            "active_assignment": None,
-            "workers": {},
+            "current_task": None,
             "history": [],
             "config_snapshot": snapshot,
         }
         data.update(overrides)
         return LoopState.model_validate(data)
-
-    return factory
-
-
-@pytest.fixture()
-def assignment_factory():
-    def factory(**overrides: Any) -> ActiveAssignment:
-        data = {
-            "assignment_id": "assignment-1",
-            "worker_id": "worker_1",
-            "session_id": "goal_20260419_143022_ab12cd34",
-            "iteration": 1,
-            "workflow_id": "planner",
-            "assigned_at": utc_now(),
-            "lease_seconds": 600,
-        }
-        data.update(overrides)
-        return ActiveAssignment.model_validate(data)
 
     return factory

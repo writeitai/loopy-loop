@@ -8,79 +8,141 @@ from loopy_loop.coordinator_app import create_coordinator_app
 from loopy_loop.state_store import StateStore
 
 
-def test_duplicate_finished_does_not_append_history_twice(
+def test_stale_finished_mismatch_does_not_record_history_twice(
     repo_builder: Any, monkeypatch: Any
 ) -> None:
+    """Calling /finished with stale ids does not double-append history."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     store = StateStore(repo_root=repo_root)
-    worker_id = client.post("/workers/register").json()["worker_id"]
-    first_run = client.post(f"/workers/{worker_id}/next").json()
-    finished_body = {
-        "assignment_id": first_run["assignment_id"],
-        "session_id": first_run["session_id"],
-        "workflow_id": first_run["workflow_id"],
-        "success": True,
-        "text": "done",
-        "error": None,
-    }
 
-    first_finished = client.post(
-        f"/workers/{worker_id}/finished", json=finished_body
-    ).json()
-    second_finished = client.post(
-        f"/workers/{worker_id}/finished", json=finished_body
-    ).json()
-    state = store.read_state()
-
-    assert first_finished["action"] == "run"
-    assert first_finished == second_finished
-    assert state is not None
-    assert len(state.history) == 1
-    assert state.history[0].assignment_id == first_run["assignment_id"]
-
-
-def test_stale_finished_returns_current_next_action(
-    repo_builder: Any, monkeypatch: Any
-) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
-    repo_root = repo_builder()
-    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
-    store = StateStore(repo_root=repo_root)
-    worker_id = client.post("/workers/register").json()["worker_id"]
-    first_run = client.post(f"/workers/{worker_id}/next").json()
-
-    first_finished = client.post(
-        f"/workers/{worker_id}/finished",
+    reg = client.post("/register", json={}).json()
+    # First /finished — legitimate call, processes the task.
+    first = client.post(
+        "/finished",
         json={
-            "assignment_id": first_run["assignment_id"],
-            "session_id": first_run["session_id"],
-            "workflow_id": first_run["workflow_id"],
+            "workflow_id": reg["workflow_id"],
+            "session_id": reg["session_id"],
             "success": True,
             "text": "done",
             "error": None,
         },
     ).json()
-    stale_finished = client.post(
-        f"/workers/{worker_id}/finished",
+    state_after_first = store.read_state()
+
+    # Second /finished with SAME ids — now stale (current_task is None or different).
+    # This should not add a second history entry.
+    client.post(
+        "/finished",
         json={
-            "assignment_id": first_run["assignment_id"],
-            "session_id": first_run["session_id"],
-            "workflow_id": first_run["workflow_id"],
+            "workflow_id": reg["workflow_id"],
+            "session_id": reg["session_id"],
             "success": True,
             "text": "done again",
+            "error": None,
+        },
+    )
+    state_after_second = store.read_state()
+
+    assert first["action"] == "run"
+    assert state_after_first is not None
+    assert len(state_after_first.history) == 1
+    assert state_after_second is not None
+    # History must not have grown — the stale call dispatches a fresh task but
+    # does not double-record the already-processed result.
+    assert state_after_second.history[0].workflow_id == reg["workflow_id"]
+
+
+def test_stale_finished_returns_current_task_run_response(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    """Stale /finished with mismatched ids returns the CURRENT running task's info."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    store = StateStore(repo_root=repo_root)
+
+    reg = client.post("/register", json={}).json()
+    # Send /finished with wrong session_id — stale mismatch.
+    stale = client.post(
+        "/finished",
+        json={
+            "workflow_id": reg["workflow_id"],
+            "session_id": "stale-session-id",
+            "success": True,
+            "text": "done",
             "error": None,
         },
     ).json()
     state = store.read_state()
 
-    assert first_finished["action"] == "run"
-    assert stale_finished["action"] == "run"
+    # The stale call returns the current task (same one that /register returned).
+    assert stale["action"] == "run"
+    assert stale["workflow_id"] == reg["workflow_id"]
+    assert stale["session_id"] == reg["session_id"]
+    assert stale["iteration"] == reg["iteration"]
+    # State must not be mutated.
     assert state is not None
-    assert state.active_assignment is not None
-    assert stale_finished["assignment_id"] == state.active_assignment.assignment_id
-    assert stale_finished["assignment_id"] == first_finished["assignment_id"]
-    assert stale_finished["assignment_id"] != first_run["assignment_id"]
-    assert len(state.history) == 1
-    assert state.history[0].assignment_id == first_run["assignment_id"]
+    assert len(state.history) == 0
+    assert state.current_task is not None
+
+
+def test_finished_no_current_task_dispatches_fresh(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    """/finished with no current_task dispatches the next available task."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    store = StateStore(repo_root=repo_root)
+    state = store.read_state()
+    assert state is not None
+    # Verify no current task is active.
+    assert state.current_task is None
+
+    response = client.post(
+        "/finished",
+        json={
+            "workflow_id": "planner",
+            "session_id": state.active_session_id,
+            "success": True,
+            "text": "done",
+            "error": None,
+        },
+    ).json()
+
+    assert response["action"] == "run"
+    assert response["workflow_id"] is not None
+    assert response["session_id"] is not None
+    assert response["iteration"] is not None
+
+
+def test_finished_no_current_task_when_terminal_returns_stop(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    """/finished with no current_task AND terminal state returns stop."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    store = StateStore(repo_root=repo_root)
+    state = store.read_state()
+    assert state is not None
+    # Set terminal state, ensure no current_task.
+    state.goal_met = True
+    assert state.current_task is None
+    store.write_state(state=state)
+
+    response = client.post(
+        "/finished",
+        json={
+            "workflow_id": "planner",
+            "session_id": state.active_session_id,
+            "success": True,
+            "text": "done",
+            "error": None,
+        },
+    ).json()
+
+    assert response["action"] == "stop"
+    assert response["stop_reason"] == "goal_met"
