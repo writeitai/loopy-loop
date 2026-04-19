@@ -6,6 +6,8 @@ from typing import Any
 import httpx
 
 from loopy_loop.models import IterationResult
+from loopy_loop.models import NextActionResponse
+from loopy_loop.worker import _run_assignment
 from loopy_loop.worker import run_worker_loop
 
 
@@ -101,3 +103,56 @@ def test_worker_reads_prompt_from_disk_and_retries_finished(
     assert "Disk prompt body" in captured["prompt"]
     assert captured["model"] == "gpt-test"
     assert result_json["harness_run_id"] == "run-123"
+
+
+def test_worker_uses_config_snapshot_not_disk(
+    repo_builder: Any, monkeypatch: Any, snapshot_factory: Any
+) -> None:
+    repo_root = repo_builder(
+        root_config={"model": "disk-model"},
+        workflows={
+            "planner": {
+                "prompt": "Disk prompt body",
+                "config": {
+                    "enabled": True,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "",
+                },
+            }
+        },
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    captured_models: list[str] = []
+
+    def fake_run_harness_iteration(**kwargs: Any) -> IterationResult:
+        captured_models.append(kwargs["config_snapshot"].model)
+        return IterationResult(
+            success=True, text="completed", error=None, harness_run_id="run-123"
+        )
+
+    monkeypatch.setattr(
+        "loopy_loop.worker.run_harness_iteration", fake_run_harness_iteration
+    )
+    next_action = NextActionResponse.model_validate(
+        {
+            "action": "run",
+            "assignment_id": "assignment-1",
+            "workflow_id": "planner",
+            "session_id": "goal_20260419_143022_ab12cd34",
+            "iteration": 1,
+            "config_snapshot": snapshot_factory(model="snapshot-model").model_dump(),
+        }
+    )
+
+    _run_assignment(repo_root=repo_root, next_action=next_action)
+    repo_root.joinpath("loopy_loop_config.yaml").write_text(
+        'goal_slug: "broken"\n', encoding="utf-8"
+    )
+    second_action = next_action.model_copy(
+        update={"assignment_id": "assignment-2", "iteration": 2}
+    )
+    _run_assignment(repo_root=repo_root, next_action=second_action)
+
+    assert captured_models == ["snapshot-model", "snapshot-model"]

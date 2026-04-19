@@ -7,7 +7,6 @@ import traceback
 import httpx
 
 from loopy_loop.config import ConfigError
-from loopy_loop.config import load_root_config
 from loopy_loop.config import load_workflow_config
 from loopy_loop.config import LOOPY_DIRNAME
 from loopy_loop.harness_runner import run_harness_iteration
@@ -111,7 +110,6 @@ def _run_assignment(
     ):
         raise ConfigError("Incomplete run payload from coordinator")
 
-    _ = load_root_config(repo_root=repo_root)
     config_snapshot = RootConfigSnapshot.model_validate(
         next_action.config_snapshot.model_dump()
     )
