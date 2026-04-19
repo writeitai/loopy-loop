@@ -1,36 +1,16 @@
 # HTTP Contract
 
-loopy-loop v1 exposes exactly three coordinator endpoints.
+loopy-loop exposes exactly two coordinator endpoints.
 
-## `POST /workers/register`
+## POST /register
 
-Request:
-
-```json
-{}
-```
-
-Response:
-
-```json
-{"worker_id": "worker_ab12cd34"}
-```
-
-## `POST /workers/{worker_id}/next`
-
-Request:
-
-```json
-{}
-```
+Request: `{}` (empty body)
 
 Run response:
 
 ```json
 {
   "action": "run",
-  "stop_reason": null,
-  "assignment_id": "b548df07-993e-4cfd-975a-3c9d40a0f770",
   "workflow_id": "planner",
   "session_id": "ship-landing-page_20260419_143022_ab12cd34",
   "iteration": 3,
@@ -46,21 +26,8 @@ Run response:
     "api_base": "https://openrouter.ai/api/v1",
     "api_key_env": "OPENROUTER_API_KEY",
     "system_prompt_extension": ""
-  }
-}
-```
-
-Wait response:
-
-```json
-{
-  "action": "wait",
-  "stop_reason": null,
-  "assignment_id": null,
-  "workflow_id": null,
-  "session_id": null,
-  "iteration": null,
-  "config_snapshot": null
+  },
+  "stop_reason": null
 }
 ```
 
@@ -70,7 +37,6 @@ Stop response:
 {
   "action": "stop",
   "stop_reason": "goal_met",
-  "assignment_id": null,
   "workflow_id": null,
   "session_id": null,
   "iteration": null,
@@ -80,39 +46,35 @@ Stop response:
 
 Rules:
 
-- If a worker already owns the active live lease, repeated `/next` returns the same `run` payload.
-- If another worker owns the live lease, `/next` returns `wait`.
-- If the lease is stale, `/next` records a `lease_expired` history entry, clears the assignment, and dispatches fresh work if an eligible workflow exists.
+- If `current_task` is already set (previous worker crashed without calling `/finished`),
+  `/register` records it as failed (`error="abandoned"`) in history and then dispatches
+  fresh work. Abandoned cleanup always runs before stop-condition evaluation.
+- If the loop is in a terminal state, `/register` immediately returns `action=stop`.
 
-## `POST /workers/{worker_id}/finished`
+## POST /finished
 
 Request:
 
 ```json
 {
-  "assignment_id": "b548df07-993e-4cfd-975a-3c9d40a0f770",
-  "session_id": "ship-landing-page_20260419_143022_ab12cd34",
   "workflow_id": "planner",
+  "session_id": "ship-landing-page_20260419_143022_ab12cd34",
   "success": true,
   "text": "done",
   "error": null
 }
 ```
 
-Response:
-
-- Same response shape as `/next`
-- Can immediately return `run`, `wait`, or `stop`
+Response: same shape as `/register` response (`action` is either `"run"` or `"stop"`).
 
 Rules:
 
-- `/finished` is idempotent by `assignment_id`
-- Unknown or stale `assignment_id` returns HTTP 200 with the current action and does not mutate state
-- The coordinator reads `control.json` only from the current iteration directory
-- The coordinator reads `goal_check.json` only from the current `goal_check` iteration directory
-
-## Assignment Semantics
-
-- `assignment_id` identifies one leased assignment
-- A duplicate or late `/finished` for an expired lease is ignored safely
-- The worker may retry `/finished` after transient HTTP failures; duplicates remain safe
+- If `session_id` + `workflow_id` does not match `current_task`, the call is treated as
+  stale: state is not mutated, `current_task` is not changed, and the current task's run
+  response is returned to the caller.
+- If `current_task` is `None` (no task is active), the coordinator dispatches the next
+  available task as if `/register` had been called. If the state is terminal, it returns
+  `action=stop`.
+- The coordinator reads `control.json` only from the current iteration directory.
+- The coordinator reads `goal_check.json` only from the current `goal_check` iteration
+  directory.

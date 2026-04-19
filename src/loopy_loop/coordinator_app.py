@@ -1,33 +1,26 @@
 from __future__ import annotations
 
-from datetime import datetime
-from datetime import timedelta
 import json
 import logging
 from pathlib import Path
 from typing import TypeVar
-import uuid
 
 from fastapi import FastAPI
-from fastapi import HTTPException
 from pydantic import BaseModel
 
 from loopy_loop.config import ConfigError
 from loopy_loop.config import PreflightResult
 from loopy_loop.config import run_preflight
-from loopy_loop.models import ActiveAssignment
 from loopy_loop.models import ControlSignal
+from loopy_loop.models import CurrentTask
 from loopy_loop.models import FinishedRequest
 from loopy_loop.models import GoalCheckSignal
 from loopy_loop.models import HistoryEntry
 from loopy_loop.models import LoopState
-from loopy_loop.models import NextActionResponse
-from loopy_loop.models import RegisterWorkerResponse
 from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.models import STOP_ACTION
+from loopy_loop.models import TaskResponse
 from loopy_loop.models import utc_now
-from loopy_loop.models import WAIT_ACTION
-from loopy_loop.models import WorkerState
 from loopy_loop.scheduler import choose_next_workflow
 from loopy_loop.sessions import control_path
 from loopy_loop.sessions import create_session_dir
@@ -47,25 +40,13 @@ def create_coordinator_app(*, repo_root: Path, resume: bool) -> FastAPI:
     app = FastAPI()
     app.state.service = service
 
-    @app.post("/workers/register", response_model=RegisterWorkerResponse)
-    def register_worker() -> RegisterWorkerResponse:
+    @app.post("/register", response_model=TaskResponse)
+    def register_worker() -> TaskResponse:
         return service.register_worker()
 
-    @app.post("/workers/{worker_id}/next", response_model=NextActionResponse)
-    def next_action(worker_id: str) -> NextActionResponse:
-        try:
-            return service.next_action(worker_id=worker_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @app.post("/workers/{worker_id}/finished", response_model=NextActionResponse)
-    def finish_assignment(
-        worker_id: str, request: FinishedRequest
-    ) -> NextActionResponse:
-        try:
-            return service.finish_assignment(worker_id=worker_id, request=request)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    @app.post("/finished", response_model=TaskResponse)
+    def finish_assignment(request: FinishedRequest) -> TaskResponse:
+        return service.finish_assignment(request=request)
 
     return app
 
@@ -85,56 +66,123 @@ class CoordinatorService:
         self.state_store = state_store
         self._prepare_state(resume=resume)
 
-    def register_worker(self) -> RegisterWorkerResponse:
-        def mutator(
-            state: LoopState | None,
-        ) -> tuple[LoopState, RegisterWorkerResponse]:
+    def register_worker(self) -> TaskResponse:
+        def mutator(state: LoopState | None) -> tuple[LoopState, TaskResponse]:
             current = _require_state(state=state)
             now = utc_now()
-            worker_id = f"worker_{uuid.uuid4().hex[:8]}"
-            current.workers[worker_id] = WorkerState(
-                status="idle", registered_at=now, last_seen_at=now
+
+            # Step 3: If current_task is set (crash recovery from previous worker crash),
+            # record it as abandoned BEFORE checking stop conditions.
+            # Important: this increment can itself trigger max_turns — that is correct
+            # behaviour. The stop check (step 4) will catch it immediately after.
+            if current.current_task is not None:
+                orphaned = current.current_task
+                current.history.append(
+                    HistoryEntry(
+                        iteration=orphaned.iteration,
+                        workflow_id=orphaned.workflow_id,
+                        session_id=orphaned.session_id,
+                        success=False,
+                        error="abandoned",
+                        started_at=orphaned.started_at,
+                        finished_at=now,
+                    )
+                )
+                current.iteration_count += 1
+                current.current_task = None
+
+            # Step 4: Check stop conditions after abandoned-task cleanup.
+            stop_response = self._stop_response_if_needed(state=current)
+            if stop_response is not None:
+                return current, stop_response
+
+            # Step 5: Choose next workflow.
+            workflow = choose_next_workflow(
+                workflows=self.workflows,
+                history=current.history,
+                iteration_count=current.iteration_count,
             )
-            return current, RegisterWorkerResponse(worker_id=worker_id)
+            if workflow is None:
+                current.stop_reason = "no_eligible_workflow"
+                current.status = "failed"
+                return current, TaskResponse(
+                    action=STOP_ACTION, stop_reason="no_eligible_workflow"
+                )
+
+            # Step 6: Set current_task and return run response.
+            current.current_task = CurrentTask(
+                workflow_id=workflow.id,
+                session_id=current.active_session_id,
+                iteration=current.iteration_count + 1,
+                started_at=now,
+            )
+            return current, _build_run_response(
+                current_task=current.current_task,
+                config_snapshot=current.config_snapshot,
+            )
 
         return self.state_store.mutate(mutator)
 
-    def next_action(self, *, worker_id: str) -> NextActionResponse:
-        def mutator(state: LoopState | None) -> tuple[LoopState, NextActionResponse]:
+    def finish_assignment(self, *, request: FinishedRequest) -> TaskResponse:
+        def mutator(state: LoopState | None) -> tuple[LoopState, TaskResponse]:
             current = _require_state(state=state)
-            response = self._dispatch_next_action(state=current, worker_id=worker_id)
-            return current, response
-
-        return self.state_store.mutate(mutator)
-
-    def finish_assignment(
-        self, *, worker_id: str, request: FinishedRequest
-    ) -> NextActionResponse:
-        def mutator(state: LoopState | None) -> tuple[LoopState, NextActionResponse]:
-            current = _require_state(state=state)
-            worker = self._require_worker(state=current, worker_id=worker_id)
             now = utc_now()
-            worker.last_seen_at = now
-            if current.active_assignment is None:
-                return current, self._dispatch_next_action(
-                    state=current, worker_id=worker_id
+
+            # Step 3: No active task — stale call. Dispatch as if /register was called.
+            # This handles the post-crash stale retry scenario safely.
+            if current.current_task is None:
+                # Check stop conditions first; if terminal, return stop.
+                stop_response = self._stop_response_if_needed(state=current)
+                if stop_response is not None:
+                    return current, stop_response
+                workflow = choose_next_workflow(
+                    workflows=self.workflows,
+                    history=current.history,
+                    iteration_count=current.iteration_count,
                 )
-            active_assignment = current.active_assignment
-            if request.assignment_id != active_assignment.assignment_id:
-                return current, self._dispatch_next_action(
-                    state=current, worker_id=worker_id
+                if workflow is None:
+                    current.stop_reason = "no_eligible_workflow"
+                    current.status = "failed"
+                    return current, TaskResponse(
+                        action=STOP_ACTION, stop_reason="no_eligible_workflow"
+                    )
+                current.current_task = CurrentTask(
+                    workflow_id=workflow.id,
+                    session_id=current.active_session_id,
+                    iteration=current.iteration_count + 1,
+                    started_at=now,
+                )
+                return current, _build_run_response(
+                    current_task=current.current_task,
+                    config_snapshot=current.config_snapshot,
                 )
 
+            # Step 4: Mismatch check — stale call for a different task.
+            # Do NOT mutate state; return the current task's run response so the
+            # caller knows what is actually running. Note: the returned workflow_id
+            # and iteration belong to the CURRENT (live) task, not the stale caller's
+            # completed task — this is intentional and safe in the single-worker model.
+            active = current.current_task
+            if (
+                request.session_id != active.session_id
+                or request.workflow_id != active.workflow_id
+            ):
+                return current, _build_run_response(
+                    current_task=active, config_snapshot=current.config_snapshot
+                )
+
+            # Step 5: Match confirmed — process result.
             success = request.success
             error = request.error
-            if self._has_invalid_control_output(active_assignment=active_assignment):
+
+            # 5b: Invalid control output overrides success.
+            if self._has_invalid_control_output(current_task=active):
                 success = False
                 error = "invalid_control_output"
 
-            if active_assignment.workflow_id == "goal_check":
-                goal_signal = self._read_goal_check_signal(
-                    active_assignment=active_assignment
-                )
+            # 5c: Goal-check signal handling.
+            if active.workflow_id == "goal_check":
+                goal_signal = self._read_goal_check_signal(current_task=active)
                 if goal_signal is None:
                     success = False
                     error = "invalid_goal_check_output"
@@ -148,39 +196,70 @@ class CoordinatorService:
                 else:
                     current.goal_check_consecutive_failures = 0
                     if goal_signal.goal_met:
+                        # Only set goal_met here; let _apply_stop_precedence set
+                        # stop_reason and status so there is a single authoritative path.
                         current.goal_met = True
-                        current.stop_reason = "goal_met"
-                        current.status = "goal_met"
 
-            if self._has_unresolvable_error_signal(active_assignment=active_assignment):
+            # 5d: Unresolvable error signal.
+            if self._has_unresolvable_error_signal(current_task=active):
                 current.unresolvable_error = True
+
+            # 5e: Apply stop precedence (skip if goal_check_broken already set).
             if current.stop_reason != "goal_check_broken":
                 self._apply_stop_precedence(state=current)
 
+            # 5f: Record history.
             current.history.append(
                 HistoryEntry(
-                    assignment_id=active_assignment.assignment_id,
-                    iteration=active_assignment.iteration,
-                    workflow_id=active_assignment.workflow_id,
-                    worker_id=active_assignment.worker_id,
-                    session_id=active_assignment.session_id,
+                    iteration=active.iteration,
+                    workflow_id=active.workflow_id,
+                    session_id=active.session_id,
                     success=success,
                     error=error,
-                    started_at=active_assignment.assigned_at,
+                    started_at=active.started_at,
                     finished_at=now,
                 )
             )
+            # 5g: Increment iteration count.
             current.iteration_count += 1
-            current.active_assignment = None
-            worker.status = "idle"
+            # 5h: Clear current task.
+            current.current_task = None
 
+            # Step 6: Special case — goal_check_broken stops immediately.
             if current.stop_reason == "goal_check_broken":
-                return current, NextActionResponse(
+                return current, TaskResponse(
                     action=STOP_ACTION, stop_reason="goal_check_broken"
                 )
 
-            response = self._dispatch_next_action(state=current, worker_id=worker_id)
-            return current, response
+            # Step 7: Check stop conditions.
+            stop_response = self._stop_response_if_needed(state=current)
+            if stop_response is not None:
+                return current, stop_response
+
+            # Step 8: Dispatch next workflow.
+            workflow = choose_next_workflow(
+                workflows=self.workflows,
+                history=current.history,
+                iteration_count=current.iteration_count,
+            )
+            if workflow is None:
+                current.stop_reason = "no_eligible_workflow"
+                current.status = "failed"
+                return current, TaskResponse(
+                    action=STOP_ACTION, stop_reason="no_eligible_workflow"
+                )
+
+            # Step 9: Set new current_task and return run response.
+            current.current_task = CurrentTask(
+                workflow_id=workflow.id,
+                session_id=current.active_session_id,
+                iteration=current.iteration_count + 1,
+                started_at=now,
+            )
+            return current, _build_run_response(
+                current_task=current.current_task,
+                config_snapshot=current.config_snapshot,
+            )
 
         return self.state_store.mutate(mutator)
 
@@ -223,87 +302,6 @@ class CoordinatorService:
         )
         self.state_store.write_state(state=state)
 
-    def _dispatch_next_action(
-        self, *, state: LoopState, worker_id: str
-    ) -> NextActionResponse:
-        worker = self._require_worker(state=state, worker_id=worker_id)
-        now = utc_now()
-        worker.last_seen_at = now
-        self._reclaim_expired_assignment(state=state, now=now)
-        stop_response = self._stop_response_if_needed(state=state)
-        if stop_response is not None:
-            worker.status = "idle"
-            return stop_response
-
-        if state.active_assignment is not None:
-            if state.active_assignment.worker_id == worker_id:
-                worker.status = "busy"
-                return self._run_response(
-                    assignment=state.active_assignment, snapshot=state.config_snapshot
-                )
-            worker.status = "idle"
-            return NextActionResponse(action=WAIT_ACTION)
-
-        workflow = choose_next_workflow(
-            workflows=self.workflows,
-            history=state.history,
-            iteration_count=state.iteration_count,
-        )
-        if workflow is None:
-            state.stop_reason = "no_eligible_workflow"
-            state.status = "failed"
-            worker.status = "idle"
-            return NextActionResponse(
-                action=STOP_ACTION, stop_reason="no_eligible_workflow"
-            )
-
-        assignment = ActiveAssignment(
-            assignment_id=str(uuid.uuid4()),
-            worker_id=worker_id,
-            session_id=state.active_session_id,
-            iteration=state.iteration_count + 1,
-            workflow_id=workflow.id,
-            assigned_at=now,
-        )
-        state.active_assignment = assignment
-        worker.status = "busy"
-        return self._run_response(assignment=assignment, snapshot=state.config_snapshot)
-
-    def _reclaim_expired_assignment(self, *, state: LoopState, now: datetime) -> None:
-        active_assignment = state.active_assignment
-        if active_assignment is None:
-            return
-        worker = state.workers.get(active_assignment.worker_id)
-        lease_deadline = active_assignment.assigned_at + timedelta(
-            seconds=active_assignment.lease_seconds
-        )
-        worker_deadline = None
-        if worker is not None:
-            worker_deadline = worker.last_seen_at + timedelta(
-                seconds=active_assignment.lease_seconds
-            )
-        if now <= lease_deadline and (
-            worker_deadline is None or now <= worker_deadline
-        ):
-            return
-        state.history.append(
-            HistoryEntry(
-                assignment_id=active_assignment.assignment_id,
-                iteration=active_assignment.iteration,
-                workflow_id=active_assignment.workflow_id,
-                worker_id=active_assignment.worker_id,
-                session_id=active_assignment.session_id,
-                success=False,
-                error="lease_expired",
-                started_at=active_assignment.assigned_at,
-                finished_at=now,
-            )
-        )
-        state.iteration_count += 1
-        if worker is not None:
-            worker.status = "idle"
-        state.active_assignment = None
-
     def _apply_stop_precedence(self, *, state: LoopState) -> str | None:
         if state.goal_met:
             state.status = "goal_met"
@@ -325,66 +323,54 @@ class CoordinatorService:
             return state.stop_reason or state.status
         return None
 
-    def _stop_response_if_needed(
-        self, *, state: LoopState
-    ) -> NextActionResponse | None:
+    def _stop_response_if_needed(self, *, state: LoopState) -> TaskResponse | None:
         stop_reason = self._apply_stop_precedence(state=state)
         if stop_reason is not None:
-            return NextActionResponse(action=STOP_ACTION, stop_reason=stop_reason)
+            return TaskResponse(action=STOP_ACTION, stop_reason=stop_reason)
         return None
 
-    def _run_response(
-        self, *, assignment: ActiveAssignment, snapshot: RootConfigSnapshot
-    ) -> NextActionResponse:
-        return NextActionResponse(
-            action="run",
-            assignment_id=assignment.assignment_id,
-            workflow_id=assignment.workflow_id,
-            session_id=assignment.session_id,
-            iteration=assignment.iteration,
-            config_snapshot=snapshot,
-        )
-
-    def _require_worker(self, *, state: LoopState, worker_id: str) -> WorkerState:
-        worker = state.workers.get(worker_id)
-        if worker is None:
-            raise KeyError(f"Unknown worker: {worker_id}")
-        return worker
-
     def _read_goal_check_signal(
-        self, *, active_assignment: ActiveAssignment
+        self, *, current_task: CurrentTask
     ) -> GoalCheckSignal | None:
         path = goal_check_path(
             repo_root=self.repo_root,
-            session_id=active_assignment.session_id,
-            iteration=active_assignment.iteration,
+            session_id=current_task.session_id,
+            iteration=current_task.iteration,
         )
         return _read_signal(path=path, model=GoalCheckSignal)
 
-    def _has_unresolvable_error_signal(
-        self, *, active_assignment: ActiveAssignment
-    ) -> bool:
+    def _has_unresolvable_error_signal(self, *, current_task: CurrentTask) -> bool:
         path = control_path(
             repo_root=self.repo_root,
-            session_id=active_assignment.session_id,
-            iteration=active_assignment.iteration,
-            workflow_id=active_assignment.workflow_id,
+            session_id=current_task.session_id,
+            iteration=current_task.iteration,
+            workflow_id=current_task.workflow_id,
         )
         signal = _read_signal(path=path, model=ControlSignal)
         return signal is not None and signal.unresolvable_error
 
-    def _has_invalid_control_output(
-        self, *, active_assignment: ActiveAssignment
-    ) -> bool:
+    def _has_invalid_control_output(self, *, current_task: CurrentTask) -> bool:
         path = control_path(
             repo_root=self.repo_root,
-            session_id=active_assignment.session_id,
-            iteration=active_assignment.iteration,
-            workflow_id=active_assignment.workflow_id,
+            session_id=current_task.session_id,
+            iteration=current_task.iteration,
+            workflow_id=current_task.workflow_id,
         )
         if not path.exists():
             return False
         return _read_signal(path=path, model=ControlSignal) is None
+
+
+def _build_run_response(
+    *, current_task: CurrentTask, config_snapshot: RootConfigSnapshot
+) -> TaskResponse:
+    return TaskResponse(
+        action="run",
+        workflow_id=current_task.workflow_id,
+        session_id=current_task.session_id,
+        iteration=current_task.iteration,
+        config_snapshot=config_snapshot,
+    )
 
 
 def _require_state(*, state: LoopState | None) -> LoopState:

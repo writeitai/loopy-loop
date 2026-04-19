@@ -56,21 +56,21 @@ loopy stop
 
 `loopy coordinator --host 0.0.0.0 --port 8080 [--resume]`
 
-- Runs the FastAPI coordinator with exactly three endpoints.
+- Runs the FastAPI coordinator with exactly two endpoints: `/register` and `/finished`.
 - On a fresh start, creates a new session directory and state file.
 - If `.loopy_loop/state.json` is terminal, archives it to `.loopy_loop/state.json.archive_<timestamp>.json` and starts fresh.
 - If `.loopy_loop/state.json` is already `running`, startup fails unless `--resume` is passed.
 
 `loopy worker --coordinator http://127.0.0.1:8080`
 
-- Registers one worker id.
-- Polls `/next` until it receives `run`, `wait`, or `stop`.
-- Loads `loopy_loop_config.yaml`, `.loopy_loop/workflows/<workflow_id>/config.yaml`, and `.loopy_loop/workflows/<workflow_id>/prompt.txt` from disk on each assignment.
+- Calls `/register` once to receive the first task.
+- Loops calling `/finished` after each completed task until it receives a `stop` response.
+- Loads `loopy_loop_config.yaml`, `.loopy_loop/workflows/<workflow_id>/config.yaml`, and `.loopy_loop/workflows/<workflow_id>/prompt.txt` from disk on each task.
 - Uses the coordinator `config_snapshot` as the execution snapshot for the session.
 
 `loopy status`
 
-- Prints current session id, iteration count, active assignment, and stop reason.
+- Prints current session id, iteration count, current task, and stop reason.
 
 `loopy stop`
 
@@ -124,17 +124,17 @@ Rules:
 
 Endpoints:
 
-- `POST /workers/register`
-- `POST /workers/{worker_id}/next`
-- `POST /workers/{worker_id}/finished`
+- `POST /register`
+- `POST /finished`
 
-`/next` returns one of:
+Both endpoints return a `TaskResponse` with `action` of either `"run"` or `"stop"`.
 
-- `{"action":"run", ...}`
-- `{"action":"wait"}`
-- `{"action":"stop","stop_reason":"..."}`
+A `run` response carries `workflow_id`, `session_id`, `iteration`, and `config_snapshot`.
+A `stop` response carries `stop_reason`.
 
-`assignment_id` identifies one leased assignment. `/finished` is idempotent by `assignment_id`: stale or duplicate calls return HTTP 200 with the current action and do not double-record history.
+Stale `/finished` calls (mismatched `session_id` or `workflow_id`) do not mutate state and
+return the current running task's response. If there is no active task, `/finished` acts
+like `/register` and dispatches the next available task.
 
 See [docs/http-contract.md](docs/http-contract.md) for the exact JSON payloads.
 

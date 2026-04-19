@@ -100,7 +100,7 @@ def init() -> None:
 @click.option("--port", default=8080, show_default=True, type=int)
 @click.option("--resume", is_flag=True, default=False)
 def coordinator(host: str, port: int, resume: bool) -> None:
-    """Run the coordinator server."""
+    """Run the coordinator server with exactly two endpoints: /register and /finished."""
     repo_root = Path.cwd()
     try:
         app = create_coordinator_app(repo_root=repo_root, resume=resume)
@@ -112,7 +112,11 @@ def coordinator(host: str, port: int, resume: bool) -> None:
 @main.command()
 @click.option("--coordinator", "coordinator_url", required=True)
 def worker(coordinator_url: str) -> None:
-    """Run a loopy-loop worker."""
+    """Run a loopy-loop worker.
+
+    Calls /register once to get the first task, then loops calling /finished
+    after each completed task until it receives a stop response.
+    """
     repo_root = Path.cwd()
     run_worker_loop(repo_root=repo_root, coordinator_url=coordinator_url)
 
@@ -128,14 +132,14 @@ def status() -> None:
     click.echo(f"status: {state.status}")
     click.echo(f"session: {state.active_session_id}")
     click.echo(f"iteration_count: {state.iteration_count}")
-    if state.active_assignment is None:
-        click.echo("active_assignment: none")
+    if state.current_task is None:
+        click.echo("current_task: none")
     else:
         click.echo(
-            "active_assignment: "
-            f"{state.active_assignment.workflow_id} "
-            f"(iteration {state.active_assignment.iteration}, "
-            f"worker {state.active_assignment.worker_id})"
+            f"current_task: {state.current_task.workflow_id} "
+            f"(iteration {state.current_task.iteration}, "
+            f"session {state.current_task.session_id}, "
+            f"started {state.current_task.started_at})"
         )
     click.echo(f"stop_reason: {state.stop_reason or 'none'}")
 

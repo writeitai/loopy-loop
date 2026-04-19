@@ -12,16 +12,18 @@ from loopy_loop.config import load_workflow_config
 from loopy_loop.config import LOOPY_DIRNAME
 from loopy_loop.harness_runner import run_harness_iteration
 from loopy_loop.harness_runner import write_iteration_artifacts
-from loopy_loop.models import DEFAULT_FINISHED_RETRY_ATTEMPTS
-from loopy_loop.models import DEFAULT_FINISHED_RETRY_BACKOFF_SECONDS
-from loopy_loop.models import DEFAULT_POLL_INTERVAL_SECONDS
 from loopy_loop.models import FinishedRequest
 from loopy_loop.models import IterationResult
-from loopy_loop.models import NextActionResponse
-from loopy_loop.models import RegisterWorkerResponse
 from loopy_loop.models import RootConfigSnapshot
+from loopy_loop.models import TaskResponse
 from loopy_loop.sessions import ensure_iteration_dir
 from loopy_loop.sessions import GOAL_CHECK_FILENAME
+
+# Internal retry constants for /finished — not configurable externally.
+# If all retries fail, the exception propagates and the process exits;
+# the next invocation recovers via the abandoned-task path in /register.
+_FINISHED_RETRY_ATTEMPTS = 2
+_FINISHED_RETRY_BACKOFF_SECONDS = 1.0
 
 
 class FatalAssignmentError(Exception):
@@ -30,123 +32,74 @@ class FatalAssignmentError(Exception):
         self.request = request
 
 
-def run_worker_loop(
-    *,
-    repo_root: Path,
-    coordinator_url: str,
-    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
-    finished_retry_attempts: int = DEFAULT_FINISHED_RETRY_ATTEMPTS,
-    finished_retry_backoff_seconds: float = DEFAULT_FINISHED_RETRY_BACKOFF_SECONDS,
-) -> None:
+def run_worker_loop(*, repo_root: Path, coordinator_url: str) -> None:
     base_url = coordinator_url.rstrip("/")
     with httpx.Client(timeout=30.0) as client:
-        worker_id = _register_worker(client=client, coordinator_url=base_url)
-        while True:
-            next_action = _post_next(
-                client=client, coordinator_url=base_url, worker_id=worker_id
-            )
-            if next_action.action == "wait":
-                time.sleep(poll_interval_seconds)
-                continue
-            if next_action.action == "stop":
-                return
+        task = _post_register(client=client, coordinator_url=base_url)
+        while task.action == "run":
             try:
-                finished_request = _run_assignment(
-                    repo_root=repo_root, next_action=next_action
-                )
+                finished_request = _run_task(repo_root=repo_root, task=task)
             except FatalAssignmentError as exc:
                 print(str(exc), file=sys.stderr)
-                _post_finished_with_retry(
-                    client=client,
-                    coordinator_url=base_url,
-                    worker_id=worker_id,
-                    request=exc.request,
-                    attempts=finished_retry_attempts,
-                    backoff_seconds=finished_retry_backoff_seconds,
+                _post_finished(
+                    client=client, coordinator_url=base_url, request=exc.request
                 )
                 sys.exit(2)
-            next_after_finish = _post_finished_with_retry(
-                client=client,
-                coordinator_url=base_url,
-                worker_id=worker_id,
-                request=finished_request,
-                attempts=finished_retry_attempts,
-                backoff_seconds=finished_retry_backoff_seconds,
+            task = _post_finished(
+                client=client, coordinator_url=base_url, request=finished_request
             )
-            if next_after_finish.action == "stop":
-                return
 
 
-def _register_worker(*, client: httpx.Client, coordinator_url: str) -> str:
-    response = client.post(f"{coordinator_url}/workers/register", json={})
+def _post_register(*, client: httpx.Client, coordinator_url: str) -> TaskResponse:
+    response = client.post(f"{coordinator_url}/register", json={})
     response.raise_for_status()
-    payload = RegisterWorkerResponse.model_validate(response.json())
-    return payload.worker_id
+    return TaskResponse.model_validate(response.json())
 
 
-def _post_next(
-    *, client: httpx.Client, coordinator_url: str, worker_id: str
-) -> NextActionResponse:
-    response = client.post(f"{coordinator_url}/workers/{worker_id}/next", json={})
-    response.raise_for_status()
-    return NextActionResponse.model_validate(response.json())
-
-
-def _post_finished_with_retry(
-    *,
-    client: httpx.Client,
-    coordinator_url: str,
-    worker_id: str,
-    request: FinishedRequest,
-    attempts: int,
-    backoff_seconds: float,
-) -> NextActionResponse:
-    for attempt in range(1, attempts + 1):
+def _post_finished(
+    *, client: httpx.Client, coordinator_url: str, request: FinishedRequest
+) -> TaskResponse:
+    for attempt in range(1, _FINISHED_RETRY_ATTEMPTS + 1):
         try:
             response = client.post(
-                f"{coordinator_url}/workers/{worker_id}/finished",
-                json=request.model_dump(),
+                f"{coordinator_url}/finished", json=request.model_dump()
             )
             response.raise_for_status()
-            return NextActionResponse.model_validate(response.json())
+            return TaskResponse.model_validate(response.json())
         except httpx.HTTPError:
             traceback.print_exc()
-            if attempt == attempts:
+            if attempt == _FINISHED_RETRY_ATTEMPTS:
                 raise
-            time.sleep(backoff_seconds * attempt)
+            time.sleep(_FINISHED_RETRY_BACKOFF_SECONDS * attempt)
     raise RuntimeError("unreachable")
 
 
-def _run_assignment(
-    *, repo_root: Path, next_action: NextActionResponse
-) -> FinishedRequest:
+def _run_task(*, repo_root: Path, task: TaskResponse) -> FinishedRequest:
     if (
-        next_action.assignment_id is None
-        or next_action.session_id is None
-        or next_action.workflow_id is None
-        or next_action.iteration is None
-        or next_action.config_snapshot is None
+        task.session_id is None
+        or task.workflow_id is None
+        or task.iteration is None
+        or task.config_snapshot is None
     ):
         raise ConfigError("Incomplete run payload from coordinator")
 
     config_snapshot = RootConfigSnapshot.model_validate(
-        next_action.config_snapshot.model_dump()
+        task.config_snapshot.model_dump()
     )
-    workflow_dir = repo_root / LOOPY_DIRNAME / "workflows" / next_action.workflow_id
+    workflow_dir = repo_root / LOOPY_DIRNAME / "workflows" / task.workflow_id
     load_workflow_config(workflow_dir=workflow_dir)
     prompt_text = (workflow_dir / "prompt.txt").read_text(encoding="utf-8")
     iteration_dir = ensure_iteration_dir(
         repo_root=repo_root,
-        session_id=next_action.session_id,
-        iteration=next_action.iteration,
-        workflow_id=next_action.workflow_id,
+        session_id=task.session_id,
+        iteration=task.iteration,
+        workflow_id=task.workflow_id,
     )
     rendered_prompt = _render_prompt(
         config_snapshot=config_snapshot,
-        assignment_id=next_action.assignment_id,
-        session_id=next_action.session_id,
-        iteration=next_action.iteration,
-        workflow_id=next_action.workflow_id,
+        session_id=task.session_id,
+        iteration=task.iteration,
+        workflow_id=task.workflow_id,
         iteration_dir=iteration_dir,
         workflow_prompt=prompt_text,
     )
@@ -173,9 +126,8 @@ def _run_assignment(
         iteration_result=iteration_result,
     )
     finished_request = FinishedRequest(
-        assignment_id=next_action.assignment_id,
-        session_id=next_action.session_id,
-        workflow_id=next_action.workflow_id,
+        session_id=task.session_id,
+        workflow_id=task.workflow_id,
         success=iteration_result.success,
         text=iteration_result.text,
         error=iteration_result.error,
@@ -188,7 +140,6 @@ def _run_assignment(
 def _render_prompt(
     *,
     config_snapshot: RootConfigSnapshot,
-    assignment_id: str,
     session_id: str,
     iteration: int,
     workflow_id: str,
@@ -205,7 +156,6 @@ def _render_prompt(
         *[f"- {item}" for item in config_snapshot.stop_criteria],
         "",
         f"Session ID: {session_id}",
-        f"Assignment ID: {assignment_id}",
         f"Iteration: {iteration}",
         f"Workflow ID: {workflow_id}",
         f"Iteration directory: {iteration_dir}",
