@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+from datetime import datetime
 from datetime import timedelta
-from pathlib import Path
 import json
+from pathlib import Path
+from typing import TypeVar
 import uuid
 
 from fastapi import FastAPI
 from fastapi import HTTPException
+from pydantic import BaseModel
 
 from loopy_loop.config import ConfigError
 from loopy_loop.config import PreflightResult
-from loopy_loop.config import RootConfig
-from loopy_loop.config import WorkflowDefinition
 from loopy_loop.config import run_preflight
 from loopy_loop.models import ActiveAssignment
 from loopy_loop.models import ControlSignal
@@ -23,13 +24,13 @@ from loopy_loop.models import NextActionResponse
 from loopy_loop.models import RegisterWorkerResponse
 from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.models import STOP_ACTION
+from loopy_loop.models import utc_now
 from loopy_loop.models import WAIT_ACTION
 from loopy_loop.models import WorkerState
-from loopy_loop.models import utc_now
 from loopy_loop.scheduler import choose_next_workflow
+from loopy_loop.sessions import control_path
 from loopy_loop.sessions import create_session_dir
 from loopy_loop.sessions import create_session_id
-from loopy_loop.sessions import control_path
 from loopy_loop.sessions import goal_check_path
 from loopy_loop.state_store import StateStore
 
@@ -38,10 +39,7 @@ def create_coordinator_app(*, repo_root: Path, resume: bool) -> FastAPI:
     preflight = run_preflight(repo_root=repo_root)
     store = StateStore(repo_root=repo_root)
     service = CoordinatorService(
-        repo_root=repo_root,
-        preflight=preflight,
-        state_store=store,
-        resume=resume,
+        repo_root=repo_root, preflight=preflight, state_store=store, resume=resume
     )
     app = FastAPI()
     app.state.service = service
@@ -85,7 +83,9 @@ class CoordinatorService:
         self._prepare_state(resume=resume)
 
     def register_worker(self) -> RegisterWorkerResponse:
-        def mutator(state: LoopState | None) -> tuple[LoopState, RegisterWorkerResponse]:
+        def mutator(
+            state: LoopState | None,
+        ) -> tuple[LoopState, RegisterWorkerResponse]:
             current = _require_state(state=state)
             now = utc_now()
             worker_id = f"worker_{uuid.uuid4().hex[:8]}"
@@ -238,8 +238,7 @@ class CoordinatorService:
             if state.active_assignment.worker_id == worker_id:
                 worker.status = "busy"
                 return self._run_response(
-                    assignment=state.active_assignment,
-                    snapshot=state.config_snapshot,
+                    assignment=state.active_assignment, snapshot=state.config_snapshot
                 )
             worker.status = "idle"
             return NextActionResponse(action=WAIT_ACTION)
@@ -269,11 +268,13 @@ class CoordinatorService:
         worker.status = "busy"
         return self._run_response(assignment=assignment, snapshot=state.config_snapshot)
 
-    def _reclaim_expired_assignment(self, *, state: LoopState, now) -> None:
+    def _reclaim_expired_assignment(self, *, state: LoopState, now: datetime) -> None:
         active_assignment = state.active_assignment
         if active_assignment is None:
             return
-        worker = self._require_worker(state=state, worker_id=active_assignment.worker_id)
+        worker = self._require_worker(
+            state=state, worker_id=active_assignment.worker_id
+        )
         lease_deadline = active_assignment.assigned_at + timedelta(
             seconds=active_assignment.lease_seconds
         )
@@ -312,7 +313,9 @@ class CoordinatorService:
             )
         return NextActionResponse(action=WAIT_ACTION)
 
-    def _stop_response_if_needed(self, *, state: LoopState) -> NextActionResponse | None:
+    def _stop_response_if_needed(
+        self, *, state: LoopState
+    ) -> NextActionResponse | None:
         if state.goal_met:
             state.status = "goal_met"
             state.stop_reason = "goal_met"
@@ -377,7 +380,9 @@ class CoordinatorService:
         signal = _read_signal(path=path, model=ControlSignal)
         return signal is not None and signal.unresolvable_error
 
-    def _has_invalid_control_output(self, *, active_assignment: ActiveAssignment) -> bool:
+    def _has_invalid_control_output(
+        self, *, active_assignment: ActiveAssignment
+    ) -> bool:
         path = control_path(
             repo_root=self.repo_root,
             session_id=active_assignment.session_id,
@@ -395,7 +400,10 @@ def _require_state(*, state: LoopState | None) -> LoopState:
     return state
 
 
-def _read_signal(path: Path, model):
+SignalModel = TypeVar("SignalModel", bound=BaseModel)
+
+
+def _read_signal(*, path: Path, model: type[SignalModel]) -> SignalModel | None:
     if not path.exists():
         return None
     try:

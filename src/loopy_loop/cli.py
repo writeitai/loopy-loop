@@ -9,6 +9,7 @@ from loopy_loop.config import ConfigError
 from loopy_loop.config import LOOPY_DIRNAME
 from loopy_loop.config import ROOT_CONFIG_FILENAME
 from loopy_loop.coordinator_app import create_coordinator_app
+from loopy_loop.models import LoopState
 from loopy_loop.state_store import StateStore
 from loopy_loop.worker import run_worker_loop
 
@@ -71,20 +72,17 @@ def init() -> None:
     created: list[str] = []
     created.extend(
         _write_if_missing(
-            path=repo_root / ROOT_CONFIG_FILENAME,
-            content=ROOT_CONFIG_TEMPLATE,
+            path=repo_root / ROOT_CONFIG_FILENAME, content=ROOT_CONFIG_TEMPLATE
         )
     )
     created.extend(
         _write_if_missing(
-            path=workflow_dir / "config.yaml",
-            content=GOAL_CHECK_CONFIG_TEMPLATE,
+            path=workflow_dir / "config.yaml", content=GOAL_CHECK_CONFIG_TEMPLATE
         )
     )
     created.extend(
         _write_if_missing(
-            path=workflow_dir / "prompt.txt",
-            content=GOAL_CHECK_PROMPT_TEMPLATE,
+            path=workflow_dir / "prompt.txt", content=GOAL_CHECK_PROMPT_TEMPLATE
         )
     )
     _ensure_gitignore(repo_root=repo_root)
@@ -148,7 +146,7 @@ def stop() -> None:
     repo_root = Path.cwd()
     store = StateStore(repo_root=repo_root)
 
-    def mutator(state):
+    def mutator(state: LoopState | None) -> tuple[LoopState, None]:
         if state is None:
             raise click.ClickException("No loopy-loop state found.")
         state.stop_requested = True

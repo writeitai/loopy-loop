@@ -50,7 +50,10 @@ def session_dir_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def iterations_dir_path(*, repo_root: Path, session_id: str) -> Path:
-    return session_dir_path(repo_root=repo_root, session_id=session_id) / ITERATIONS_DIRNAME
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id)
+        / ITERATIONS_DIRNAME
+    )
 
 
 def iteration_dir_name(*, iteration: int, workflow_id: str) -> str:
@@ -60,10 +63,9 @@ def iteration_dir_name(*, iteration: int, workflow_id: str) -> str:
 def ensure_iteration_dir(
     *, repo_root: Path, session_id: str, iteration: int, workflow_id: str
 ) -> Path:
-    iteration_dir = (
-        iterations_dir_path(repo_root=repo_root, session_id=session_id)
-        / iteration_dir_name(iteration=iteration, workflow_id=workflow_id)
-    )
+    iteration_dir = iterations_dir_path(
+        repo_root=repo_root, session_id=session_id
+    ) / iteration_dir_name(iteration=iteration, workflow_id=workflow_id)
     iteration_dir.mkdir(parents=True, exist_ok=True)
     return iteration_dir
 
@@ -71,18 +73,24 @@ def ensure_iteration_dir(
 def control_path(
     *, repo_root: Path, session_id: str, iteration: int, workflow_id: str
 ) -> Path:
-    return ensure_iteration_dir(
-        repo_root=repo_root,
-        session_id=session_id,
-        iteration=iteration,
-        workflow_id=workflow_id,
-    ) / CONTROL_FILENAME
+    return (
+        ensure_iteration_dir(
+            repo_root=repo_root,
+            session_id=session_id,
+            iteration=iteration,
+            workflow_id=workflow_id,
+        )
+        / CONTROL_FILENAME
+    )
 
 
 def goal_check_path(*, repo_root: Path, session_id: str, iteration: int) -> Path:
-    return ensure_iteration_dir(
-        repo_root=repo_root,
-        session_id=session_id,
-        iteration=iteration,
-        workflow_id="goal_check",
-    ) / GOAL_CHECK_FILENAME
+    return (
+        ensure_iteration_dir(
+            repo_root=repo_root,
+            session_id=session_id,
+            iteration=iteration,
+            workflow_id="goal_check",
+        )
+        / GOAL_CHECK_FILENAME
+    )

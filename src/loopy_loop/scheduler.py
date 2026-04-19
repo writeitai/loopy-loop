@@ -35,7 +35,17 @@ def choose_next_workflow(
             run_every=workflow.run_every,
         ):
             continue
-        eligible.append((_workflow_score(workflow_id=workflow.id, history=history, iteration_count=iteration_count, run_every=workflow.run_every), workflow))
+        eligible.append(
+            (
+                _workflow_score(
+                    workflow_id=workflow.id,
+                    history=history,
+                    iteration_count=iteration_count,
+                    run_every=workflow.run_every,
+                ),
+                workflow,
+            )
+        )
 
     if not eligible:
         return None
@@ -50,18 +60,29 @@ def _last_successful_workflow_id(*, history: list[HistoryEntry]) -> str | None:
 
 
 def _workflow_score(
-    *, workflow_id: str, history: list[HistoryEntry], iteration_count: int, run_every: int
+    *,
+    workflow_id: str,
+    history: list[HistoryEntry],
+    iteration_count: int,
+    run_every: int,
 ) -> int:
     last_entry = _last_entry_for_workflow(workflow_id=workflow_id, history=history)
     if last_entry is None:
         return 10**9
-    return _steps_since_last_run(
-        workflow_id=workflow_id, history=history, iteration_count=iteration_count
-    ) - run_every
+    return (
+        _steps_since_last_run(
+            workflow_id=workflow_id, history=history, iteration_count=iteration_count
+        )
+        - run_every
+    )
 
 
 def _run_every_satisfied(
-    *, workflow_id: str, history: list[HistoryEntry], iteration_count: int, run_every: int
+    *,
+    workflow_id: str,
+    history: list[HistoryEntry],
+    iteration_count: int,
+    run_every: int,
 ) -> bool:
     last_entry = _last_entry_for_workflow(workflow_id=workflow_id, history=history)
     if last_entry is None:

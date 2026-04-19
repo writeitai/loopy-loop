@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import Path
 import os
+from pathlib import Path
 from typing import TypeVar
 
 from filelock import FileLock
@@ -23,7 +23,10 @@ T = TypeVar("T")
 
 class StateStore:
     def __init__(
-        self, *, repo_root: Path, lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS
+        self,
+        *,
+        repo_root: Path,
+        lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
     ) -> None:
         self.repo_root = repo_root
         self.loopy_dir = repo_root / LOOPY_DIRNAME

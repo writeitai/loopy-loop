@@ -7,9 +7,9 @@ import traceback
 import httpx
 
 from loopy_loop.config import ConfigError
-from loopy_loop.config import LOOPY_DIRNAME
 from loopy_loop.config import load_root_config
 from loopy_loop.config import load_workflow_config
+from loopy_loop.config import LOOPY_DIRNAME
 from loopy_loop.harness_runner import run_harness_iteration
 from loopy_loop.harness_runner import write_iteration_artifacts
 from loopy_loop.models import DEFAULT_FINISHED_RETRY_ATTEMPTS
@@ -20,8 +20,8 @@ from loopy_loop.models import IterationResult
 from loopy_loop.models import NextActionResponse
 from loopy_loop.models import RegisterWorkerResponse
 from loopy_loop.models import RootConfigSnapshot
-from loopy_loop.sessions import GOAL_CHECK_FILENAME
 from loopy_loop.sessions import ensure_iteration_dir
+from loopy_loop.sessions import GOAL_CHECK_FILENAME
 
 
 def run_worker_loop(
@@ -45,8 +45,7 @@ def run_worker_loop(
             if next_action.action == "stop":
                 return
             finished_request = _run_assignment(
-                repo_root=repo_root,
-                next_action=next_action,
+                repo_root=repo_root, next_action=next_action
             )
             next_after_finish = _post_finished_with_retry(
                 client=client,
@@ -116,9 +115,7 @@ def _run_assignment(
     config_snapshot = RootConfigSnapshot.model_validate(
         next_action.config_snapshot.model_dump()
     )
-    workflow_dir = (
-        repo_root / LOOPY_DIRNAME / "workflows" / next_action.workflow_id
-    )
+    workflow_dir = repo_root / LOOPY_DIRNAME / "workflows" / next_action.workflow_id
     load_workflow_config(workflow_dir=workflow_dir)
     prompt_text = (workflow_dir / "prompt.txt").read_text(encoding="utf-8")
     iteration_dir = ensure_iteration_dir(
@@ -145,18 +142,12 @@ def _run_assignment(
     except ConfigError as exc:
         traceback.print_exc()
         iteration_result = IterationResult(
-            success=False,
-            text=None,
-            error=str(exc),
-            harness_run_id="",
+            success=False, text=None, error=str(exc), harness_run_id=""
         )
     except Exception as exc:
         traceback.print_exc()
         iteration_result = IterationResult(
-            success=False,
-            text=None,
-            error=str(exc),
-            harness_run_id="",
+            success=False, text=None, error=str(exc), harness_run_id=""
         )
     write_iteration_artifacts(
         iteration_dir=iteration_dir,

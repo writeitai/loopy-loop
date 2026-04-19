@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
+import re
 from typing import Any
 
 from pydantic import BaseModel
 from pydantic import Field
-from pydantic import ValidationError
 from pydantic import field_validator
+from pydantic import ValidationError
 import yaml
 
 ROOT_CONFIG_FILENAME = "loopy_loop_config.yaml"
@@ -51,9 +51,7 @@ class RootConfig(BaseModel):
     @classmethod
     def validate_goal_slug(cls, value: str) -> str:
         if GOAL_SLUG_PATTERN.fullmatch(value) is None:
-            raise ValueError(
-                "goal_slug must match ^[a-z0-9][a-z0-9_-]{0,63}$"
-            )
+            raise ValueError("goal_slug must match ^[a-z0-9][a-z0-9_-]{0,63}$")
         return value
 
     @field_validator("completion_criteria", "stop_criteria")
