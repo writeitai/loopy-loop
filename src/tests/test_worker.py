@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 
 from loopy_loop.models import IterationResult
 from loopy_loop.models import NextActionResponse
@@ -156,3 +157,83 @@ def test_worker_uses_config_snapshot_not_disk(
     _run_assignment(repo_root=repo_root, next_action=second_action)
 
     assert captured_models == ["snapshot-model", "snapshot-model"]
+
+
+def test_worker_exits_when_api_key_missing(
+    repo_builder: Any, monkeypatch: Any, snapshot_factory: Any, capsys: Any
+) -> None:
+    repo_root = repo_builder(
+        workflows={
+            "planner": {
+                "prompt": "Disk prompt body",
+                "config": {
+                    "enabled": True,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "",
+                },
+            }
+        }
+    )
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    posted_payloads: list[dict[str, object]] = []
+    responses: list[object] = [
+        {"worker_id": "worker_1"},
+        {
+            "action": "run",
+            "assignment_id": "assignment-1",
+            "workflow_id": "planner",
+            "session_id": "goal_20260419_143022_ab12cd34",
+            "iteration": 1,
+            "config_snapshot": snapshot_factory().model_dump(),
+        },
+        {"action": "stop", "stop_reason": "goal_met"},
+    ]
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+            return None
+
+        def post(self, url: str, json: dict[str, object]) -> FakeResponse:
+            if url.endswith("/finished"):
+                posted_payloads.append(json)
+            item = responses.pop(0)
+            assert isinstance(item, dict)
+            return FakeResponse(item)
+
+    monkeypatch.setattr("loopy_loop.worker.httpx.Client", FakeClient)
+
+    with pytest.raises(SystemExit) as exc_info:
+        run_worker_loop(repo_root=repo_root, coordinator_url="http://coordinator")
+
+    stderr = capsys.readouterr().err
+
+    assert exc_info.value.code == 2
+    assert posted_payloads == [
+        {
+            "assignment_id": "assignment-1",
+            "session_id": "goal_20260419_143022_ab12cd34",
+            "workflow_id": "planner",
+            "success": False,
+            "text": None,
+            "error": "Missing required environment variable: OPENROUTER_API_KEY",
+        }
+    ]
+    assert "Missing required environment variable: OPENROUTER_API_KEY" in stderr

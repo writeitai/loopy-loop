@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 import time
 import traceback
 
@@ -23,6 +24,12 @@ from loopy_loop.sessions import ensure_iteration_dir
 from loopy_loop.sessions import GOAL_CHECK_FILENAME
 
 
+class FatalAssignmentError(Exception):
+    def __init__(self, *, request: FinishedRequest, message: str) -> None:
+        super().__init__(message)
+        self.request = request
+
+
 def run_worker_loop(
     *,
     repo_root: Path,
@@ -43,9 +50,21 @@ def run_worker_loop(
                 continue
             if next_action.action == "stop":
                 return
-            finished_request = _run_assignment(
-                repo_root=repo_root, next_action=next_action
-            )
+            try:
+                finished_request = _run_assignment(
+                    repo_root=repo_root, next_action=next_action
+                )
+            except FatalAssignmentError as exc:
+                print(str(exc), file=sys.stderr)
+                _post_finished_with_retry(
+                    client=client,
+                    coordinator_url=base_url,
+                    worker_id=worker_id,
+                    request=exc.request,
+                    attempts=finished_retry_attempts,
+                    backoff_seconds=finished_retry_backoff_seconds,
+                )
+                sys.exit(2)
             next_after_finish = _post_finished_with_retry(
                 client=client,
                 coordinator_url=base_url,
@@ -131,6 +150,7 @@ def _run_assignment(
         iteration_dir=iteration_dir,
         workflow_prompt=prompt_text,
     )
+    fatal_error: str | None = None
     try:
         iteration_result = run_harness_iteration(
             repo_root=repo_root,
@@ -138,9 +158,9 @@ def _run_assignment(
             rendered_prompt=rendered_prompt,
         )
     except ConfigError as exc:
-        traceback.print_exc()
+        fatal_error = str(exc)
         iteration_result = IterationResult(
-            success=False, text=None, error=str(exc), harness_run_id=""
+            success=False, text=None, error=fatal_error, harness_run_id=""
         )
     except Exception as exc:
         traceback.print_exc()
@@ -152,7 +172,7 @@ def _run_assignment(
         rendered_prompt=rendered_prompt,
         iteration_result=iteration_result,
     )
-    return FinishedRequest(
+    finished_request = FinishedRequest(
         assignment_id=next_action.assignment_id,
         session_id=next_action.session_id,
         workflow_id=next_action.workflow_id,
@@ -160,6 +180,9 @@ def _run_assignment(
         text=iteration_result.text,
         error=iteration_result.error,
     )
+    if fatal_error is not None:
+        raise FatalAssignmentError(request=finished_request, message=fatal_error)
+    return finished_request
 
 
 def _render_prompt(
