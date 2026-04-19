@@ -8,7 +8,9 @@ from loopy_loop.coordinator_app import create_coordinator_app
 from loopy_loop.state_store import StateStore
 
 
-def test_duplicate_finished_is_idempotent(repo_builder: Any, monkeypatch: Any) -> None:
+def test_duplicate_finished_does_not_append_history_twice(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))

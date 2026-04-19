@@ -31,6 +31,38 @@ def test_init_is_idempotent(repo_root: Any, monkeypatch: Any) -> None:
     assert "already initialized" in second.output
 
 
+def test_init_preserves_existing_files_and_updates_gitignore(
+    repo_root: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.chdir(repo_root)
+    runner = CliRunner()
+    root_config = repo_root / "loopy_loop_config.yaml"
+    workflow_dir = repo_root / ".loopy_loop" / "workflows" / "goal_check"
+    workflow_dir.mkdir(parents=True, exist_ok=True)
+    goal_check_config = workflow_dir / "config.yaml"
+    goal_check_prompt = workflow_dir / "prompt.txt"
+    gitignore = repo_root / ".gitignore"
+    root_config.write_text('goal: "keep me"\n', encoding="utf-8")
+    goal_check_config.write_text("sentinel-config\n", encoding="utf-8")
+    goal_check_prompt.write_text("sentinel-prompt\n", encoding="utf-8")
+    gitignore.write_text(".loopy_loop/sessions/\nexisting-entry\n", encoding="utf-8")
+
+    result = runner.invoke(main, ["init"])
+    gitignore_lines = gitignore.read_text(encoding="utf-8").splitlines()
+
+    assert result.exit_code == 0
+    assert root_config.read_text(encoding="utf-8") == 'goal: "keep me"\n'
+    assert goal_check_config.read_text(encoding="utf-8") == "sentinel-config\n"
+    assert goal_check_prompt.read_text(encoding="utf-8") == "sentinel-prompt\n"
+    for line in [
+        ".loopy_loop/sessions/",
+        ".loopy_loop/state.json",
+        ".loopy_loop/state.json.lock",
+        ".loopy_loop/state.json.archive_*.json",
+    ]:
+        assert gitignore_lines.count(line) == 1
+
+
 def test_status_and_stop_commands(
     repo_builder: Any, monkeypatch: Any, state_factory: Any
 ) -> None:

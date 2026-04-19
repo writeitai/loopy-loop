@@ -101,6 +101,11 @@ def test_worker_reads_prompt_from_disk_and_retries_finished(
     )
     result_json = json.loads(result_path.read_text(encoding="utf-8"))
 
+    assert "loopy-loop assignment" in captured["prompt"]
+    assert "Goal: Goal" in captured["prompt"]
+    assert "Completion criteria:" in captured["prompt"]
+    assert "Stop criteria:" in captured["prompt"]
+    assert "Workflow body:" in captured["prompt"]
     assert "Disk prompt body" in captured["prompt"]
     assert captured["model"] == "gpt-test"
     assert result_json["harness_run_id"] == "run-123"

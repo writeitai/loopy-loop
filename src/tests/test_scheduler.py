@@ -79,3 +79,81 @@ def test_no_eligible_workflow_returns_none(
     )
 
     assert chosen is None
+
+
+def test_scheduler_skips_disabled_and_requires_most_recent_successful_predecessor(
+    repo_builder: Any, history_entry_factory: Any
+) -> None:
+    repo_root = repo_builder(
+        workflows={
+            "planner": {
+                "prompt": "Plan",
+                "config": {
+                    "enabled": True,
+                    "run_every": 10,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "",
+                },
+            },
+            "implement": {
+                "prompt": "Implement",
+                "config": {
+                    "enabled": True,
+                    "run_every": 1,
+                    "must_follow": "planner",
+                    "not_before_iteration": 0,
+                    "description": "",
+                },
+            },
+            "reviewer": {
+                "prompt": "Review",
+                "config": {
+                    "enabled": True,
+                    "run_every": 10,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "",
+                },
+            },
+            "disabled": {
+                "prompt": "Skip me",
+                "config": {
+                    "enabled": False,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "",
+                },
+            },
+        }
+    )
+    workflows = load_workflow_definitions(repo_root=repo_root)
+    history = [
+        history_entry_factory(iteration=1, workflow_id="planner", success=True),
+        history_entry_factory(
+            assignment_id="assignment-2",
+            iteration=2,
+            workflow_id="reviewer",
+            success=True,
+        ),
+    ]
+
+    locked = choose_next_workflow(workflows=workflows, history=history, iteration_count=2)
+    unlocked = choose_next_workflow(
+        workflows=workflows,
+        history=history
+        + [
+            history_entry_factory(
+                assignment_id="assignment-3",
+                iteration=3,
+                workflow_id="planner",
+                success=True,
+            )
+        ],
+        iteration_count=3,
+    )
+
+    assert locked is None
+    assert unlocked is not None
+    assert unlocked.id == "implement"
