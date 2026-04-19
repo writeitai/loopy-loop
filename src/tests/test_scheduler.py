@@ -139,7 +139,9 @@ def test_scheduler_skips_disabled_and_requires_most_recent_successful_predecesso
         ),
     ]
 
-    locked = choose_next_workflow(workflows=workflows, history=history, iteration_count=2)
+    locked = choose_next_workflow(
+        workflows=workflows, history=history, iteration_count=2
+    )
     unlocked = choose_next_workflow(
         workflows=workflows,
         history=history

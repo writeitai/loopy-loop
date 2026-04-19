@@ -152,12 +152,7 @@ def test_control_json_requires_schema_version(
     )
     control_path.parent.mkdir(parents=True, exist_ok=True)
     control_path.write_text(
-        json.dumps(
-            {
-                "unresolvable_error": True,
-                "reason": "missing schema version",
-            }
-        ),
+        json.dumps({"unresolvable_error": True, "reason": "missing schema version"}),
         encoding="utf-8",
     )
 
@@ -304,7 +299,11 @@ def test_goal_check_success_reads_only_current_iteration_artifact(
     [
         (None, {"goal_met": True, "stop_requested": True}, "goal_met"),
         (None, {"stop_requested": True, "unresolvable_error": True}, "stop_requested"),
-        (None, {"unresolvable_error": True, "iteration_count": 20}, "unresolvable_error"),
+        (
+            None,
+            {"unresolvable_error": True, "iteration_count": 20},
+            "unresolvable_error",
+        ),
         (None, {"iteration_count": 20}, "max_turns"),
         (
             {
