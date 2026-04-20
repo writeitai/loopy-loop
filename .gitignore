@@ -1,7 +1,11 @@
 .venv/
 __pycache__/
 *.pyc
+.idea/
+
 .loopy_loop/sessions/
 .loopy_loop/state.json
 .loopy_loop/state.json.lock
 .loopy_loop/state.json.archive_*.json
+
+.mcp.json

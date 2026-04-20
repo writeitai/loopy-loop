@@ -1,0 +1,57 @@
+# Project-level eval-banana configuration.
+
+[core]
+# Directory where run artifacts (report.json, report.md, per-check output) are
+# written. Relative paths resolve from the project root.
+# Env: EVAL_BANANA_OUTPUT_DIR
+output_dir = ".eval-banana/results"
+
+# Minimum pass ratio (0.0-1.0) for `run_passed` to be true. 1.0 means every
+# check must pass. Set lower (e.g. 0.8) to tolerate some failing checks.
+# Env: EVAL_BANANA_PASS_THRESHOLD
+pass_threshold = 1.0
+
+# Maximum characters of each target file sent to harness_judge checks. Content
+# beyond this limit is truncated with a [TRUNCATED] marker.
+# Set to 0 (the default) to disable truncation entirely — the full file
+# content is sent to the harness agent regardless of size.
+# Env: EVAL_BANANA_LLM_MAX_INPUT_CHARS
+llm_max_input_chars = 0
+
+
+[harness]
+# AI coding agent used by harness_judge checks. One of:
+#   claude, codex, gemini, openhands, opencode, pi
+# Env: EVAL_BANANA_HARNESS_AGENT
+agent = "codex"
+
+# Override the agent's default model. Format is agent-specific.
+# Env: EVAL_BANANA_HARNESS_MODEL
+model = "gpt-5.4"
+
+# Agent-specific reasoning-effort level. Common values: "low", "medium", "high".
+# Not all agents honor this. Env: EVAL_BANANA_HARNESS_REASONING_EFFORT
+reasoning_effort = "high"
+
+# Extra environment variables injected into the harness subprocess.
+# [harness.env]
+# MY_VAR = "value"
+
+# --- Built-in agent flags (applied automatically) ---
+# These flags are passed to the agent subprocess by default.
+# To override, uncomment the relevant [agents.*] section below.
+#
+# [agents.codex]
+# shared_flags = ["--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]
+#
+# [agents.gemini]
+# shared_flags = ["--approval-mode", "yolo", "--output-format", "stream-json"]
+#
+# [agents.claude]
+# shared_flags = ["-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"]
+
+
+[discovery]
+# Directories skipped when auto-discovering eval_checks/ folders. Override this
+# if your project uses a non-standard layout.
+exclude_dirs = [".git", ".hg", ".svn", ".venv", "venv", "node_modules", "__pycache__", "dist", "build"]

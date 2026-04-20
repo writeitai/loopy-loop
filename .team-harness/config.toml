@@ -1,0 +1,205 @@
+# Project-level team-harness config.
+# Values here override ~/.team-harness/config.toml.
+# Lists replace, they do not extend, the global value.
+# Do not store API keys here; prefer environment variables.
+
+[coordinator]
+# Coordinator backend: "openai_compat" or "codex" (experimental).
+provider = "codex"
+
+# Model name passed to the coordinator API.
+model = "gpt-5.4"
+
+# Base URL for the coordinator API.
+api_base = "https://openrouter.ai/api/v1"
+
+# API key — prefer OPENROUTER_API_KEY or OPENAI_API_KEY env var instead.
+# api_key = ""
+
+# Coordinator system-message, worker suffix, and worker footer files.
+coordinator_system_message_file = "coordinator_system_message.md"
+worker_suffix_file = "worker_suffix.md"
+worker_footer_file = "worker_footer.md"
+
+# Extra text appended to the system prompt for every run.
+system_prompt = ""
+
+# Base directory for per-session coordinator/worker artifacts.
+output_dir = "_outputs"
+
+# Retry budget for transient API errors (429 / 5xx).
+max_retries = 5
+
+# Maximum nesting depth for recursive th-run agents.
+max_depth = 3
+
+# Override the model's context window size (tokens). Leave commented to auto-detect.
+# context_limit = 128000
+
+# Seconds to wait for running agents on /quit or Ctrl+C before force-killing.
+shutdown_timeout_s = 10.0
+
+# Minimum lifetime before kill_agent will refuse early termination.
+min_agent_lifetime_before_kill_s = 600.0
+
+# Restrict which agent types the coordinator can spawn. Leave commented to allow all.
+# allowed_agents = ["codex", "gemini", "claude", "openhands", "opencode", "pi", "harness"]
+
+# --- Experimental Codex subscription coordinator ---
+# provider = "codex"
+# model = "codex-mini-latest"
+# codex_auth_path = ".team-harness/codex-auth.json"
+
+# Worker agent invocations. Each agent is described as a structured
+# command: a base `command` list, `shared_flags` that are always applied,
+# `resume_flags` that are applied only when resuming a previous session,
+# and a `session_capture` sub-table describing how the harness extracts
+# the provider's session id from the worker's stream-json output.
+#
+# These blocks override the built-in defaults. Any field you omit falls
+# back to the corresponding built-in default for that agent type (so, for
+# example, a custom `[agents.codex]` that only sets `model_flag` keeps all
+# other fields from the default codex template).
+#
+# Custom (non-built-in) agent types must set at least `command`.
+
+# Codex worker. `--json` is required so the harness can parse the initial
+# `thread.started` event and capture the session id for future resume.
+# `default_model` is the model passed to codex when the coordinator does
+# not override it via `spawn_agent(model="...")`.
+# `reasoning_effort_flag` tells the harness how to pass the level; set
+# `reasoning_effort` (commented) to actually enable it.
+[agents.codex]
+command = ["codex", "exec"]
+shared_flags = [
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--skip-git-repo-check",
+    "--json",
+]
+resume_prefix = ["resume"]
+resume_flags = ["{session_id}"]
+model_flag = "--model"
+default_model = "gpt-5.4"
+reasoning_effort_flag = ["-c", "model_reasoning_effort={effort}"]
+# reasoning_effort = "high"   # uncomment to pin a level (low|medium|high|xhigh)
+
+[agents.codex.session_capture]
+strategy = "stream_json_event"
+match = { type = "thread.started" }
+field_path = ["thread_id"]
+
+# --- OpenRouter recipe for Codex ---------------------------------------
+# By default the codex worker talks to its native provider (the one codex
+# is logged in to). To route codex through OpenRouter instead, export
+# OPENROUTER_API_KEY in your shell and override just `shared_flags` and
+# `default_model` on the [agents.codex] block above with the values
+# below — everything else (command, resume_*, model_flag, session_capture,
+# reasoning_effort_flag) stays as the default. Codex reads
+# OPENROUTER_API_KEY directly via the env_key setting, so no
+# provider_env is needed.
+#
+# shared_flags = [
+#     "--dangerously-bypass-approvals-and-sandbox",
+#     "--skip-git-repo-check",
+#     "--json",
+#     "-c", "model_provider=openrouter",
+#     "-c", 'model_providers.openrouter.name="openrouter"',
+#     "-c", 'model_providers.openrouter.base_url="https://openrouter.ai/api/v1"',
+#     "-c", 'model_providers.openrouter.env_key="OPENROUTER_API_KEY"',
+# ]
+# default_model = "openai/gpt-5.3-codex"    # OpenRouter-flavoured model name
+# -----------------------------------------------------------------------
+
+
+
+# Gemini worker. `stream-json` gives us a parseable session id in the
+# initial `init` event.
+[agents.gemini]
+command = ["gemini"]
+shared_flags = ["--approval-mode", "yolo", "--output-format", "stream-json"]
+resume_flags = ["--resume", "{session_id}"]
+prompt_flag = "-p"
+model_flag = "--model"
+
+[agents.gemini.session_capture]
+strategy = "stream_json_event"
+match = { type = "init" }
+field_path = ["session_id"]
+
+
+
+# Claude Code worker. `--verbose` is mandatory when `-p` and
+# `--output-format stream-json` are combined (Claude CLI requirement).
+# Claude reads its model from several env vars, not just --model. We
+# set the three "main model" vars together (ANTHROPIC_MODEL plus the
+# opus/sonnet alias resolvers) so overriding the model is deterministic
+# across all of Claude Code's internal code paths. We deliberately do
+# NOT set ANTHROPIC_DEFAULT_HAIKU_MODEL / ANTHROPIC_SMALL_FAST_MODEL /
+# CLAUDE_CODE_SUBAGENT_MODEL so cheap auxiliary helpers stay cheap.
+# `default_model` is left unset by default — configure per-project.
+[agents.claude]
+command = ["claude"]
+shared_flags = [
+    "-p",
+    "--dangerously-skip-permissions",
+    "--output-format", "stream-json",
+    "--verbose",
+]
+resume_flags = ["--resume", "{session_id}"]
+model_flag = "--model"
+model_env_vars = [
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+]
+reasoning_effort_flag = ["--effort", "{effort}"]
+# default_model = "claude-sonnet-4-6"   # uncomment to pin a default
+# reasoning_effort = "high"              # values: low|medium|high|max
+
+[agents.claude.session_capture]
+strategy = "stream_json_event"
+match = { type = "system", subtype = "init" }
+field_path = ["session_id"]
+
+# --- OpenRouter recipe for Claude Code ---------------------------------
+# By default the claude worker talks to native Anthropic (or whichever
+# provider your existing ANTHROPIC_* shell env points at). To route
+# claude through OpenRouter instead, export OPENROUTER_API_KEY in your
+# shell and uncomment the provider_env block below. The
+# `{env:OPENROUTER_API_KEY}` placeholder is resolved at spawn time from
+# the parent environment so no secret lives in this file.
+# `ANTHROPIC_API_KEY` MUST be set to the empty string so Claude Code
+# does not short-circuit to native Anthropic auth. Also uncomment
+# `default_model` above and point it at an OpenRouter-flavoured model
+# name like "anthropic/claude-opus-4.6".
+#
+# [agents.claude.provider_env]
+# ANTHROPIC_BASE_URL = "https://openrouter.ai/api"
+# ANTHROPIC_AUTH_TOKEN = "{env:OPENROUTER_API_KEY}"
+# ANTHROPIC_API_KEY = ""
+# -----------------------------------------------------------------------
+
+# OpenHands worker. `--override-with-envs` is required or `LLM_MODEL`
+# is ignored by OpenHands-CLI. `session_capture` is intentionally
+# omitted: `--json` emits multi-line pretty JSON blocks delimited by
+# `--JSON Event--`, which the harness cannot parse as stream-json today.
+# That also means resume is not wired up for this worker.
+[agents.openhands]
+command = ["openhands"]
+shared_flags = ["--headless", "--json", "--override-with-envs"]
+prompt_flag = "-t"
+model_env_vars = ["LLM_MODEL"]
+
+[agents.opencode]
+command = ["opencode"]
+
+
+
+[agents.pi]
+command = ["pi", "--print", "--no-session"]
+
+
+
+[agents.harness]
+command = ["th", "run"]
+model_flag = "--model"
