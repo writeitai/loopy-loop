@@ -101,7 +101,7 @@ Rules:
 
 - `goal_slug` must match `^[a-z0-9][a-z0-9_-]{0,63}$`
 - `api_base` is normalized by loopy-loop: trailing slash stripped, `/v1` appended when missing
-- `api_key_env` must be set during coordinator preflight and again in the worker before `Harness(...)`
+- `api_key_env` must be set during coordinator preflight and again in the worker before `TeamHarness(...)`
 
 Workflow config:
 
@@ -140,7 +140,7 @@ See [docs/http-contract.md](docs/http-contract.md) for the exact JSON payloads.
 
 ## Session Continuity
 
-Every `Harness.run()` call is fresh. Continuity comes from:
+Every `TeamHarness.run()` call is fresh. Continuity comes from:
 
 - git state in the target repo
 - `.loopy_loop/sessions/<session_id>/...` artifacts

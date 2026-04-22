@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from team_harness import HarnessError
-from team_harness import HarnessResult
+from team_harness import TeamHarnessError
+from team_harness import TeamHarnessResult
 
 from loopy_loop.harness_runner import run_harness_iteration
 from loopy_loop.harness_runner import write_iteration_artifacts
@@ -20,9 +20,9 @@ def test_harness_runner_normalizes_success(
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
 
-        async def run(self, task: str) -> HarnessResult:
+        async def run(self, task: str) -> TeamHarnessResult:
             assert task == "rendered prompt"
-            return HarnessResult(text="done", agents=[], run_id="run-123")
+            return TeamHarnessResult(text="done", agents=[], run_id="run-123")
 
     result = run_harness_iteration(
         repo_root=repo_root,
@@ -52,9 +52,9 @@ def test_harness_runner_passes_normalized_constructor_kwargs(
         def __init__(self, **kwargs: Any) -> None:
             captured.update(kwargs)
 
-        async def run(self, task: str) -> HarnessResult:
+        async def run(self, task: str) -> TeamHarnessResult:
             assert task == "rendered prompt"
-            return HarnessResult(text="done", agents=[], run_id="run-123")
+            return TeamHarnessResult(text="done", agents=[], run_id="run-123")
 
     run_harness_iteration(
         repo_root=repo_root,
@@ -89,8 +89,8 @@ def test_harness_runner_normalizes_harness_error(
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
 
-        async def run(self, task: str) -> HarnessResult:
-            raise HarnessError("boom")
+        async def run(self, task: str) -> TeamHarnessResult:
+            raise TeamHarnessError("boom")
 
     result = run_harness_iteration(
         repo_root=repo_root,

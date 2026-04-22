@@ -7,9 +7,9 @@ import traceback
 from typing import Callable
 from typing import Protocol
 
-from team_harness import Harness
-from team_harness import HarnessError
-from team_harness import HarnessResult
+from team_harness import TeamHarness
+from team_harness import TeamHarnessError
+from team_harness import TeamHarnessResult
 
 from loopy_loop.config import ConfigError
 from loopy_loop.config import normalize_api_base
@@ -23,8 +23,8 @@ from loopy_loop.sessions import RESULT_FILENAME
 from loopy_loop.sessions import RESULT_TEXT_FILENAME
 
 
-class HarnessLike(Protocol):
-    async def run(self, task: str) -> HarnessResult: ...
+class TeamHarnessLike(Protocol):
+    async def run(self, task: str) -> TeamHarnessResult: ...
 
 
 def run_harness_iteration(
@@ -32,7 +32,7 @@ def run_harness_iteration(
     repo_root: Path,
     config_snapshot: RootConfigSnapshot,
     rendered_prompt: str,
-    harness_factory: Callable[..., HarnessLike] = Harness,
+    harness_factory: Callable[..., TeamHarnessLike] = TeamHarness,
 ) -> IterationResult:
     root_config = RootConfig.model_validate(config_snapshot.model_dump())
     resolved_api_key = resolve_api_key(config=root_config)
@@ -50,7 +50,7 @@ def run_harness_iteration(
         result = asyncio.run(harness.run(task=rendered_prompt))
     except ConfigError:
         raise
-    except HarnessError as exc:
+    except TeamHarnessError as exc:
         traceback.print_exc()
         return IterationResult(
             success=False, text=None, error=str(exc), harness_run_id=""
@@ -80,7 +80,7 @@ def write_iteration_artifacts(
     )
 
 
-def _normalize_harness_result(*, result: HarnessResult) -> IterationResult:
+def _normalize_harness_result(*, result: TeamHarnessResult) -> IterationResult:
     return IterationResult(
         success=True, text=result.text, error=None, harness_run_id=result.run_id
     )
