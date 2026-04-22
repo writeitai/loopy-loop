@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from pydantic import BaseModel
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import field_validator
 from pydantic import ValidationError
@@ -16,6 +17,7 @@ LOOPY_DIRNAME = ".loopy_loop"
 WORKFLOWS_DIRNAME = "workflows"
 GOAL_SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 DEFAULT_GOAL_CHECK_FAILURE_CAP = 3
+DEFAULT_PROVIDER = "openai_compat"
 DEFAULT_MODEL = "gpt-5.4"
 DEFAULT_AGENTS = ["codex"]
 DEFAULT_API_BASE = "https://openrouter.ai/api/v1"
@@ -33,6 +35,8 @@ class ConfigError(Exception):
 
 
 class RootConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     goal: str
     goal_slug: str
     completion_criteria: list[str]
@@ -41,11 +45,14 @@ class RootConfig(BaseModel):
     goal_check_consecutive_failures_cap: int = Field(
         default=DEFAULT_GOAL_CHECK_FAILURE_CAP, ge=1
     )
+    team_harness_provider: str = Field(default=DEFAULT_PROVIDER)
     team_harness_model: str = Field(default=DEFAULT_MODEL)
     team_harness_agents: list[str] = Field(default_factory=lambda: list(DEFAULT_AGENTS))
     team_harness_api_base: str = Field(default=DEFAULT_API_BASE)
     team_harness_api_key_env: str = Field(default=DEFAULT_API_KEY_ENV)
-    team_harness_system_prompt_extension: str = Field(default=DEFAULT_SYSTEM_PROMPT_EXTENSION)
+    team_harness_system_prompt_extension: str = Field(
+        default=DEFAULT_SYSTEM_PROMPT_EXTENSION
+    )
 
     @field_validator("goal_slug")
     @classmethod
@@ -68,6 +75,8 @@ class RootConfig(BaseModel):
 
 
 class WorkflowConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = Field(default=DEFAULT_WORKFLOW_ENABLED)
     run_every: int = Field(default=DEFAULT_WORKFLOW_RUN_EVERY, ge=1)
     must_follow: str | None = Field(default=DEFAULT_WORKFLOW_MUST_FOLLOW)

@@ -5,6 +5,7 @@ from datetime import UTC
 from typing import Literal
 
 from pydantic import BaseModel
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import field_validator
 
@@ -20,12 +21,15 @@ def utc_now() -> datetime:
 
 
 class RootConfigSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     goal: str = Field(...)
     goal_slug: str = Field(...)
     completion_criteria: list[str] = Field(...)
     stop_criteria: list[str] = Field(...)
     max_turns: int = Field(...)
     goal_check_consecutive_failures_cap: int = Field(...)
+    team_harness_provider: str = Field(...)
     team_harness_model: str = Field(...)
     team_harness_agents: list[str] = Field(...)
     team_harness_api_base: str = Field(...)

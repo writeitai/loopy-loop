@@ -37,7 +37,7 @@ def run_harness_iteration(
     root_config = RootConfig.model_validate(config_snapshot.model_dump())
     resolved_api_key = resolve_api_key(config=root_config)
     harness = harness_factory(
-        provider="openai_compat",
+        provider=config_snapshot.team_harness_provider,
         model=config_snapshot.team_harness_model,
         api_base=normalize_api_base(value=config_snapshot.team_harness_api_base),
         api_key=resolved_api_key,

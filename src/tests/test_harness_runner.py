@@ -59,6 +59,7 @@ def test_harness_runner_passes_normalized_constructor_kwargs(
     run_harness_iteration(
         repo_root=repo_root,
         config_snapshot=snapshot_factory(
+            team_harness_provider="codex",
             team_harness_model="snapshot-model",
             team_harness_agents=["codex", "reviewer"],
             team_harness_api_base="https://openrouter.ai/api",
@@ -69,7 +70,7 @@ def test_harness_runner_passes_normalized_constructor_kwargs(
     )
 
     assert captured == {
-        "provider": "openai_compat",
+        "provider": "codex",
         "model": "snapshot-model",
         "api_base": "https://openrouter.ai/api/v1",
         "api_key": "secret",
