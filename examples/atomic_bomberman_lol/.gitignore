@@ -1,0 +1,4 @@
+.loopy_loop/sessions/
+.loopy_loop/state.json
+.loopy_loop/state.json.lock
+.loopy_loop/state.json.archive_*.json
