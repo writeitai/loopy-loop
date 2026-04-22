@@ -40,7 +40,7 @@ One session directory is created per fresh coordinator run and reused for all it
 
 `prompt.txt`
 
-- The rendered assignment prompt sent to `Harness.run(task=...)`
+- The rendered assignment prompt sent to `TeamHarness.run(task=...)`
 
 `result.json`
 
