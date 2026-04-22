@@ -31,6 +31,7 @@ stop_criteria:
   - "The repo requires a missing secret or external dependency the agent cannot obtain"
 max_turns: 20
 goal_check_consecutive_failures_cap: 3
+team_harness_provider: "openai_compat"
 team_harness_model: "gpt-5.4"
 team_harness_agents:
   - "codex"

@@ -72,3 +72,31 @@ def test_missing_api_key_env_is_reported(repo_builder: Any, monkeypatch: Any) ->
 
     with pytest.raises(ConfigError, match="Missing required environment variable"):
         run_preflight(repo_root=repo_root)
+
+
+def test_unknown_root_config_field_rejected(repo_builder: Any) -> None:
+    repo_root = repo_builder(root_config={"model": "typo-should-be-team-harness-model"})
+
+    with pytest.raises(ConfigError, match="model"):
+        load_root_config(repo_root=repo_root)
+
+
+def test_unknown_workflow_config_field_rejected(repo_builder: Any) -> None:
+    repo_root = repo_builder(
+        workflows={
+            "planner": {
+                "prompt": "Prompt",
+                "config": {
+                    "enabled": True,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "",
+                    "unknown_key": "value",
+                },
+            }
+        }
+    )
+
+    with pytest.raises(ConfigError, match="unknown_key"):
+        load_workflow_definitions(repo_root=repo_root)

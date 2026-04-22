@@ -22,6 +22,7 @@ stop_criteria:
   - "Three consecutive goal_check outputs are invalid or unreadable (handled automatically by goal_check_consecutive_failures_cap)"
 max_turns: 60
 goal_check_consecutive_failures_cap: 3
+team_harness_provider: "codex"
 team_harness_model: "gpt-5.4"
 team_harness_agents:
   - "codex"
