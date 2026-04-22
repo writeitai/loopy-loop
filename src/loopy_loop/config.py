@@ -18,6 +18,7 @@ WORKFLOWS_DIRNAME = "workflows"
 GOAL_SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 DEFAULT_GOAL_CHECK_FAILURE_CAP = 3
 DEFAULT_PROVIDER = "openai_compat"
+PROVIDERS_WITHOUT_API_KEY: frozenset[str] = frozenset({"codex"})
 DEFAULT_MODEL = "gpt-5.4"
 DEFAULT_AGENTS = ["codex"]
 DEFAULT_API_BASE = "https://openrouter.ai/api/v1"
@@ -166,7 +167,9 @@ def validate_workflow_graph(*, workflows: list[WorkflowDefinition]) -> None:
         raise ConfigError(f"Workflow graph validation failed:\n{joined}")
 
 
-def resolve_api_key(*, config: RootConfig) -> str:
+def resolve_api_key(*, config: RootConfig) -> str | None:
+    if config.team_harness_provider in PROVIDERS_WITHOUT_API_KEY:
+        return None
     value = os.environ.get(config.team_harness_api_key_env)
     if not value:
         raise ConfigError(

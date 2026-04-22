@@ -74,6 +74,17 @@ def test_missing_api_key_env_is_reported(repo_builder: Any, monkeypatch: Any) ->
         run_preflight(repo_root=repo_root)
 
 
+def test_codex_provider_does_not_require_api_key_env(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    repo_root = repo_builder(root_config={"team_harness_provider": "codex"})
+
+    preflight = run_preflight(repo_root=repo_root)
+
+    assert preflight.root_config.team_harness_provider == "codex"
+
+
 def test_unknown_root_config_field_rejected(repo_builder: Any) -> None:
     repo_root = repo_builder(root_config={"model": "typo-should-be-team-harness-model"})
 
