@@ -59,10 +59,10 @@ def test_harness_runner_passes_normalized_constructor_kwargs(
     run_harness_iteration(
         repo_root=repo_root,
         config_snapshot=snapshot_factory(
-            model="snapshot-model",
-            agents=["codex", "reviewer"],
-            api_base="https://openrouter.ai/api",
-            system_prompt_extension="extra instructions",
+            team_harness_model="snapshot-model",
+            team_harness_agents=["codex", "reviewer"],
+            team_harness_api_base="https://openrouter.ai/api",
+            team_harness_system_prompt_extension="extra instructions",
         ),
         rendered_prompt="rendered prompt",
         harness_factory=FakeHarness,

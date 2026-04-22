@@ -18,7 +18,7 @@ def test_load_root_config_and_workflows(repo_builder: Any, monkeypatch: Any) -> 
     workflows = load_workflow_definitions(repo_root=repo_root)
     preflight = run_preflight(repo_root=repo_root)
 
-    assert root_config.api_base == "https://openrouter.ai/api/v1"
+    assert root_config.team_harness_api_base == "https://openrouter.ai/api/v1"
     assert [workflow.id for workflow in workflows] == ["goal_check", "planner"]
     assert preflight.root_config.goal_slug == "ship-landing-page"
 

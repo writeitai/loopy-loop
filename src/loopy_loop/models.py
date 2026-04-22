@@ -26,11 +26,11 @@ class RootConfigSnapshot(BaseModel):
     stop_criteria: list[str] = Field(...)
     max_turns: int = Field(...)
     goal_check_consecutive_failures_cap: int = Field(...)
-    model: str = Field(...)
-    agents: list[str] = Field(...)
-    api_base: str = Field(...)
-    api_key_env: str = Field(...)
-    system_prompt_extension: str = Field(...)
+    team_harness_model: str = Field(...)
+    team_harness_agents: list[str] = Field(...)
+    team_harness_api_base: str = Field(...)
+    team_harness_api_key_env: str = Field(...)
+    team_harness_system_prompt_extension: str = Field(...)
 
 
 class CurrentTask(BaseModel):

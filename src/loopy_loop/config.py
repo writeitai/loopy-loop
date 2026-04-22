@@ -41,11 +41,11 @@ class RootConfig(BaseModel):
     goal_check_consecutive_failures_cap: int = Field(
         default=DEFAULT_GOAL_CHECK_FAILURE_CAP, ge=1
     )
-    model: str = Field(default=DEFAULT_MODEL)
-    agents: list[str] = Field(default_factory=lambda: list(DEFAULT_AGENTS))
-    api_base: str = Field(default=DEFAULT_API_BASE)
-    api_key_env: str = Field(default=DEFAULT_API_KEY_ENV)
-    system_prompt_extension: str = Field(default=DEFAULT_SYSTEM_PROMPT_EXTENSION)
+    team_harness_model: str = Field(default=DEFAULT_MODEL)
+    team_harness_agents: list[str] = Field(default_factory=lambda: list(DEFAULT_AGENTS))
+    team_harness_api_base: str = Field(default=DEFAULT_API_BASE)
+    team_harness_api_key_env: str = Field(default=DEFAULT_API_KEY_ENV)
+    team_harness_system_prompt_extension: str = Field(default=DEFAULT_SYSTEM_PROMPT_EXTENSION)
 
     @field_validator("goal_slug")
     @classmethod
@@ -61,7 +61,7 @@ class RootConfig(BaseModel):
             raise ValueError("list must not be empty")
         return value
 
-    @field_validator("api_base")
+    @field_validator("team_harness_api_base")
     @classmethod
     def normalize_api_base_value(cls, value: str) -> str:
         return normalize_api_base(value=value)
@@ -158,10 +158,10 @@ def validate_workflow_graph(*, workflows: list[WorkflowDefinition]) -> None:
 
 
 def resolve_api_key(*, config: RootConfig) -> str:
-    value = os.environ.get(config.api_key_env)
+    value = os.environ.get(config.team_harness_api_key_env)
     if not value:
         raise ConfigError(
-            f"Missing required environment variable: {config.api_key_env}"
+            f"Missing required environment variable: {config.team_harness_api_key_env}"
         )
     return value
 

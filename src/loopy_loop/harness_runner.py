@@ -38,11 +38,11 @@ def run_harness_iteration(
     resolved_api_key = resolve_api_key(config=root_config)
     harness = harness_factory(
         provider="openai_compat",
-        model=config_snapshot.model,
-        api_base=normalize_api_base(value=config_snapshot.api_base),
+        model=config_snapshot.team_harness_model,
+        api_base=normalize_api_base(value=config_snapshot.team_harness_api_base),
         api_key=resolved_api_key,
-        agents=config_snapshot.agents,
-        system_prompt=config_snapshot.system_prompt_extension,
+        agents=config_snapshot.team_harness_agents,
+        system_prompt=config_snapshot.team_harness_system_prompt_extension,
         cwd=str(repo_root),
         console_mode="silent",
     )

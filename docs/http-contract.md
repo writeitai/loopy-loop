@@ -21,11 +21,11 @@ Run response:
     "stop_criteria": ["A workflow writes an unresolvable error flag"],
     "max_turns": 20,
     "goal_check_consecutive_failures_cap": 3,
-    "model": "gpt-5.4",
-    "agents": ["codex"],
-    "api_base": "https://openrouter.ai/api/v1",
-    "api_key_env": "OPENROUTER_API_KEY",
-    "system_prompt_extension": ""
+    "team_harness_model": "gpt-5.4",
+    "team_harness_agents": ["codex"],
+    "team_harness_api_base": "https://openrouter.ai/api/v1",
+    "team_harness_api_key_env": "OPENROUTER_API_KEY",
+    "team_harness_system_prompt_extension": ""
   },
   "stop_reason": null
 }
