@@ -59,7 +59,7 @@ def test_harness_runner_passes_normalized_constructor_kwargs(
     run_harness_iteration(
         repo_root=repo_root,
         config_snapshot=snapshot_factory(
-            team_harness_provider="codex",
+            team_harness_provider="openai_compat",
             team_harness_model="snapshot-model",
             team_harness_agents=["codex", "reviewer"],
             team_harness_api_base="https://openrouter.ai/api",
@@ -70,7 +70,7 @@ def test_harness_runner_passes_normalized_constructor_kwargs(
     )
 
     assert captured == {
-        "provider": "codex",
+        "provider": "openai_compat",
         "model": "snapshot-model",
         "api_base": "https://openrouter.ai/api/v1",
         "api_key": "secret",
@@ -79,6 +79,30 @@ def test_harness_runner_passes_normalized_constructor_kwargs(
         "cwd": str(repo_root),
         "console_mode": "silent",
     }
+
+
+def test_harness_runner_passes_none_api_key_for_codex_provider(
+    repo_root: Any, snapshot_factory: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    captured: dict[str, Any] = {}
+
+    class FakeHarness:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        async def run(self, task: str) -> TeamHarnessResult:
+            return TeamHarnessResult(text="done", agents=[], run_id="run-123")
+
+    run_harness_iteration(
+        repo_root=repo_root,
+        config_snapshot=snapshot_factory(team_harness_provider="codex"),
+        rendered_prompt="rendered prompt",
+        harness_factory=FakeHarness,
+    )
+
+    assert captured["provider"] == "codex"
+    assert captured["api_key"] is None
 
 
 def test_harness_runner_normalizes_harness_error(
