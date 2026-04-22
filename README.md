@@ -78,7 +78,7 @@ loopy stop
 
 ## Config Reference
 
-Root config:
+Root config (`loopy_loop_config.yaml` at the repo root):
 
 ```yaml
 goal: "Ship a minimal working landing page"
