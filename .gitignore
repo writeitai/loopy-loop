@@ -9,3 +9,5 @@ __pycache__/
 .loopy_loop/state.json.archive_*.json
 
 .mcp.json
+_feature_planning/
+_outputs/
