@@ -1,0 +1,28 @@
+Evaluate whether the repo now satisfies the loopy-loop goal for the
+multiplayer Atomic-Bomberman-inspired game.
+
+Before deciding, confirm each completion criterion from
+`loopy_loop_config.yaml` by inspecting the repo:
+- Run the documented local-run command (e.g. `make run`, `npm run dev`) if
+  one exists and is safe to invoke non-interactively, OR read the scripts
+  section of `package.json` / `Makefile` to verify the entrypoint exists.
+- Read `README.md`, `docs/characters.md`, and any test files to confirm the
+  criteria are actually backed by code, not just claims in documentation.
+- Run the project's test suite if one is configured. A passing suite is a
+  strong positive signal; a failing suite means the goal is not yet met.
+
+Err on the side of "not met". A single criterion failing means `goal_met`
+must be false. If the repo is empty or bootstrap is incomplete, `goal_met`
+is obviously false.
+
+Write exactly one JSON file to the goal_check.json output path provided in
+your working-area contract. The content must be exactly:
+
+{
+  "goal_met": <true | false>,
+  "reason": "<one concise sentence citing which criteria are met and which are not>",
+  "schema_version": 1
+}
+
+Do not modify any other files. Do not commit. Do not run destructive
+commands. Your only output is the JSON signal.

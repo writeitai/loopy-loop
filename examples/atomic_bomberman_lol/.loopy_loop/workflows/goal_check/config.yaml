@@ -1,0 +1,8 @@
+enabled: true
+run_every: 1
+must_follow: execution
+not_before_iteration: 1
+description: |
+  Evaluate whether the repo satisfies the goal's completion_criteria. Runs
+  after every successful execution iteration so we check at most once per
+  completed unit of work.

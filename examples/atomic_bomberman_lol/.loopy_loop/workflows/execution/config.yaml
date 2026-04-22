@@ -1,0 +1,8 @@
+enabled: true
+run_every: 1
+must_follow: planning
+not_before_iteration: 1
+description: |
+  Implement the first unchecked task from PLAN.md, run project checks, commit
+  the change, and mark the task done. Runs only after a successful planning
+  iteration so there is always a concrete task queued up.
