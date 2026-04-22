@@ -50,7 +50,9 @@ class RootConfig(BaseModel):
     team_harness_agents: list[str] = Field(default_factory=lambda: list(DEFAULT_AGENTS))
     team_harness_api_base: str = Field(default=DEFAULT_API_BASE)
     team_harness_api_key_env: str = Field(default=DEFAULT_API_KEY_ENV)
-    team_harness_system_prompt_extension: str = Field(default=DEFAULT_SYSTEM_PROMPT_EXTENSION)
+    team_harness_system_prompt_extension: str = Field(
+        default=DEFAULT_SYSTEM_PROMPT_EXTENSION
+    )
 
     @field_validator("goal_slug")
     @classmethod
