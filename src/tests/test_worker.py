@@ -24,7 +24,7 @@ def _make_run_response(
         "workflow_id": workflow_id,
         "session_id": session_id,
         "iteration": iteration,
-        "config_snapshot": snapshot_factory(model=model).model_dump(),
+        "config_snapshot": snapshot_factory(team_harness_model=model).model_dump(),
         "stop_reason": None,
     }
 
@@ -161,7 +161,7 @@ def test_worker_uses_config_snapshot_not_disk(
     repo_builder: Any, monkeypatch: Any, snapshot_factory: Any
 ) -> None:
     repo_root = repo_builder(
-        root_config={"model": "disk-model"},
+        root_config={"team_harness_model": "disk-model"},
         workflows={
             "planner": {
                 "prompt": "Disk prompt body",
@@ -179,7 +179,7 @@ def test_worker_uses_config_snapshot_not_disk(
     captured_models: list[str] = []
 
     def fake_run_harness_iteration(**kwargs: Any) -> IterationResult:
-        captured_models.append(kwargs["config_snapshot"].model)
+        captured_models.append(kwargs["config_snapshot"].team_harness_model)
         return IterationResult(success=True, text="ok", error=None, harness_run_id="r1")
 
     monkeypatch.setattr(
