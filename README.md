@@ -4,7 +4,7 @@
 
 - A FastAPI coordinator owns loop state in `.loopy_loop/state.json`.
 - One or more blocking workers poll the coordinator over HTTP.
-- Each assignment loads workflow files from disk, runs `team_harness.Harness`, writes iteration artifacts under `.loopy_loop/sessions/<session_id>/iterations/`, and reports completion back to the coordinator.
+- Each assignment loads workflow files from disk, runs `team_harness.TeamHarness`, writes iteration artifacts under `.loopy_loop/sessions/<session_id>/iterations/`, and reports completion back to the coordinator.
 
 ## Install
 
