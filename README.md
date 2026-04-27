@@ -18,6 +18,18 @@ Or:
 uv pip install .
 ```
 
+## Skills
+
+This repo ships an [Agent Skill](https://support.claude.com/en/articles/12512176-what-are-skills)
+that teaches Claude Code, Codex, and other compatible agents how to set up and
+run loopy-loop in a target repo. Install it with:
+
+```bash
+npx skills add https://github.com/writeitai/loopy-loop --skill loopy-loop
+```
+
+The skill source lives under [`skills/loopy-loop/`](./skills/loopy-loop/SKILL.md).
+
 ## Repo Layout
 
 ```text
