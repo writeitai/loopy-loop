@@ -13,6 +13,9 @@ SESSION_METADATA_FILENAME = "session.json"
 EVENTS_FILENAME = "events.jsonl"
 PROJECT_STATE_DIRNAME = "project_state"
 EVAL_CHECKS_DIRNAME = "eval_checks"
+HARNESS_OUTPUTS_DIRNAME = "harness_outputs"
+UPDATES_FROM_USER_FILENAME = "updates_from_user.md"
+FINISHED_FILENAME = "finished.md"
 PROMPT_FILENAME = "prompt.txt"
 RESULT_FILENAME = "result.json"
 RESULT_TEXT_FILENAME = "result_text.txt"
@@ -41,6 +44,21 @@ def create_session_dir(*, repo_root: Path, session_id: str, goal_hash: str) -> P
     events_path = session_dir / EVENTS_FILENAME
     if not events_path.exists():
         events_path.write_text("", encoding="utf-8")
+    updates_path = updates_from_user_path(repo_root=repo_root, session_id=session_id)
+    if not updates_path.exists():
+        updates_path.write_text("", encoding="utf-8")
+    project_state_dir_path(repo_root=repo_root, session_id=session_id).mkdir(
+        parents=True, exist_ok=True
+    )
+    finished = finished_path(repo_root=repo_root, session_id=session_id)
+    if not finished.exists():
+        finished.write_text("# Finished Work\n", encoding="utf-8")
+    eval_checks_dir_path(repo_root=repo_root, session_id=session_id).mkdir(
+        parents=True, exist_ok=True
+    )
+    harness_outputs_dir_path(repo_root=repo_root, session_id=session_id).mkdir(
+        parents=True, exist_ok=True
+    )
     iterations_dir_path(repo_root=repo_root, session_id=session_id).mkdir(
         parents=True, exist_ok=True
     )
@@ -72,8 +90,37 @@ def eval_checks_dir_path(*, repo_root: Path, session_id: str) -> Path:
     )
 
 
+def harness_outputs_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id)
+        / HARNESS_OUTPUTS_DIRNAME
+    )
+
+
+def updates_from_user_path(*, repo_root: Path, session_id: str) -> Path:
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id)
+        / UPDATES_FROM_USER_FILENAME
+    )
+
+
+def finished_path(*, repo_root: Path, session_id: str) -> Path:
+    return (
+        project_state_dir_path(repo_root=repo_root, session_id=session_id)
+        / FINISHED_FILENAME
+    )
+
+
 def iteration_dir_name(*, iteration: int, workflow_id: str) -> str:
     return f"{iteration:04d}_{workflow_id}"
+
+
+def iteration_harness_output_root(
+    *, repo_root: Path, session_id: str, iteration: int, workflow_id: str
+) -> Path:
+    return harness_outputs_dir_path(
+        repo_root=repo_root, session_id=session_id
+    ) / iteration_dir_name(iteration=iteration, workflow_id=workflow_id)
 
 
 def ensure_iteration_dir(

@@ -18,9 +18,13 @@ from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.models import TaskResponse
 from loopy_loop.sessions import ensure_iteration_dir
 from loopy_loop.sessions import eval_checks_dir_path
+from loopy_loop.sessions import finished_path
 from loopy_loop.sessions import GOAL_CHECK_FILENAME
+from loopy_loop.sessions import harness_outputs_dir_path
+from loopy_loop.sessions import iteration_harness_output_root
 from loopy_loop.sessions import project_state_dir_path
 from loopy_loop.sessions import session_dir_path
+from loopy_loop.sessions import updates_from_user_path
 
 # Internal retry constants for /finished — not configurable externally.
 # If all retries fail, the exception propagates and the process exits;
@@ -98,12 +102,19 @@ def _run_task(*, repo_root: Path, task: TaskResponse) -> FinishedRequest:
         iteration=task.iteration,
         workflow_id=task.workflow_id,
     )
+    harness_output_root = iteration_harness_output_root(
+        repo_root=repo_root,
+        session_id=task.session_id,
+        iteration=task.iteration,
+        workflow_id=task.workflow_id,
+    )
     rendered_prompt = _render_prompt(
         config_snapshot=config_snapshot,
         session_id=task.session_id,
         iteration=task.iteration,
         workflow_id=task.workflow_id,
         iteration_dir=iteration_dir,
+        harness_output_root=harness_output_root,
         workflow_prompt=prompt_text,
         emits_goal_check=workflow_config.emits_goal_check,
         repo_root=repo_root,
@@ -114,6 +125,7 @@ def _run_task(*, repo_root: Path, task: TaskResponse) -> FinishedRequest:
             repo_root=repo_root,
             config_snapshot=config_snapshot,
             rendered_prompt=rendered_prompt,
+            harness_output_root=harness_output_root,
         )
     except ConfigError as exc:
         fatal_error = str(exc)
@@ -149,6 +161,7 @@ def _render_prompt(
     iteration: int,
     workflow_id: str,
     iteration_dir: Path,
+    harness_output_root: Path,
     workflow_prompt: str,
     emits_goal_check: bool = False,
     repo_root: Path | None = None,
@@ -171,7 +184,14 @@ def _render_prompt(
         f"{project_state_dir_path(repo_root=root, session_id=session_id)}",
         "Session eval_checks directory: "
         f"{eval_checks_dir_path(repo_root=root, session_id=session_id)}",
+        "Session updates_from_user path: "
+        f"{updates_from_user_path(repo_root=root, session_id=session_id)}",
+        "Session finished ledger path: "
+        f"{finished_path(repo_root=root, session_id=session_id)}",
+        "Session harness outputs directory: "
+        f"{harness_outputs_dir_path(repo_root=root, session_id=session_id)}",
         f"Iteration directory: {iteration_dir}",
+        f"Iteration harness output root: {harness_output_root}",
     ]
     if workflow_id == "goal_check" or emits_goal_check:
         lines.append(

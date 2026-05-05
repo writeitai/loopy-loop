@@ -34,6 +34,7 @@ def run_harness_iteration(
     repo_root: Path,
     config_snapshot: RootConfigSnapshot,
     rendered_prompt: str,
+    harness_output_root: Path | None = None,
     harness_factory: Callable[..., TeamHarnessLike] = TeamHarness,
 ) -> IterationResult:
     root_config = RootConfig.model_validate(
@@ -44,6 +45,7 @@ def run_harness_iteration(
         repo_root=repo_root,
         config_snapshot=config_snapshot,
         resolved_api_key=resolved_api_key,
+        harness_output_root=harness_output_root,
         harness_factory=harness_factory,
     )
     harness = harness_factory(**harness_kwargs)
@@ -61,7 +63,9 @@ def run_harness_iteration(
         return IterationResult(
             success=False, text=None, error=str(exc), harness_run_id=""
         )
-    return _normalize_harness_result(result=result)
+    return _normalize_harness_result(
+        result=result, harness_output_root=harness_output_root
+    )
 
 
 def _build_harness_kwargs(
@@ -69,6 +73,7 @@ def _build_harness_kwargs(
     repo_root: Path,
     config_snapshot: RootConfigSnapshot,
     resolved_api_key: str | None,
+    harness_output_root: Path | None,
     harness_factory: Callable[..., TeamHarnessLike],
 ) -> dict[str, object]:
     kwargs: dict[str, object] = {
@@ -95,6 +100,14 @@ def _build_harness_kwargs(
             "upgrade team-harness or remove team_harness_agent_models and "
             "team_harness_agent_reasoning_efforts from loopy_loop_config.yaml."
         )
+    if harness_output_root is not None:
+        if _supports_kwargs(harness_factory=harness_factory, names=["output_dir"]):
+            kwargs["output_dir"] = str(harness_output_root)
+        else:
+            raise ConfigError(
+                "Installed team-harness does not support SDK output_dir; "
+                "upgrade team-harness."
+            )
     return kwargs
 
 
@@ -125,7 +138,16 @@ def write_iteration_artifacts(
     )
 
 
-def _normalize_harness_result(*, result: TeamHarnessResult) -> IterationResult:
+def _normalize_harness_result(
+    *, result: TeamHarnessResult, harness_output_root: Path | None = None
+) -> IterationResult:
+    harness_output_dir = ""
+    if harness_output_root is not None and result.run_id:
+        harness_output_dir = str(harness_output_root / result.run_id)
     return IterationResult(
-        success=True, text=result.text, error=None, harness_run_id=result.run_id
+        success=True,
+        text=result.text,
+        error=None,
+        harness_run_id=result.run_id,
+        harness_output_dir=harness_output_dir,
     )

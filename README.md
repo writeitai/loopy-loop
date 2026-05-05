@@ -195,16 +195,26 @@ Every `TeamHarness.run()` call is fresh. Continuity comes from:
 - `.loopy_loop/sessions/<session_id>/...` artifacts
 - the coordinator state in `.loopy_loop/state.json`
 
-`team-harness` may also emit its own native artifact tree relative to the repo root. loopy-loop keeps its own state and iteration artifacts separate under `.loopy_loop/`.
+`team-harness` outputs are routed into the active loopy-loop session under
+`.loopy_loop/sessions/<session_id>/harness_outputs/<NNNN>_<workflow_id>/<team_harness_run_id>/`.
 
 Workflow prompts receive session-scoped paths for reusable project state and
 eval definitions:
 
 - `.loopy_loop/sessions/<session_id>/project_state/`
 - `.loopy_loop/sessions/<session_id>/eval_checks/`
+- `.loopy_loop/sessions/<session_id>/updates_from_user.md`
+- `.loopy_loop/sessions/<session_id>/project_state/finished.md`
+- `.loopy_loop/sessions/<session_id>/harness_outputs/`
 
 These directories are workflow-owned. The coordinator only owns
 `.loopy_loop/state.json` and iteration dispatch state.
+
+Write runtime requests for the outer loop into `updates_from_user.md`. The outer
+workflow should treat non-empty content as highest-priority planning input,
+reflect it into `project_state/`, and then clear the file. Verified completed
+work belongs in `project_state/finished.md`; `what_we_have.md` should remain the
+concise current capability summary.
 
 ## Control Files
 

@@ -30,6 +30,7 @@ def test_harness_runner_normalizes_success(
         repo_root=repo_root,
         config_snapshot=snapshot_factory(),
         rendered_prompt="rendered prompt",
+        harness_output_root=tmp_path / "outputs" / "0001_planner",
         harness_factory=FakeHarness,
     )
     write_iteration_artifacts(
@@ -41,7 +42,11 @@ def test_harness_runner_normalizes_success(
 
     assert result.success is True
     assert result.harness_run_id == "run-123"
+    assert result.harness_output_dir == str(
+        tmp_path / "outputs" / "0001_planner" / "run-123"
+    )
     assert result_json["text"] == "done"
+    assert result_json["harness_output_dir"] == result.harness_output_dir
 
 
 def test_harness_runner_passes_normalized_constructor_kwargs(
@@ -70,6 +75,12 @@ def test_harness_runner_passes_normalized_constructor_kwargs(
             team_harness_system_prompt_extension="extra instructions",
         ),
         rendered_prompt="rendered prompt",
+        harness_output_root=repo_root
+        / ".loopy_loop"
+        / "sessions"
+        / "s1"
+        / "harness_outputs"
+        / "0007_outer",
         harness_factory=FakeHarness,
     )
 
@@ -81,6 +92,14 @@ def test_harness_runner_passes_normalized_constructor_kwargs(
         "agents": ["codex", "reviewer"],
         "agent_models": {"codex": "gpt-5.5"},
         "agent_reasoning_efforts": {"codex": "high"},
+        "output_dir": str(
+            repo_root
+            / ".loopy_loop"
+            / "sessions"
+            / "s1"
+            / "harness_outputs"
+            / "0007_outer"
+        ),
         "system_prompt": "extra instructions",
         "cwd": str(repo_root),
         "console_mode": "silent",
@@ -145,6 +164,41 @@ def test_harness_runner_rejects_agent_model_overrides_for_old_harness(
         )
 
 
+def test_harness_runner_rejects_output_dir_for_old_harness(
+    repo_root: Any, snapshot_factory: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+
+    class OldHarness:
+        def __init__(
+            self,
+            *,
+            provider: str,
+            model: str,
+            api_base: str,
+            api_key: str,
+            agents: list[str],
+            agent_models: dict[str, str],
+            agent_reasoning_efforts: dict[str, str],
+            system_prompt: str,
+            cwd: str,
+            console_mode: str,
+        ) -> None:
+            pass
+
+        async def run(self, task: str) -> TeamHarnessResult:
+            return TeamHarnessResult(text="done", agents=[], run_id="run-123")
+
+    with pytest.raises(ConfigError, match="SDK output_dir"):
+        run_harness_iteration(
+            repo_root=repo_root,
+            config_snapshot=snapshot_factory(),
+            rendered_prompt="rendered prompt",
+            harness_output_root=repo_root / "outputs",
+            harness_factory=OldHarness,
+        )
+
+
 def test_harness_runner_normalizes_harness_error(
     repo_root: Any, snapshot_factory: Any, monkeypatch: Any
 ) -> None:
@@ -183,3 +237,4 @@ def test_harness_runner_writes_failure_artifacts(tmp_path: Any) -> None:
     assert (tmp_path / "harness_run_id.txt").read_text(encoding="utf-8") == ""
     assert result_json["success"] is False
     assert result_json["error"] == "boom"
+    assert result_json["harness_output_dir"] == ""

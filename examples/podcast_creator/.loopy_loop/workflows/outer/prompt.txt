@@ -9,7 +9,11 @@ Inputs available in the rendered assignment:
 - Session directory
 - Session project_state directory
 - Session eval_checks directory
+- Session updates_from_user path
+- Session finished ledger path
+- Session harness outputs directory
 - Iteration directory
+- Iteration harness output root
 
 Session project_state files:
 - README.md: explains this state system and ownership rules
@@ -18,10 +22,20 @@ Session project_state files:
 - current_state.md: active status, blockers, latest eval state, next expected work
 - decisions.md: durable planning and implementation decisions
 - eval_results.md: latest eval-banana check/run summary
+- finished.md: append-only ledger of outer-verified completed work and output links
 - what_we_should_do/plan.md: progressive-disclosure plan
 - what_we_should_do/tasks/<task-id>/README.md: leaf task details and acceptance criteria
 
 Create missing state files as needed. Keep them concise.
+
+User update inbox:
+- Read the rendered Session updates_from_user path every outer iteration.
+- If it contains non-whitespace content, treat it as highest-priority planning input.
+- Reflect the request into durable project_state files before continuing, usually
+  current_state.md, what_we_should_do/plan.md, task README files, and decisions.md.
+- After the request is reflected, truncate updates_from_user.md to empty.
+- If you cannot safely process the request, leave updates_from_user.md non-empty
+  and record the blocker in current_state.md.
 
 Progressive disclosure rules:
 - Keep what_we_should_do/plan.md readable.
@@ -39,6 +53,19 @@ Plan status markers:
 - [ ] (waiting for human)
 - [x] (completed - iteration:<n>)
 
+Finished ledger entry format:
+## <Task or Feature Name> - YYYY-MM-DD
+
+**Completed by:** outer iteration `<iteration>`
+**Source task:** `project_state/what_we_should_do/tasks/<task-id>/README.md`
+**Implementation iteration:** `<NNNN>_<workflow_id>`
+**Harness output:** `<path from the implementation iteration result or harness_outputs>`
+**Changed files:**
+- `path/to/file`
+**Summary:** Brief factual description of what was completed.
+
+---
+
 What to do:
 1. Read the goal and all session project_state files.
 2. Read recent iteration artifacts when they are relevant, especially inner loop
@@ -46,6 +73,8 @@ What to do:
 3. Review any tasks marked "inner complete, waiting for outer".
 4. Verify each reviewed task against its task README acceptance criteria.
 5. If a task is complete, mark only that task completed and update what_we_have.md.
+   Also append a short entry to finished.md with the source task, implementation
+   iteration, harness output path, changed files, and a brief summary.
 6. If a task is incomplete, mark it failed with this iteration number and record
    clear follow-up in current_state.md.
 7. Update dependencies and blocked/available statuses.

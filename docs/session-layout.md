@@ -8,8 +8,13 @@ One session directory is created per fresh coordinator run and reused for all it
     └── <session_id>/
         ├── session.json
         ├── events.jsonl
+        ├── updates_from_user.md
         ├── project_state/
+        │   └── finished.md
         ├── eval_checks/
+        ├── harness_outputs/
+        │   └── 0001_planner/
+        │       └── <team_harness_run_id>/
         └── iterations/
             ├── 0001_planner/
             │   ├── prompt.txt
@@ -38,12 +43,26 @@ One session directory is created per fresh coordinator run and reused for all it
 - Reserved append-only event log for diagnostics
 - Created at session start in v1
 
+`updates_from_user.md`
+
+- Human-writable inbox for requests that arrive after the session starts
+- The outer workflow treats non-empty content as highest-priority planning input
+- The outer workflow clears the file only after reflecting the request into
+  `project_state/`
+
 `project_state/`
 
 - Optional workflow-owned markdown state for reusable workflows
 - Common files include `README.md`, `current_state.md`, `what_we_have.md`,
-  `decisions.md`, `eval_results.md`, and `what_we_should_do/plan.md`
+  `decisions.md`, `eval_results.md`, `finished.md`, and
+  `what_we_should_do/plan.md`
 - The coordinator does not parse these files
+
+`project_state/finished.md`
+
+- Append-only ledger for outer-verified completed work
+- Entries should summarize the completed task and link to the relevant iteration
+  and harness output files
 
 `eval_checks/`
 
@@ -52,6 +71,21 @@ One session directory is created per fresh coordinator run and reused for all it
 
 ```bash
 eval-banana run --check-dir .loopy_loop/sessions/<session_id>/eval_checks
+```
+
+`harness_outputs/`
+
+- Root for team-harness coordinator and worker artifacts
+- Each loopy-loop iteration gets its own output root:
+
+```text
+.loopy_loop/sessions/<session_id>/harness_outputs/<NNNN>_<workflow_id>/
+```
+
+- team-harness then creates a child directory named with its run id:
+
+```text
+.loopy_loop/sessions/<session_id>/harness_outputs/<NNNN>_<workflow_id>/<team_harness_run_id>/
 ```
 
 ## Iteration Files
@@ -69,7 +103,8 @@ eval-banana run --check-dir .loopy_loop/sessions/<session_id>/eval_checks
   "success": true,
   "text": "final response",
   "error": null,
-  "harness_run_id": "run-123"
+  "harness_run_id": "run-123",
+  "harness_output_dir": ".loopy_loop/sessions/<session_id>/harness_outputs/0001_planner/run-123"
 }
 ```
 
