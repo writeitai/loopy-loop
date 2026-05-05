@@ -17,7 +17,10 @@ claudecontinue:
 ## Codex
 codex:
 	# do /fast
-	codex --yolo --model gpt-5.4
+	codex --yolo --model gpt-5.5
 
 install_globally:
 	uv tool install --editable "$(CURDIR)"
+
+install_dev_skills:
+	npx skills add https://github.com/anthropics/skills --skill skill-creator -a claude-code -a codex
