@@ -24,3 +24,4 @@ install_globally:
 
 install_dev_skills:
 	npx skills add https://github.com/anthropics/skills --skill skill-creator -a claude-code -a codex
+	npx skills add git@github.com:writeitai/eval-banana.git --skill eval-banana -a codex -a claude-code -y
