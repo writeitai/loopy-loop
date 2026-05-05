@@ -7,11 +7,14 @@ from typing import Any
 import pytest
 import yaml
 
+from loopy_loop.config import derive_goal_hash
 from loopy_loop.models import CurrentTask
 from loopy_loop.models import HistoryEntry
 from loopy_loop.models import LoopState
 from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.models import utc_now
+
+GOAL = "Ship a minimal working landing page"
 
 
 @pytest.fixture()
@@ -27,8 +30,7 @@ def repo_builder(repo_root: Path):
         workflows: dict[str, dict[str, Any]] | None = None,
     ) -> Path:
         config = {
-            "goal": "Ship a minimal working landing page",
-            "goal_slug": "ship-landing-page",
+            "goal": GOAL,
             "completion_criteria": [
                 "Homepage renders without errors",
                 "Primary CTA is wired",
@@ -91,7 +93,7 @@ def snapshot_factory():
     def factory(**overrides: Any) -> RootConfigSnapshot:
         data = {
             "goal": "Goal",
-            "goal_slug": "goal",
+            "goal_hash": "cdbf6975e8a3",
             "completion_criteria": ["done"],
             "stop_criteria": ["blocked"],
             "max_turns": 20,
@@ -104,6 +106,8 @@ def snapshot_factory():
             "team_harness_system_prompt_extension": "",
         }
         data.update(overrides)
+        if "goal_hash" not in overrides:
+            data["goal_hash"] = derive_goal_hash(goal=data["goal"])
         return RootConfigSnapshot.model_validate(data)
 
     return factory
@@ -116,7 +120,7 @@ def history_entry_factory():
         data = {
             "iteration": 1,
             "workflow_id": "planner",
-            "session_id": "goal_20260419_143022_ab12cd34",
+            "session_id": "cdbf6975e8a3_20260419_143022_ab12cd34",
             "success": True,
             "error": None,
             "started_at": now - timedelta(minutes=1),
@@ -133,7 +137,7 @@ def current_task_factory():
     def factory(**overrides: Any) -> CurrentTask:
         data = {
             "workflow_id": "planner",
-            "session_id": "goal_20260419_143022_ab12cd34",
+            "session_id": "cdbf6975e8a3_20260419_143022_ab12cd34",
             "iteration": 1,
             "started_at": utc_now(),
         }
@@ -149,9 +153,9 @@ def state_factory(snapshot_factory: Any):
         snapshot = overrides.pop("config_snapshot", snapshot_factory())
         data = {
             "status": "running",
-            "goal_slug": snapshot.goal_slug,
+            "goal_hash": snapshot.goal_hash,
             "max_turns": snapshot.max_turns,
-            "active_session_id": "goal_20260419_143022_ab12cd34",
+            "active_session_id": "cdbf6975e8a3_20260419_143022_ab12cd34",
             "goal_met": False,
             "stop_requested": False,
             "unresolvable_error": False,

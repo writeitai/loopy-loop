@@ -12,11 +12,11 @@ Run response:
 {
   "action": "run",
   "workflow_id": "planner",
-  "session_id": "ship-landing-page_20260419_143022_ab12cd34",
+  "session_id": "71393ee22450_20260419_143022_ab12cd34",
   "iteration": 3,
   "config_snapshot": {
     "goal": "Ship a minimal working landing page",
-    "goal_slug": "ship-landing-page",
+    "goal_hash": "71393ee22450",
     "completion_criteria": ["Homepage renders without errors"],
     "stop_criteria": ["A workflow writes an unresolvable error flag"],
     "max_turns": 20,
@@ -59,7 +59,7 @@ Request:
 ```json
 {
   "workflow_id": "planner",
-  "session_id": "ship-landing-page_20260419_143022_ab12cd34",
+  "session_id": "71393ee22450_20260419_143022_ab12cd34",
   "success": true,
   "text": "done",
   "error": null

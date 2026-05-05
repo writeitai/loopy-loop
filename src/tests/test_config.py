@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from loopy_loop.config import ConfigError
+from loopy_loop.config import derive_goal_hash
 from loopy_loop.config import load_root_config
 from loopy_loop.config import load_workflow_definitions
 from loopy_loop.config import run_preflight
@@ -20,7 +21,9 @@ def test_load_root_config_and_workflows(repo_builder: Any, monkeypatch: Any) -> 
 
     assert root_config.team_harness_api_base == "https://openrouter.ai/api/v1"
     assert [workflow.id for workflow in workflows] == ["goal_check", "planner"]
-    assert preflight.root_config.goal_slug == "ship-landing-page"
+    assert preflight.root_config.goal_hash == derive_goal_hash(
+        goal="Ship a minimal working landing page"
+    )
 
 
 def test_invalid_run_every_raises(repo_builder: Any) -> None:

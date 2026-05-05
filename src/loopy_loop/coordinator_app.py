@@ -280,22 +280,22 @@ class CoordinatorService:
         create_session_dir(
             repo_root=self.repo_root,
             session_id=existing_state.active_session_id,
-            goal_slug=existing_state.goal_slug,
+            goal_hash=existing_state.goal_hash,
         )
 
     def _write_fresh_state(self) -> None:
-        session_id = create_session_id(goal_slug=self.preflight.root_config.goal_slug)
+        session_id = create_session_id(goal_hash=self.preflight.root_config.goal_hash)
         create_session_dir(
             repo_root=self.repo_root,
             session_id=session_id,
-            goal_slug=self.preflight.root_config.goal_slug,
+            goal_hash=self.preflight.root_config.goal_hash,
         )
         snapshot = RootConfigSnapshot.model_validate(
             self.preflight.root_config.model_dump()
         )
         state = LoopState(
             status="running",
-            goal_slug=self.preflight.root_config.goal_slug,
+            goal_hash=self.preflight.root_config.goal_hash,
             max_turns=self.preflight.root_config.max_turns,
             active_session_id=session_id,
             config_snapshot=snapshot,

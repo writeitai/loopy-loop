@@ -29,7 +29,7 @@ One session directory is created per fresh coordinator run and reused for all it
 `session.json`
 
 - Session metadata written once when the session directory is created
-- Contains `session_id`, `goal_slug`, and `created_at`
+- Contains `session_id`, `goal_hash`, and `created_at`
 
 `events.jsonl`
 
