@@ -1,6 +1,6 @@
 ---
 name: loopy-loop
-description: Set up and run loopy-loop, a repo-local automation loop that drives AI agents toward a goal across many iterations via a FastAPI coordinator and one or more workers. Use this skill when the user wants to install loopy-loop in a target repo, scaffold its config, define workflows, or operate the coordinator/worker pair (start, monitor, stop, resume).
+description: Set up and run loopy-loop, a repo-local automation loop that drives AI agents toward a goal across many iterations via a FastAPI coordinator and one or more workers. Use this skill when the user wants to install loopy-loop in a target repo, scaffold its config, define workflows, configure workflow scheduling/cadence, use session-scoped project_state or eval checks, or operate the coordinator/worker pair (start, monitor, stop, resume).
 ---
 
 # loopy-loop
@@ -14,6 +14,10 @@ Use this skill when the user asks to:
 
 - Install loopy-loop or scaffold it in a repo (`loopy init`)
 - Configure a goal, completion criteria, model, or workflow
+- Configure workflow cadence (`priority`, `must_follow`, `run_on_start`,
+  `run_after_successes`) or eval-driven stopping (`emits_goal_check`)
+- Design workflow prompts that use session-scoped `project_state/` and
+  `eval_checks/`
 - Start, monitor, stop, or resume the loop
 
 ## Install
@@ -50,7 +54,9 @@ Idempotent. Creates:
 
 `goal_check` is reserved. Don't rename or delete it — it runs from iteration 1
 onward and writes the authoritative `goal_check.json` that decides whether the
-loop has met its goal.
+loop has met its goal. Advanced workflows can also emit `goal_check.json` by
+setting `emits_goal_check: true`; keep the reserved `goal_check` workflow unless
+you intentionally replace its role with another completion-signal workflow.
 
 ## Configure
 
@@ -96,9 +102,13 @@ Each workflow is a folder; the folder name is the workflow id.
 
 ```yaml
 enabled: true
-run_every: 1               # run every N completed iterations
-must_follow: null          # workflow id that must immediately precede this one
+priority: 0
+run_every: 1
+must_follow: null
 not_before_iteration: 0
+run_on_start: false
+run_after_successes: null
+emits_goal_check: false
 description: ""
 ```
 
@@ -106,7 +116,109 @@ Rules:
 
 - `must_follow` must resolve to an existing workflow during coordinator preflight.
 - `run_every` counts completed iterations, not wall-clock time.
+- `priority` breaks ties among eligible workflows; higher values run first.
+- `run_on_start: true` makes a workflow eligible before any successful workflow
+  has run.
+- `run_after_successes` makes a workflow eligible after every N successful runs
+  of another workflow:
+
+```yaml
+run_after_successes:
+  workflow_id: inner
+  every: 10
+```
+
+- `emits_goal_check: true` tells the worker to include a `goal_check.json`
+  output path in that workflow's prompt, and tells the coordinator to read it
+  using the same stop logic as the reserved `goal_check` workflow.
 - `goal_check` is reserved — pick a different id for new workflows.
+
+Example cadence for an outer/inner loop with periodic evals:
+
+```yaml
+# eval_reviewer/config.yaml
+enabled: true
+priority: 100
+run_on_start: true
+run_after_successes:
+  workflow_id: inner
+  every: 10
+description: "Create or refresh eval checks."
+```
+
+```yaml
+# eval_runner/config.yaml
+enabled: true
+priority: 90
+must_follow: eval_reviewer
+run_after_successes:
+  workflow_id: inner
+  every: 10
+emits_goal_check: true
+description: "Run eval checks and stop when they pass."
+```
+
+```yaml
+# outer/config.yaml
+enabled: true
+priority: 10
+description: "Review state and plan the next task."
+```
+
+```yaml
+# inner/config.yaml
+enabled: true
+priority: 20
+must_follow: outer
+not_before_iteration: 1
+description: "Implement the next planned leaf task."
+```
+
+This sequence starts with `eval_reviewer`, then repeats `outer -> inner`. After
+10 successful `inner` runs, `eval_reviewer -> eval_runner` becomes eligible.
+
+## Session-Scoped Project State and Eval Checks
+
+Every rendered workflow prompt includes these paths:
+
+```text
+Session directory: .loopy_loop/sessions/<session_id>
+Session project_state directory: .loopy_loop/sessions/<session_id>/project_state
+Session eval_checks directory: .loopy_loop/sessions/<session_id>/eval_checks
+Iteration directory: .loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>
+```
+
+The runtime only provides the paths; it does not parse markdown state. Put the
+ownership rules in each workflow prompt. A common reusable pattern is:
+
+- `outer` owns high-level planning, status transitions, and
+  `project_state/what_we_should_do/plan.md`
+- `inner` implements exactly one available leaf task and marks it waiting for
+  outer review
+- `eval_reviewer` writes high-level eval-banana YAML checks under the session
+  `eval_checks/`
+- `eval_runner` runs only the session checks and writes `goal_check.json`
+
+Useful `project_state/` files:
+
+```text
+project_state/
+├── README.md
+├── what_we_are_building.md
+├── what_we_have.md
+├── current_state.md
+├── decisions.md
+├── eval_results.md
+└── what_we_should_do/
+    ├── plan.md
+    └── tasks/<task-id>/README.md
+```
+
+Session eval checks work well with eval-banana's explicit directory option:
+
+```bash
+eval-banana run --check-dir .loopy_loop/sessions/<session_id>/eval_checks
+```
 
 ## Run
 
@@ -158,7 +270,8 @@ Per-iteration artifacts live at:
 Authoritative control files live only inside the current iteration directory:
 
 - `control.json` — `{"unresolvable_error": true, "reason": "...", "schema_version": 1}`
-- `goal_check.json` (only inside `*_goal_check` iterations) —
+- `goal_check.json` (inside `*_goal_check` iterations or workflows configured
+  with `emits_goal_check: true`) —
   `{"goal_met": false, "reason": "...", "schema_version": 1}`
 
 If `goal_check.json` is repeatedly missing or invalid, the coordinator stops
@@ -173,6 +286,14 @@ with `stop_reason="goal_check_broken"` after `goal_check_consecutive_failures_ca
 - **Workflow id collision with `goal_check`** → reserved; pick a different id.
 - **`must_follow` references a missing workflow** → preflight fails. The id
   must match a folder under `.loopy_loop/workflows/`.
+- **`run_after_successes.workflow_id` references a missing workflow** →
+  preflight fails. The id must also match a workflow folder.
+- **Eval runner does not stop the loop** → confirm the workflow has
+  `emits_goal_check: true` and writes valid JSON to the exact
+  `goal_check.json output path` in its prompt.
+- **Workflow ignores project state** → loopy-loop only injects state paths.
+  The workflow prompt must explicitly say which `project_state/` files to read
+  and update.
 - **Re-running `loopy coordinator` against a still-running state file** →
   intentionally fatal. Pass `--resume` to attach.
 - **Killing only the coordinator** → state stays `running`. Either pass
