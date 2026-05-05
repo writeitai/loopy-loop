@@ -1,13 +1,4 @@
-goal: |
-  Build a browser-playable multiplayer game inspired by Atomic Bomberman, where
-  each of at least four unique characters has a passive and four active
-  abilities bound to Q, W, E, R with cooldowns — in the spirit of League of
-  Legends champion kits. The MVP supports 2-4 players on one map, destructible
-  walls, chain explosions, pickups, and a last-player-standing win condition.
-completion_criteria:
-  - ...
-stop_criteria:
-  - ...
+goal_file: "loopy_loop_goal.txt"
 max_turns: 60
 goal_check_consecutive_failures_cap: 3
 team_harness_provider: "codex"
@@ -24,5 +15,3 @@ team_harness_agent_reasoning_efforts:
   codex: "high"
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
-team_harness_system_prompt_extension: |
-  ...

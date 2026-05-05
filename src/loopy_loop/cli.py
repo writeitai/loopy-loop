@@ -6,6 +6,7 @@ import click
 import uvicorn
 
 from loopy_loop.config import ConfigError
+from loopy_loop.config import DEFAULT_GOAL_FILENAME
 from loopy_loop.config import LOOPY_DIRNAME
 from loopy_loop.config import ROOT_CONFIG_FILENAME
 from loopy_loop.coordinator_app import create_coordinator_app
@@ -20,25 +21,19 @@ GITIGNORE_LINES = [
     ".loopy_loop/state.json.lock",
     ".loopy_loop/state.json.archive_*.json",
 ]
-ROOT_CONFIG_TEMPLATE = """goal: "Ship a minimal working landing page"
-completion_criteria:
-  - "Homepage renders without errors"
-  - "Primary CTA is wired"
-  - "README explains how to run locally"
-stop_criteria:
-  - "A workflow writes an unresolvable error flag"
-  - "The repo requires a missing secret or external dependency the agent cannot obtain"
+ROOT_CONFIG_TEMPLATE = f"""goal_file: "{DEFAULT_GOAL_FILENAME}"
 max_turns: 20
 goal_check_consecutive_failures_cap: 3
 team_harness_provider: "openai_compat"
 team_harness_model: "gpt-5.4"
 team_harness_agents:
   - "codex"
-team_harness_agent_models: {}
-team_harness_agent_reasoning_efforts: {}
+team_harness_agent_models: {{}}
+team_harness_agent_reasoning_efforts: {{}}
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
-team_harness_system_prompt_extension: ""
+"""
+GOAL_TEMPLATE = """Ship a minimal working landing page
 """
 GOAL_CHECK_CONFIG_TEMPLATE = """enabled: true
 run_every: 1
@@ -76,6 +71,9 @@ def init() -> None:
         _write_if_missing(
             path=repo_root / ROOT_CONFIG_FILENAME, content=ROOT_CONFIG_TEMPLATE
         )
+    )
+    created.extend(
+        _write_if_missing(path=repo_root / DEFAULT_GOAL_FILENAME, content=GOAL_TEMPLATE)
     )
     created.extend(
         _write_if_missing(

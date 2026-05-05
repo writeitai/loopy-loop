@@ -56,7 +56,11 @@ def run_harness_iteration(
     except TeamHarnessError as exc:
         traceback.print_exc()
         return IterationResult(
-            success=False, text=None, error=str(exc), harness_run_id=""
+            success=False,
+            text=None,
+            error=str(exc),
+            error_detail=exc.detail,
+            harness_run_id="",
         )
     except Exception as exc:
         traceback.print_exc()

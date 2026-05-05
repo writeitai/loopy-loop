@@ -22,6 +22,7 @@ def test_load_root_config_and_workflows(repo_builder: Any, monkeypatch: Any) -> 
     assert root_config.team_harness_api_base == "https://openrouter.ai/api/v1"
     assert root_config.team_harness_agent_models == {}
     assert root_config.team_harness_agent_reasoning_efforts == {}
+    assert root_config.goal == "Ship a minimal working landing page"
     assert [workflow.id for workflow in workflows] == ["goal_check", "planner"]
     assert workflows[0].priority == 0
     assert workflows[0].run_on_start is False
@@ -30,6 +31,57 @@ def test_load_root_config_and_workflows(repo_builder: Any, monkeypatch: Any) -> 
     assert preflight.root_config.goal_hash == derive_goal_hash(
         goal="Ship a minimal working landing page"
     )
+
+
+def test_load_root_config_uses_goal_file_and_optional_defaults(
+    repo_builder: Any,
+) -> None:
+    repo_root = repo_builder()
+
+    repo_root.joinpath("loopy_loop_config.yaml").write_text(
+        "\n".join(
+            [
+                'goal_file: "custom_goal.txt"',
+                "max_turns: 20",
+                'team_harness_provider: "codex"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    repo_root.joinpath("custom_goal.txt").write_text(
+        "Build the simplest useful thing.\n", encoding="utf-8"
+    )
+
+    root_config = load_root_config(repo_root=repo_root)
+
+    assert root_config.goal == "Build the simplest useful thing."
+    assert root_config.completion_criteria == []
+    assert root_config.stop_criteria == []
+    assert root_config.team_harness_system_prompt_extension == ""
+
+
+def test_load_root_config_rejects_inline_goal(repo_builder: Any) -> None:
+    repo_root = repo_builder(root_config={"goal": "Inline goals are no longer used"})
+
+    with pytest.raises(ConfigError, match="use 'goal_file' instead"):
+        load_root_config(repo_root=repo_root)
+
+
+def test_load_root_config_rejects_missing_goal_file(repo_builder: Any) -> None:
+    repo_root = repo_builder(root_config={"goal_file": "missing_goal.txt"})
+    repo_root.joinpath("missing_goal.txt").unlink()
+
+    with pytest.raises(ConfigError, match="Unable to read goal file"):
+        load_root_config(repo_root=repo_root)
+
+
+def test_load_root_config_rejects_empty_goal_file(repo_builder: Any) -> None:
+    repo_root = repo_builder(root_config={"goal_file": "empty_goal.txt"})
+    repo_root.joinpath("empty_goal.txt").write_text("  \n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="must not be empty"):
+        load_root_config(repo_root=repo_root)
 
 
 def test_invalid_run_every_raises(repo_builder: Any) -> None:

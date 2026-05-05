@@ -93,12 +93,7 @@ loopy stop
 Root config (`loopy_loop_config.yaml` at the repo root):
 
 ```yaml
-goal: "Ship a minimal working landing page"
-completion_criteria:
-  - "Homepage renders without errors"
-  - "Primary CTA is wired"
-stop_criteria:
-  - "A workflow writes an unresolvable error flag"
+goal_file: "loopy_loop_goal.txt"
 max_turns: 20
 goal_check_consecutive_failures_cap: 3
 team_harness_provider: "openai_compat"
@@ -110,13 +105,17 @@ team_harness_agent_reasoning_efforts:
   codex: "high"
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
-team_harness_system_prompt_extension: ""
 ```
 
 Rules:
 
 - Session ids and session metadata include a deterministic `goal_hash` derived
-  from the configured `goal`
+  from the text loaded from `goal_file`
+- `goal_file` is resolved relative to `loopy_loop_config.yaml`; inline `goal`
+  values in YAML are rejected
+- `completion_criteria`, `stop_criteria`, and
+  `team_harness_system_prompt_extension` are optional; omitted criteria default
+  to empty lists and the prompt extension defaults to an empty string
 - `team_harness_model` controls the team-harness coordinator model; worker
   subprocess defaults are controlled by `team_harness_agent_models`
 - `team_harness_api_base` is normalized by loopy-loop: trailing slash stripped, `/v1` appended when missing
