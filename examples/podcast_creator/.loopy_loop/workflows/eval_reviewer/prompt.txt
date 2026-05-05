@@ -51,3 +51,61 @@ Good check coverage should answer:
 
 If eval-banana is unavailable, still write the YAML checks and record that
 validation could not be run.
+
+
+You will make an agentic team to achieve the implementation part.
+
+Create an agent team to do it. They should be responsible for:
+- preparing the analysis using CODEX
+    - create a dedicated directory in `_feature_planning/` withing the session directory.
+- decide if a research step is necessary using CODEX
+- if the research step is necessary, then trigger researching agents using GEMINI, CODEX, CLAUDE
+    - you can look into the repos directory for inspiration how other projects do it
+    - you can use internet
+    - write down your findings into the markdown file
+    - you can also use Github CLI to explore other GH repos - you can even download them to _additional_context/ directory (part of .gitignore) and continue research there
+- coming up with a plan how to do it using CODEX
+    - the plan should be outputted to `_feature_planning` directory and should be based on the findings from the previous research
+    - Create a dedicated directory withing the `_feature_planning` and then create markdown file there called "plan.md".
+    - After writing the plan, you can ask me additional questions in "questions.md". Always include a recommended solution.
+    - Think very deeply before you start writing.
+    - Try to keep the potential solution simple.
+    - think of acceptance criteria and write them down
+    - The goal is to make a system that would be easy to understand and maintain.
+    - think if and how to update README.md and docs/ referenced by CLAUDE.md and AGENTS.md.
+- if the plan is updated after reviews, tend to pass the updated plan and questions to reviewers again
+- reviewing the plan and the acceptance criteria and also the recommended solutions to the questions using CODEX
+    - if there are any shortcomings with the plan, return the work back to the planning agent together with the feedback
+    - if you don't agree with the recommended solutions to the questions, or can have better alternative, return the work back to the planning agent together with the feedback
+    - review for simplicity and robustness
+    - think of possible deployment-related shortcomings as well
+    - think ultradeeply on this one
+- reviewing the plan and the acceptance criteria and also the recommended solutions to the questions WITH CLAUDE!
+    - if there are any shortcomings with the plan, return the work back to the planning agent together with the feedback
+    - if you don't agree with the recommended solutions to the questions, or can have better alternative, return the work back to the planning agent together with the feedback
+    - review for simplicity and robustness
+    - think of possible deployment-related shortcomings as well
+    - think ultradeeply on this one
+- doing the actual plan execution using CODEX
+- reviewing that the plan was followed and that the acceptance criteria were met using CLAUDE
+    - be extra thorough in you examination
+    - if there are any shortcomings in the implementation, return it back to the execution agent
+- making a new branch, and doing a PR (choose the main development branch - e.g. develop, dev or main)
+    - if you saved screenshots related to the PRs, include them in the PR
+    - make the description very descriptive
+    - merge the PR!
+- making sure the PR was merged
+- making sure you the "rules" above were followed
+
+Create any additional agents as you see fit.
+
+All the agents should think ultra deeply. At the same time, try to keep things simple.
+
+A reminder - you have access to the following CLIs:
+    - Github
+    - gcloud
+
+You also have access agent-browser for any browser automation, web testing, scraping, screenshotting etc
+    - Before running commands, load the workflow guide once per session: `agent-browser skills get core` (or `--full` for the complete command reference). Specialized sub-skills: `electron`, `slack`, `dogfood`, `vercel-sandbox`, `agentcore` — load via `agent-browser skills get <name>`.
+
+Don't ask the human any questions.
