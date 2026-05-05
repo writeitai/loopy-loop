@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from importlib.resources import files
+from importlib.resources.abc import Traversable
 from pathlib import Path
 
 import click
@@ -15,6 +17,24 @@ from loopy_loop.state_store import StateStore
 from loopy_loop.worker import run_worker_loop
 
 GOAL_CHECK_WORKFLOW_ID = "goal_check"
+DEFAULT_TEMPLATE_NAME = "default"
+INNER_OUTER_EVAL_TEMPLATE_NAME = "inner_outer_eval"
+PACKAGED_TEMPLATE_FILES_BY_NAME = {
+    INNER_OUTER_EVAL_TEMPLATE_NAME: [
+        ".gitignore",
+        ROOT_CONFIG_FILENAME,
+        DEFAULT_GOAL_FILENAME,
+        ".loopy_loop/workflows/eval_reviewer/config.yaml",
+        ".loopy_loop/workflows/eval_reviewer/prompt.txt",
+        ".loopy_loop/workflows/eval_runner/config.yaml",
+        ".loopy_loop/workflows/eval_runner/prompt.txt",
+        ".loopy_loop/workflows/inner/config.yaml",
+        ".loopy_loop/workflows/inner/prompt.txt",
+        ".loopy_loop/workflows/outer/config.yaml",
+        ".loopy_loop/workflows/outer/prompt.txt",
+    ]
+}
+PACKAGED_TEMPLATE_NAMES = list(PACKAGED_TEMPLATE_FILES_BY_NAME)
 GITIGNORE_LINES = [
     ".loopy_loop/sessions/",
     ".loopy_loop/state.json",
@@ -58,9 +78,34 @@ def main() -> None:
 
 
 @main.command()
-def init() -> None:
+@click.option(
+    "--template",
+    "template_name",
+    type=click.Choice([DEFAULT_TEMPLATE_NAME, *PACKAGED_TEMPLATE_NAMES]),
+    default=DEFAULT_TEMPLATE_NAME,
+    show_default=True,
+    help="Initial workflow template to scaffold.",
+)
+def init(template_name: str) -> None:
     """Initialize loopy-loop files."""
     repo_root = Path.cwd()
+    if template_name == DEFAULT_TEMPLATE_NAME:
+        created = _init_default_template(repo_root=repo_root)
+    else:
+        created = _init_packaged_template(
+            repo_root=repo_root, template_name=template_name
+        )
+    _ensure_gitignore(repo_root=repo_root)
+
+    if created:
+        click.echo("Created:")
+        for path in created:
+            click.echo(f"- {path}")
+    else:
+        click.echo("loopy-loop is already initialized.")
+
+
+def _init_default_template(*, repo_root: Path) -> list[str]:
     loopy_dir = repo_root / LOOPY_DIRNAME
     workflow_dir = loopy_dir / "workflows" / GOAL_CHECK_WORKFLOW_ID
     loopy_dir.mkdir(parents=True, exist_ok=True)
@@ -85,14 +130,30 @@ def init() -> None:
             path=workflow_dir / "prompt.txt", content=GOAL_CHECK_PROMPT_TEMPLATE
         )
     )
-    _ensure_gitignore(repo_root=repo_root)
+    return created
 
-    if created:
-        click.echo("Created:")
-        for path in created:
-            click.echo(f"- {path}")
-    else:
-        click.echo("loopy-loop is already initialized.")
+
+def _init_packaged_template(*, repo_root: Path, template_name: str) -> list[str]:
+    template_root = files("loopy_loop").joinpath("templates", template_name)
+    created: list[str] = []
+    for relative_path in PACKAGED_TEMPLATE_FILES_BY_NAME[template_name]:
+        created.extend(
+            _copy_template_file_if_missing(
+                source_root=template_root,
+                relative_path=relative_path,
+                repo_root=repo_root,
+            )
+        )
+    return created
+
+
+def _copy_template_file_if_missing(
+    *, source_root: Traversable, relative_path: str, repo_root: Path
+) -> list[str]:
+    source = source_root.joinpath(*relative_path.split("/"))
+    return _write_if_missing(
+        path=repo_root / relative_path, content=source.read_text(encoding="utf-8")
+    )
 
 
 @main.command()

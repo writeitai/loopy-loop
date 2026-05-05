@@ -44,6 +44,8 @@ The CLI exposes both `loopy` and `loopy-loop` — prefer `loopy`.
 
 ```bash
 loopy init
+# or
+loopy init --template inner_outer_eval
 ```
 
 Idempotent. Creates:
@@ -51,6 +53,10 @@ Idempotent. Creates:
 - `loopy_loop_config.yaml` — root config, edit this
 - `.loopy_loop/workflows/goal_check/{prompt.txt,config.yaml}` — reserved workflow
 - `.gitignore` entries for `.loopy_loop/sessions/` and `.loopy_loop/state.json*`
+
+Use `--template inner_outer_eval` to scaffold the packaged outer/inner/eval
+workflow set named `inner_outer_eval` instead of the default `goal_check`
+workflow.
 
 `goal_check` is reserved. Don't rename or delete it — it runs from iteration 1
 onward and writes the authoritative `goal_check.json` that decides whether the
