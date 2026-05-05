@@ -30,7 +30,7 @@ def repo_builder(repo_root: Path):
         workflows: dict[str, dict[str, Any]] | None = None,
     ) -> Path:
         config = {
-            "goal": GOAL,
+            "goal_file": "loopy_loop_goal.txt",
             "completion_criteria": [
                 "Homepage renders without errors",
                 "Primary CTA is wired",
@@ -52,6 +52,11 @@ def repo_builder(repo_root: Path):
         repo_root.joinpath("loopy_loop_config.yaml").write_text(
             yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
         )
+        goal_file = config.get("goal_file")
+        if isinstance(goal_file, str):
+            goal_path = repo_root.joinpath(goal_file)
+            goal_path.parent.mkdir(parents=True, exist_ok=True)
+            goal_path.write_text(GOAL, encoding="utf-8")
 
         workflow_map = workflows or {
             "planner": {

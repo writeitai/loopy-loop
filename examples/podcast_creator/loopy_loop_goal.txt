@@ -1,0 +1,5 @@
+Build a browser-playable multiplayer game inspired by Atomic Bomberman, where
+each of at least four unique characters has a passive and four active
+abilities bound to Q, W, E, R with cooldowns - in the spirit of League of
+Legends champion kits. The MVP supports 2-4 players on one map, destructible
+walls, chain explosions, pickups, and a last-player-standing win condition.

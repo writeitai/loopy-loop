@@ -14,6 +14,7 @@ from pydantic import ValidationError
 import yaml
 
 ROOT_CONFIG_FILENAME = "loopy_loop_config.yaml"
+DEFAULT_GOAL_FILENAME = "loopy_loop_goal.txt"
 LOOPY_DIRNAME = ".loopy_loop"
 WORKFLOWS_DIRNAME = "workflows"
 GOAL_HASH_LENGTH = 12
@@ -48,10 +49,12 @@ class RootConfig(BaseModel):
         description="Natural-language goal the loop is trying to satisfy."
     )
     completion_criteria: list[str] = Field(
-        description="Observable criteria used by workflows and goal checks."
+        default_factory=list,
+        description="Observable criteria used by workflows and goal checks.",
     )
     stop_criteria: list[str] = Field(
-        description="Conditions that should stop the loop before the goal is met."
+        default_factory=list,
+        description="Conditions that should stop the loop before the goal is met.",
     )
     max_turns: int = Field(
         ..., description="Maximum number of completed workflow iterations."
@@ -104,13 +107,6 @@ class RootConfig(BaseModel):
     @property
     def goal_hash(self) -> str:
         return derive_goal_hash(goal=self.goal)
-
-    @field_validator("completion_criteria", "stop_criteria")
-    @classmethod
-    def validate_string_lists(cls, value: list[str]) -> list[str]:
-        if not value:
-            raise ValueError("list must not be empty")
-        return value
 
     @field_validator(
         "team_harness_agent_models", "team_harness_agent_reasoning_efforts"
@@ -216,6 +212,7 @@ def derive_goal_hash(*, goal: str) -> str:
 def load_root_config(*, repo_root: Path) -> RootConfig:
     config_path = repo_root / ROOT_CONFIG_FILENAME
     data = _read_yaml_mapping(path=config_path)
+    data = _resolve_root_config_goal(data=data, config_path=config_path)
     try:
         return RootConfig.model_validate(data)
     except ValidationError as exc:
@@ -363,3 +360,35 @@ def _read_yaml_mapping(*, path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ConfigError(f"Expected mapping at {path}")
     return data
+
+
+def _resolve_root_config_goal(
+    *, data: dict[str, Any], config_path: Path
+) -> dict[str, Any]:
+    if "goal" in data:
+        raise ConfigError(
+            f"Invalid root config at {config_path}: field 'goal' is not supported; "
+            "use 'goal_file' instead"
+        )
+    raw_goal_file = data.get("goal_file")
+    if raw_goal_file is None:
+        raise ConfigError(
+            f"Invalid root config at {config_path}: missing required field 'goal_file'"
+        )
+    if not isinstance(raw_goal_file, str) or not raw_goal_file.strip():
+        raise ConfigError(
+            f"Invalid root config at {config_path}: goal_file must be a non-empty string"
+        )
+    goal_path = Path(raw_goal_file).expanduser()
+    if not goal_path.is_absolute():
+        goal_path = config_path.parent / goal_path
+    try:
+        goal = goal_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ConfigError(f"Unable to read goal file at {goal_path}: {exc}") from exc
+    if not goal:
+        raise ConfigError(f"Goal file at {goal_path} must not be empty")
+    resolved = dict(data)
+    resolved.pop("goal_file")
+    resolved["goal"] = goal
+    return resolved

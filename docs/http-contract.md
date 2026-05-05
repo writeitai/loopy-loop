@@ -49,6 +49,9 @@ Stop response:
 
 Rules:
 
+- `config_snapshot.goal` is the resolved goal text loaded from
+  `loopy_loop_config.yaml`'s `goal_file`; workers and team-harness never receive
+  the goal file path as the goal.
 - If `current_task` is already set (previous worker crashed without calling `/finished`),
   `/register` records it as failed (`error="abandoned"`) in history and then dispatches
   fresh work. Abandoned cleanup always runs before stop-condition evaluation.
