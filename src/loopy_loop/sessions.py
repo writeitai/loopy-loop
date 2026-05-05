@@ -11,6 +11,8 @@ SESSIONS_DIRNAME = "sessions"
 ITERATIONS_DIRNAME = "iterations"
 SESSION_METADATA_FILENAME = "session.json"
 EVENTS_FILENAME = "events.jsonl"
+PROJECT_STATE_DIRNAME = "project_state"
+EVAL_CHECKS_DIRNAME = "eval_checks"
 PROMPT_FILENAME = "prompt.txt"
 RESULT_FILENAME = "result.json"
 RESULT_TEXT_FILENAME = "result_text.txt"
@@ -56,6 +58,20 @@ def iterations_dir_path(*, repo_root: Path, session_id: str) -> Path:
     )
 
 
+def project_state_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id)
+        / PROJECT_STATE_DIRNAME
+    )
+
+
+def eval_checks_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id)
+        / EVAL_CHECKS_DIRNAME
+    )
+
+
 def iteration_dir_name(*, iteration: int, workflow_id: str) -> str:
     return f"{iteration:04d}_{workflow_id}"
 
@@ -84,13 +100,15 @@ def control_path(
     )
 
 
-def goal_check_path(*, repo_root: Path, session_id: str, iteration: int) -> Path:
+def goal_check_path(
+    *, repo_root: Path, session_id: str, iteration: int, workflow_id: str = "goal_check"
+) -> Path:
     return (
         ensure_iteration_dir(
             repo_root=repo_root,
             session_id=session_id,
             iteration=iteration,
-            workflow_id="goal_check",
+            workflow_id=workflow_id,
         )
         / GOAL_CHECK_FILENAME
     )

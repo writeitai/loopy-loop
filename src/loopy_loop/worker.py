@@ -17,7 +17,10 @@ from loopy_loop.models import IterationResult
 from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.models import TaskResponse
 from loopy_loop.sessions import ensure_iteration_dir
+from loopy_loop.sessions import eval_checks_dir_path
 from loopy_loop.sessions import GOAL_CHECK_FILENAME
+from loopy_loop.sessions import project_state_dir_path
+from loopy_loop.sessions import session_dir_path
 
 # Internal retry constants for /finished — not configurable externally.
 # If all retries fail, the exception propagates and the process exits;
@@ -87,7 +90,7 @@ def _run_task(*, repo_root: Path, task: TaskResponse) -> FinishedRequest:
         task.config_snapshot.model_dump()
     )
     workflow_dir = repo_root / LOOPY_DIRNAME / "workflows" / task.workflow_id
-    load_workflow_config(workflow_dir=workflow_dir)
+    workflow_config = load_workflow_config(workflow_dir=workflow_dir)
     prompt_text = (workflow_dir / "prompt.txt").read_text(encoding="utf-8")
     iteration_dir = ensure_iteration_dir(
         repo_root=repo_root,
@@ -102,6 +105,8 @@ def _run_task(*, repo_root: Path, task: TaskResponse) -> FinishedRequest:
         workflow_id=task.workflow_id,
         iteration_dir=iteration_dir,
         workflow_prompt=prompt_text,
+        emits_goal_check=workflow_config.emits_goal_check,
+        repo_root=repo_root,
     )
     fatal_error: str | None = None
     try:
@@ -145,7 +150,10 @@ def _render_prompt(
     workflow_id: str,
     iteration_dir: Path,
     workflow_prompt: str,
+    emits_goal_check: bool = False,
+    repo_root: Path | None = None,
 ) -> str:
+    root = repo_root or Path.cwd()
     lines = [
         "loopy-loop assignment",
         "",
@@ -158,9 +166,14 @@ def _render_prompt(
         f"Session ID: {session_id}",
         f"Iteration: {iteration}",
         f"Workflow ID: {workflow_id}",
+        f"Session directory: {session_dir_path(repo_root=root, session_id=session_id)}",
+        "Session project_state directory: "
+        f"{project_state_dir_path(repo_root=root, session_id=session_id)}",
+        "Session eval_checks directory: "
+        f"{eval_checks_dir_path(repo_root=root, session_id=session_id)}",
         f"Iteration directory: {iteration_dir}",
     ]
-    if workflow_id == "goal_check":
+    if workflow_id == "goal_check" or emits_goal_check:
         lines.append(
             f"goal_check.json output path: {iteration_dir / GOAL_CHECK_FILENAME}"
         )
