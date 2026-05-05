@@ -12,7 +12,7 @@ Run response:
 {
   "action": "run",
   "workflow_id": "planner",
-  "session_id": "71393ee22450_20260419_143022_ab12cd34",
+  "session_id": "20260419_143022_71393ee22450_ab12cd34",
   "iteration": 3,
   "config_snapshot": {
     "goal": "Ship a minimal working landing page",
@@ -64,7 +64,7 @@ Request:
 ```json
 {
   "workflow_id": "planner",
-  "session_id": "71393ee22450_20260419_143022_ab12cd34",
+  "session_id": "20260419_143022_71393ee22450_ab12cd34",
   "success": true,
   "text": "done",
   "error": null

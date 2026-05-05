@@ -129,7 +129,7 @@ def history_entry_factory():
         data = {
             "iteration": 1,
             "workflow_id": "planner",
-            "session_id": "cdbf6975e8a3_20260419_143022_ab12cd34",
+            "session_id": "20260419_143022_cdbf6975e8a3_ab12cd34",
             "success": True,
             "error": None,
             "started_at": now - timedelta(minutes=1),
@@ -146,7 +146,7 @@ def current_task_factory():
     def factory(**overrides: Any) -> CurrentTask:
         data = {
             "workflow_id": "planner",
-            "session_id": "cdbf6975e8a3_20260419_143022_ab12cd34",
+            "session_id": "20260419_143022_cdbf6975e8a3_ab12cd34",
             "iteration": 1,
             "started_at": utc_now(),
         }
@@ -164,7 +164,7 @@ def state_factory(snapshot_factory: Any):
             "status": "running",
             "goal_hash": snapshot.goal_hash,
             "max_turns": snapshot.max_turns,
-            "active_session_id": "cdbf6975e8a3_20260419_143022_ab12cd34",
+            "active_session_id": "20260419_143022_cdbf6975e8a3_ab12cd34",
             "goal_met": False,
             "stop_requested": False,
             "unresolvable_error": False,
