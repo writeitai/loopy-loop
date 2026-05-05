@@ -32,6 +32,8 @@ class RootConfigSnapshot(BaseModel):
     team_harness_provider: str = Field(...)
     team_harness_model: str = Field(...)
     team_harness_agents: list[str] = Field(...)
+    team_harness_agent_models: dict[str, str] = Field(default_factory=dict)
+    team_harness_agent_reasoning_efforts: dict[str, str] = Field(default_factory=dict)
     team_harness_api_base: str = Field(...)
     team_harness_api_key_env: str = Field(...)
     team_harness_system_prompt_extension: str = Field(...)

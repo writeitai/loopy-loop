@@ -73,6 +73,9 @@ goal_check_consecutive_failures_cap: 3
 team_harness_provider: "openai_compat"   # or "codex", "claude", "gemini"
 team_harness_model: "gpt-5.4"
 team_harness_agents: ["codex"]
+team_harness_agent_models:
+  codex: "gpt-5.4"
+team_harness_agent_reasoning_efforts: {}
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
 team_harness_system_prompt_extension: ""
@@ -81,6 +84,8 @@ team_harness_system_prompt_extension: ""
 Constraints:
 
 - `goal_hash` is derived from `goal` and used in session ids and session metadata.
+- `team_harness_model` controls the coordinator. Use `team_harness_agent_models`
+  to pin default worker subprocess models by agent type.
 - `team_harness_api_base` is normalized: trailing slash stripped, `/v1` appended
   when missing — write whichever form you prefer.
 - Unknown config keys are rejected. All `team_harness_*` field names are exact.

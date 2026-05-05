@@ -104,6 +104,10 @@ goal_check_consecutive_failures_cap: 3
 team_harness_provider: "openai_compat"
 team_harness_model: "gpt-5.4"
 team_harness_agents: ["codex"]
+team_harness_agent_models:
+  codex: "gpt-5.4"
+team_harness_agent_reasoning_efforts:
+  codex: "high"
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
 team_harness_system_prompt_extension: ""
@@ -113,8 +117,12 @@ Rules:
 
 - Session ids and session metadata include a deterministic `goal_hash` derived
   from the configured `goal`
+- `team_harness_model` controls the team-harness coordinator model; worker
+  subprocess defaults are controlled by `team_harness_agent_models`
 - `team_harness_api_base` is normalized by loopy-loop: trailing slash stripped, `/v1` appended when missing
 - `team_harness_api_key_env` must be set during coordinator preflight and again in the worker before `TeamHarness(...)`
+- `team_harness_agent_reasoning_efforts` is optional and only affects workers
+  whose team-harness template supports a reasoning-effort flag
 
 Workflow config:
 
