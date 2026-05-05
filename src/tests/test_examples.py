@@ -5,8 +5,13 @@ from pathlib import Path
 from loopy_loop.config import run_preflight
 
 
-def test_podcast_creator_example_preflight() -> None:
-    repo_root = Path(__file__).resolve().parents[2] / "examples" / "podcast_creator"
+def test_inner_outer_eval_template_preflight() -> None:
+    repo_root = (
+        Path(__file__).resolve().parents[1]
+        / "loopy_loop"
+        / "templates"
+        / "inner_outer_eval"
+    )
 
     preflight = run_preflight(repo_root=repo_root)
 

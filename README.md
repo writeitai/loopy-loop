@@ -46,6 +46,7 @@ target repo/
 
 ```bash
 loopy init
+loopy init --template inner_outer_eval
 loopy coordinator --host 127.0.0.1 --port 8080
 loopy worker --coordinator http://127.0.0.1:8080
 loopy status
@@ -59,11 +60,16 @@ loopy stop
 - `.loopy_loop/workflows/goal_check/config.yaml`
 - `.gitignore` entries for `.loopy_loop/sessions/` and `.loopy_loop/state.json*`
 
+Use `loopy init --template inner_outer_eval` to scaffold the packaged workflow
+set for outer planning, inner implementation, eval review, and eval running.
+
 ## CLI Reference
 
-`loopy init`
+`loopy init [--template default|inner_outer_eval]`
 
 - Scaffolds the root config and reserved `goal_check` workflow.
+- `--template inner_outer_eval` scaffolds the packaged inner/outer/eval workflow
+  set instead: `outer`, `inner`, `eval_reviewer`, and `eval_runner`.
 - Does not overwrite existing workflow files.
 
 `loopy coordinator --host 0.0.0.0 --port 8080 [--resume]`

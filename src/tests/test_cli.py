@@ -67,6 +67,83 @@ def test_init_preserves_existing_files_and_updates_gitignore(
         assert gitignore_lines.count(line) == 1
 
 
+def test_init_inner_outer_eval_template_scaffolds_expected_files(
+    repo_root: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.chdir(repo_root)
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["init", "--template", "inner_outer_eval"])
+
+    assert result.exit_code == 0
+    assert repo_root.joinpath("loopy_loop_config.yaml").exists()
+    assert repo_root.joinpath("loopy_loop_goal.txt").exists()
+    assert repo_root.joinpath(".loopy_loop/workflows/eval_reviewer/prompt.txt").exists()
+    assert repo_root.joinpath(".loopy_loop/workflows/eval_runner/prompt.txt").exists()
+    assert repo_root.joinpath(".loopy_loop/workflows/inner/prompt.txt").exists()
+    assert repo_root.joinpath(".loopy_loop/workflows/outer/prompt.txt").exists()
+    assert not repo_root.joinpath(
+        ".loopy_loop/workflows/goal_check/prompt.txt"
+    ).exists()
+    assert "You are the outer loop for this loopy-loop session." in repo_root.joinpath(
+        ".loopy_loop/workflows/outer/prompt.txt"
+    ).read_text(encoding="utf-8")
+
+
+def test_init_inner_outer_eval_template_is_idempotent(
+    repo_root: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.chdir(repo_root)
+    runner = CliRunner()
+
+    first = runner.invoke(main, ["init", "--template", "inner_outer_eval"])
+    second = runner.invoke(main, ["init", "--template", "inner_outer_eval"])
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert "already initialized" in second.output
+
+
+def test_init_inner_outer_eval_template_preserves_existing_files(
+    repo_root: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.chdir(repo_root)
+    runner = CliRunner()
+    root_config = repo_root / "loopy_loop_config.yaml"
+    workflow_dir = repo_root / ".loopy_loop" / "workflows" / "outer"
+    workflow_dir.mkdir(parents=True, exist_ok=True)
+    outer_prompt = workflow_dir / "prompt.txt"
+    gitignore = repo_root / ".gitignore"
+    root_config.write_text('goal_file: "keep_me.txt"\n', encoding="utf-8")
+    outer_prompt.write_text("sentinel-prompt\n", encoding="utf-8")
+    gitignore.write_text(".loopy_loop/sessions/\nexisting-entry\n", encoding="utf-8")
+
+    result = runner.invoke(main, ["init", "--template", "inner_outer_eval"])
+    gitignore_lines = gitignore.read_text(encoding="utf-8").splitlines()
+
+    assert result.exit_code == 0
+    assert root_config.read_text(encoding="utf-8") == 'goal_file: "keep_me.txt"\n'
+    assert outer_prompt.read_text(encoding="utf-8") == "sentinel-prompt\n"
+    assert repo_root.joinpath(".loopy_loop/workflows/inner/prompt.txt").exists()
+    for line in [
+        ".loopy_loop/sessions/",
+        ".loopy_loop/state.json",
+        ".loopy_loop/state.json.lock",
+        ".loopy_loop/state.json.archive_*.json",
+    ]:
+        assert gitignore_lines.count(line) == 1
+
+
+def test_init_rejects_unknown_template(repo_root: Any, monkeypatch: Any) -> None:
+    monkeypatch.chdir(repo_root)
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["init", "--template", "missing"])
+
+    assert result.exit_code != 0
+    assert "Invalid value for '--template'" in result.output
+
+
 def test_status_and_stop_commands(
     repo_builder: Any, monkeypatch: Any, state_factory: Any
 ) -> None:
