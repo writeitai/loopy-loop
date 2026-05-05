@@ -233,19 +233,12 @@ def test_harness_runner_preserves_harness_error_detail(
         "stderr_tail": "TEST: synthetic auth failure",
     }
 
-    class DetailedTeamHarnessError(TeamHarnessError):
-        detail: dict[str, object]
-
-        def __init__(self, message: str, detail: dict[str, object]) -> None:
-            super().__init__(message)
-            self.detail = detail
-
     class FakeHarness:
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
 
         async def run(self, task: str) -> TeamHarnessResult:
-            raise DetailedTeamHarnessError("boom", detail)
+            raise TeamHarnessError("boom", detail=detail)
 
     result = run_harness_iteration(
         repo_root=repo_root,
@@ -255,7 +248,10 @@ def test_harness_runner_preserves_harness_error_detail(
     )
 
     assert result.success is False
-    assert result.error == "boom"
+    assert result.error is not None
+    assert result.error.startswith("boom")
+    assert "outcome=failed_before_session" in result.error
+    assert "TEST: synthetic auth failure" in result.error
     assert result.error_detail == detail
 
 
