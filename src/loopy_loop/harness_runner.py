@@ -55,8 +55,13 @@ def run_harness_iteration(
         raise
     except TeamHarnessError as exc:
         traceback.print_exc()
+        detail = _extract_error_detail(exc)
         return IterationResult(
-            success=False, text=None, error=str(exc), harness_run_id=""
+            success=False,
+            text=None,
+            error=str(exc),
+            error_detail=detail,
+            harness_run_id="",
         )
     except Exception as exc:
         traceback.print_exc()
@@ -119,6 +124,13 @@ def _supports_kwargs(
     if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters):
         return True
     return all(name in signature.parameters for name in names)
+
+
+def _extract_error_detail(exc: TeamHarnessError) -> dict[str, object] | None:
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        return detail
+    return None
 
 
 def write_iteration_artifacts(

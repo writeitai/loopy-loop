@@ -220,6 +220,43 @@ def test_harness_runner_normalizes_harness_error(
 
     assert result.success is False
     assert result.error == "boom"
+    assert result.error_detail is None
+
+
+def test_harness_runner_preserves_harness_error_detail(
+    repo_root: Any, snapshot_factory: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    detail: dict[str, object] = {
+        "outcome": "failed_before_session",
+        "exit_code": 7,
+        "stderr_tail": "TEST: synthetic auth failure",
+    }
+
+    class DetailedTeamHarnessError(TeamHarnessError):
+        detail: dict[str, object]
+
+        def __init__(self, message: str, detail: dict[str, object]) -> None:
+            super().__init__(message)
+            self.detail = detail
+
+    class FakeHarness:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        async def run(self, task: str) -> TeamHarnessResult:
+            raise DetailedTeamHarnessError("boom", detail)
+
+    result = run_harness_iteration(
+        repo_root=repo_root,
+        config_snapshot=snapshot_factory(),
+        rendered_prompt="rendered prompt",
+        harness_factory=FakeHarness,
+    )
+
+    assert result.success is False
+    assert result.error == "boom"
+    assert result.error_detail == detail
 
 
 def test_harness_runner_writes_failure_artifacts(tmp_path: Any) -> None:
@@ -227,7 +264,11 @@ def test_harness_runner_writes_failure_artifacts(tmp_path: Any) -> None:
         iteration_dir=tmp_path,
         rendered_prompt="rendered prompt",
         iteration_result=IterationResult(
-            success=False, text=None, error="boom", harness_run_id=""
+            success=False,
+            text=None,
+            error="boom",
+            error_detail={"outcome": "failed_before_session"},
+            harness_run_id="",
         ),
     )
     result_json = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
@@ -237,4 +278,5 @@ def test_harness_runner_writes_failure_artifacts(tmp_path: Any) -> None:
     assert (tmp_path / "harness_run_id.txt").read_text(encoding="utf-8") == ""
     assert result_json["success"] is False
     assert result_json["error"] == "boom"
+    assert result_json["error_detail"] == {"outcome": "failed_before_session"}
     assert result_json["harness_output_dir"] == ""
