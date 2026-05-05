@@ -93,6 +93,22 @@ Constraints:
   that starts the coordinator AND in the shell that starts each worker.
 - Some providers (e.g. `codex`) skip the API-key check.
 
+## Session State Files
+
+Each session has:
+
+- `project_state/` for workflow-owned durable markdown state
+- `eval_checks/` for session-scoped eval-banana checks
+- `updates_from_user.md` for user requests that arrive during a run
+- `project_state/finished.md` for outer-verified completed work
+- `harness_outputs/<NNNN>_<workflow_id>/<team_harness_run_id>/` for
+  team-harness coordinator and worker artifacts
+
+Outer workflows should read `updates_from_user.md` every run. If it contains
+content, they should reflect it into `project_state/` first and clear the file
+only after doing so. Inner workflows should not append final entries to
+`finished.md`; the outer workflow owns verified completion tracking.
+
 ### Custom workflows — `.loopy_loop/workflows/<id>/`
 
 Each workflow is a folder; the folder name is the workflow id.

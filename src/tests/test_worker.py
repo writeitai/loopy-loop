@@ -156,6 +156,9 @@ def test_worker_reads_prompt_from_disk(
     assert "Session directory:" in captured["prompt"]
     assert "Session project_state directory:" in captured["prompt"]
     assert "Session eval_checks directory:" in captured["prompt"]
+    assert "Session updates_from_user path:" in captured["prompt"]
+    assert "Session finished ledger path:" in captured["prompt"]
+    assert "Session harness outputs directory:" in captured["prompt"]
     # Assignment ID should NOT appear.
     assert "Assignment ID" not in captured["prompt"]
 
@@ -201,6 +204,8 @@ def test_worker_includes_goal_check_path_for_emitting_workflow(
 
     assert "goal_check.json output path:" in captured["prompt"]
     assert "0003_eval_runner/goal_check.json" in captured["prompt"]
+    assert "Iteration harness output root:" in captured["prompt"]
+    assert "harness_outputs/0003_eval_runner" in captured["prompt"]
 
 
 def test_worker_uses_config_snapshot_not_disk(

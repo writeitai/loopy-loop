@@ -8,12 +8,17 @@ Inputs available in the rendered assignment:
 - Session directory
 - Session project_state directory
 - Session eval_checks directory
+- Session updates_from_user path
+- Session finished ledger path
+- Session harness outputs directory
 - Iteration directory
+- Iteration harness output root
 
 State files to read:
 - project_state/README.md
 - project_state/current_state.md
 - project_state/what_we_have.md
+- project_state/finished.md
 - project_state/what_we_should_do/plan.md
 - the README.md for the selected task
 
@@ -44,6 +49,9 @@ Completion rules:
    - blockers, if any
 4. Add only factual, narrow notes to project_state/what_we_have.md when useful.
    The outer loop owns final completion summaries.
+5. Write any supporting harness artifacts under the iteration harness output
+   root when useful. Do not append final entries to finished.md; the outer loop
+   owns verified completion entries.
 
 Your work will be reviewed by later harnesses. Be explicit about what changed,
 what was verified, and what remains.

@@ -8,7 +8,10 @@ Inputs available in the rendered assignment:
 - Session directory
 - Session project_state directory
 - Session eval_checks directory
+- Session finished ledger path
+- Session harness outputs directory
 - Iteration directory
+- Iteration harness output root
 - goal_check.json output path
 
 What to do:
@@ -24,7 +27,9 @@ What to do:
    - pass/fail status
    - run id or report path when available
    - failed checks and concise next steps
-6. Write goal_check.json to the exact path from the rendered assignment.
+6. Write supporting eval logs or reports under the iteration harness output root
+   when useful.
+7. Write goal_check.json to the exact path from the rendered assignment.
 
 goal_check.json schema:
 {

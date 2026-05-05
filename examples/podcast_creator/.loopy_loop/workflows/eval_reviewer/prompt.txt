@@ -9,7 +9,10 @@ Inputs available in the rendered assignment:
 - Session directory
 - Session project_state directory
 - Session eval_checks directory
+- Session finished ledger path
+- Session harness outputs directory
 - Iteration directory
+- Iteration harness output root
 
 State contract:
 - Create the session project_state directory if it does not exist.
@@ -42,6 +45,7 @@ What to do:
 7. Update project_state/eval_results.md with the checks created, what goal
    condition each check covers, and any validation result.
 8. Update project_state/current_state.md with the current eval readiness state.
+9. Write any supporting reports under the iteration harness output root when useful.
 
 Good check coverage should answer:
 - Does the repo contain a runnable implementation for the goal?

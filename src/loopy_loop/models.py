@@ -115,3 +115,4 @@ class IterationResult(BaseModel):
     text: str | None = Field(default=None)
     error: str | None = Field(default=None)
     harness_run_id: str = Field(default="")
+    harness_output_dir: str = Field(default="")
