@@ -159,3 +159,229 @@ def test_scheduler_skips_disabled_and_requires_most_recent_successful_predecesso
     assert locked is None
     assert unlocked is not None
     assert unlocked.id == "implement"
+
+
+def test_run_on_start_priority_wins_first_iteration(repo_builder: Any) -> None:
+    repo_root = repo_builder(
+        workflows={
+            "eval_reviewer": {
+                "prompt": "Review evals",
+                "config": {
+                    "enabled": True,
+                    "priority": 100,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "run_on_start": True,
+                    "run_after_successes": {"workflow_id": "inner", "every": 10},
+                    "description": "",
+                },
+            },
+            "outer": {
+                "prompt": "Plan",
+                "config": {
+                    "enabled": True,
+                    "priority": 10,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "",
+                },
+            },
+            "inner": {
+                "prompt": "Implement",
+                "config": {
+                    "enabled": True,
+                    "priority": 20,
+                    "run_every": 1,
+                    "must_follow": "outer",
+                    "not_before_iteration": 1,
+                    "description": "",
+                },
+            },
+        }
+    )
+    workflows = load_workflow_definitions(repo_root=repo_root)
+
+    chosen = choose_next_workflow(workflows=workflows, history=[], iteration_count=0)
+
+    assert chosen is not None
+    assert chosen.id == "eval_reviewer"
+
+
+def test_run_after_successes_waits_for_target_success_count(
+    repo_builder: Any, history_entry_factory: Any
+) -> None:
+    repo_root = repo_builder(
+        workflows={
+            "eval_reviewer": {
+                "prompt": "Review evals",
+                "config": {
+                    "enabled": True,
+                    "priority": 100,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "run_after_successes": {"workflow_id": "inner", "every": 10},
+                    "description": "",
+                },
+            },
+            "outer": {
+                "prompt": "Plan",
+                "config": {
+                    "enabled": True,
+                    "priority": 10,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "",
+                },
+            },
+            "inner": {
+                "prompt": "Implement",
+                "config": {
+                    "enabled": True,
+                    "priority": 20,
+                    "run_every": 1,
+                    "must_follow": "outer",
+                    "not_before_iteration": 1,
+                    "description": "",
+                },
+            },
+        }
+    )
+    workflows = load_workflow_definitions(repo_root=repo_root)
+    history = [history_entry_factory(iteration=1, workflow_id="eval_reviewer")]
+    for index in range(9):
+        history.extend(
+            [
+                history_entry_factory(iteration=2 + index * 2, workflow_id="outer"),
+                history_entry_factory(iteration=3 + index * 2, workflow_id="inner"),
+            ]
+        )
+
+    before_tenth = choose_next_workflow(
+        workflows=workflows, history=history, iteration_count=19
+    )
+    history.extend(
+        [
+            history_entry_factory(iteration=20, workflow_id="outer"),
+            history_entry_factory(iteration=21, workflow_id="inner"),
+        ]
+    )
+    after_tenth = choose_next_workflow(
+        workflows=workflows, history=history, iteration_count=21
+    )
+
+    assert before_tenth is not None
+    assert before_tenth.id == "outer"
+    assert after_tenth is not None
+    assert after_tenth.id == "eval_reviewer"
+
+
+def test_run_after_successes_does_not_repeat_same_bucket(
+    repo_builder: Any, history_entry_factory: Any
+) -> None:
+    repo_root = repo_builder(
+        workflows={
+            "eval_reviewer": {
+                "prompt": "Review evals",
+                "config": {
+                    "enabled": True,
+                    "priority": 100,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "run_after_successes": {"workflow_id": "inner", "every": 10},
+                    "description": "",
+                },
+            },
+            "outer": {
+                "prompt": "Plan",
+                "config": {
+                    "enabled": True,
+                    "priority": 10,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "",
+                },
+            },
+        }
+    )
+    workflows = load_workflow_definitions(repo_root=repo_root)
+    history = [
+        history_entry_factory(iteration=iteration, workflow_id="inner")
+        for iteration in range(1, 11)
+    ]
+    history.append(history_entry_factory(iteration=11, workflow_id="eval_reviewer"))
+
+    chosen = choose_next_workflow(
+        workflows=workflows, history=history, iteration_count=11
+    )
+
+    assert chosen is not None
+    assert chosen.id == "outer"
+
+
+def test_eval_runner_waits_for_eval_reviewer_predecessor(
+    repo_builder: Any, history_entry_factory: Any
+) -> None:
+    repo_root = repo_builder(
+        workflows={
+            "eval_reviewer": {
+                "prompt": "Review evals",
+                "config": {
+                    "enabled": True,
+                    "priority": 100,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "run_after_successes": {"workflow_id": "inner", "every": 10},
+                    "description": "",
+                },
+            },
+            "eval_runner": {
+                "prompt": "Run evals",
+                "config": {
+                    "enabled": True,
+                    "priority": 90,
+                    "run_every": 1,
+                    "must_follow": "eval_reviewer",
+                    "not_before_iteration": 0,
+                    "run_after_successes": {"workflow_id": "inner", "every": 10},
+                    "emits_goal_check": True,
+                    "description": "",
+                },
+            },
+            "outer": {
+                "prompt": "Plan",
+                "config": {
+                    "enabled": True,
+                    "priority": 10,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "",
+                },
+            },
+        }
+    )
+    workflows = load_workflow_definitions(repo_root=repo_root)
+    history = [
+        history_entry_factory(iteration=iteration, workflow_id="inner")
+        for iteration in range(1, 11)
+    ]
+
+    before_reviewer = choose_next_workflow(
+        workflows=workflows, history=history, iteration_count=10
+    )
+    history.append(history_entry_factory(iteration=11, workflow_id="eval_reviewer"))
+    after_reviewer = choose_next_workflow(
+        workflows=workflows, history=history, iteration_count=11
+    )
+
+    assert before_reviewer is not None
+    assert before_reviewer.id == "eval_reviewer"
+    assert after_reviewer is not None
+    assert after_reviewer.id == "eval_runner"

@@ -8,6 +8,8 @@ One session directory is created per fresh coordinator run and reused for all it
     └── <session_id>/
         ├── session.json
         ├── events.jsonl
+        ├── project_state/
+        ├── eval_checks/
         └── iterations/
             ├── 0001_planner/
             │   ├── prompt.txt
@@ -35,6 +37,22 @@ One session directory is created per fresh coordinator run and reused for all it
 
 - Reserved append-only event log for diagnostics
 - Created at session start in v1
+
+`project_state/`
+
+- Optional workflow-owned markdown state for reusable workflows
+- Common files include `README.md`, `current_state.md`, `what_we_have.md`,
+  `decisions.md`, `eval_results.md`, and `what_we_should_do/plan.md`
+- The coordinator does not parse these files
+
+`eval_checks/`
+
+- Optional workflow-owned eval-banana checks for this session
+- A workflow can run only these checks with:
+
+```bash
+eval-banana run --check-dir .loopy_loop/sessions/<session_id>/eval_checks
+```
 
 ## Iteration Files
 
@@ -81,10 +99,11 @@ One session directory is created per fresh coordinator run and reused for all it
 
 `goal_check.json`
 
-- Authoritative only at:
+- Authoritative only at the current iteration directory for `goal_check` or a
+  workflow configured with `emits_goal_check=true`:
 
 ```text
-.loopy_loop/sessions/<session_id>/iterations/<NNNN>_goal_check/goal_check.json
+.loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>/goal_check.json
 ```
 
 - Required schema in v1:

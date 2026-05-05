@@ -77,5 +77,5 @@ Rules:
   available task as if `/register` had been called. If the state is terminal, it returns
   `action=stop`.
 - The coordinator reads `control.json` only from the current iteration directory.
-- The coordinator reads `goal_check.json` only from the current `goal_check` iteration
-  directory.
+- The coordinator reads `goal_check.json` only from the current iteration directory
+  when the workflow is `goal_check` or has `emits_goal_check=true`.

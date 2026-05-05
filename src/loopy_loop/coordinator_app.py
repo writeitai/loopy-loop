@@ -63,6 +63,7 @@ class CoordinatorService:
         self.repo_root = repo_root
         self.preflight = preflight
         self.workflows = preflight.workflows
+        self.workflows_by_id = {workflow.id: workflow for workflow in self.workflows}
         self.state_store = state_store
         self._prepare_state(resume=resume)
 
@@ -181,7 +182,7 @@ class CoordinatorService:
                 error = "invalid_control_output"
 
             # 5c: Goal-check signal handling.
-            if active.workflow_id == "goal_check":
+            if self._workflow_expects_goal_check_signal(workflow_id=active.workflow_id):
                 goal_signal = self._read_goal_check_signal(current_task=active)
                 if goal_signal is None:
                     success = False
@@ -336,8 +337,15 @@ class CoordinatorService:
             repo_root=self.repo_root,
             session_id=current_task.session_id,
             iteration=current_task.iteration,
+            workflow_id=current_task.workflow_id,
         )
         return _read_signal(path=path, model=GoalCheckSignal)
+
+    def _workflow_expects_goal_check_signal(self, *, workflow_id: str) -> bool:
+        workflow = self.workflows_by_id.get(workflow_id)
+        return workflow_id == "goal_check" or (
+            workflow is not None and workflow.emits_goal_check
+        )
 
     def _has_unresolvable_error_signal(self, *, current_task: CurrentTask) -> bool:
         path = control_path(

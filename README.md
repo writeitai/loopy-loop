@@ -120,9 +120,13 @@ Workflow config:
 
 ```yaml
 enabled: true
+priority: 0
 run_every: 1
 must_follow: null
 not_before_iteration: 0
+run_on_start: false
+run_after_successes: null
+emits_goal_check: false
 description: ""
 ```
 
@@ -131,7 +135,31 @@ Rules:
 - Workflow id is the folder name under `.loopy_loop/workflows/`
 - `must_follow` must resolve during coordinator preflight
 - `run_every` is based on completed iteration count, not wall clock
+- `priority` breaks ties among eligible workflows; higher values run first
+- `run_on_start=true` makes a workflow eligible before any successful workflow has run
+- `run_after_successes` can run a workflow after every N successful runs of another workflow:
+
+```yaml
+run_after_successes:
+  workflow_id: inner
+  every: 10
+```
+
+- `emits_goal_check=true` lets a non-`goal_check` workflow write `goal_check.json`
+  and participate in the same stop logic as the reserved `goal_check` workflow
 - `goal_check` is reserved and scaffolded with `not_before_iteration: 1`
+
+Cadence example:
+
+```yaml
+# Run eval_reviewer at the beginning and then after every 10 successful inner runs.
+enabled: true
+priority: 100
+run_on_start: true
+run_after_successes:
+  workflow_id: inner
+  every: 10
+```
 
 ## HTTP Contract Summary
 
@@ -161,6 +189,15 @@ Every `TeamHarness.run()` call is fresh. Continuity comes from:
 
 `team-harness` may also emit its own native artifact tree relative to the repo root. loopy-loop keeps its own state and iteration artifacts separate under `.loopy_loop/`.
 
+Workflow prompts receive session-scoped paths for reusable project state and
+eval definitions:
+
+- `.loopy_loop/sessions/<session_id>/project_state/`
+- `.loopy_loop/sessions/<session_id>/eval_checks/`
+
+These directories are workflow-owned. The coordinator only owns
+`.loopy_loop/state.json` and iteration dispatch state.
+
 ## Control Files
 
 `control.json` is read only from the current iteration directory:
@@ -169,10 +206,11 @@ Every `TeamHarness.run()` call is fresh. Continuity comes from:
 {"unresolvable_error": true, "reason": "Missing credentials", "schema_version": 1}
 ```
 
-`goal_check.json` is authoritative only at:
+`goal_check.json` is authoritative only at the current iteration directory for
+the reserved `goal_check` workflow or any workflow with `emits_goal_check=true`:
 
 ```text
-.loopy_loop/sessions/<session_id>/iterations/<NNNN>_goal_check/goal_check.json
+.loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>/goal_check.json
 ```
 
 ```json

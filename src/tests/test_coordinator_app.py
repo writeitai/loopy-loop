@@ -491,6 +491,115 @@ def test_goal_check_sets_goal_met(
     assert updated.goal_met is True
 
 
+def test_emits_goal_check_workflow_sets_goal_met(
+    repo_builder: Any, monkeypatch: Any, current_task_factory: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder(
+        workflows={
+            "eval_runner": {
+                "prompt": "Run evals",
+                "config": {
+                    "enabled": True,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "emits_goal_check": True,
+                    "description": "",
+                },
+            }
+        }
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    store = StateStore(repo_root=repo_root)
+    state = store.read_state()
+    assert state is not None
+    current_task = current_task_factory(
+        workflow_id="eval_runner", session_id=state.active_session_id, iteration=1
+    )
+    state.current_task = current_task
+    store.write_state(state=state)
+    goal_check_path = (
+        repo_root
+        / ".loopy_loop"
+        / "sessions"
+        / state.active_session_id
+        / "iterations"
+        / "0001_eval_runner"
+        / "goal_check.json"
+    )
+    goal_check_path.parent.mkdir(parents=True, exist_ok=True)
+    goal_check_path.write_text(
+        json.dumps({"goal_met": True, "reason": "evals passed", "schema_version": 1}),
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/finished",
+        json={
+            "workflow_id": "eval_runner",
+            "session_id": state.active_session_id,
+            "success": True,
+            "text": "done",
+            "error": None,
+        },
+    ).json()
+    updated = store.read_state()
+
+    assert response["action"] == "stop"
+    assert response["stop_reason"] == "goal_met"
+    assert updated is not None
+    assert updated.goal_met is True
+
+
+def test_invalid_emits_goal_check_output_stops_at_failure_cap(
+    repo_builder: Any, monkeypatch: Any, current_task_factory: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder(
+        root_config={"goal_check_consecutive_failures_cap": 1},
+        workflows={
+            "eval_runner": {
+                "prompt": "Run evals",
+                "config": {
+                    "enabled": True,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "emits_goal_check": True,
+                    "description": "",
+                },
+            }
+        },
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    store = StateStore(repo_root=repo_root)
+    state = store.read_state()
+    assert state is not None
+    current_task = current_task_factory(
+        workflow_id="eval_runner", session_id=state.active_session_id, iteration=1
+    )
+    state.current_task = current_task
+    store.write_state(state=state)
+
+    response = client.post(
+        "/finished",
+        json={
+            "workflow_id": "eval_runner",
+            "session_id": state.active_session_id,
+            "success": True,
+            "text": "done",
+            "error": None,
+        },
+    ).json()
+    updated = store.read_state()
+
+    assert response["action"] == "stop"
+    assert response["stop_reason"] == "goal_check_broken"
+    assert updated is not None
+    assert updated.goal_check_consecutive_failures == 1
+
+
 def test_no_eligible_workflow_stops(repo_builder: Any, monkeypatch: Any) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     # Only goal_check workflow, which requires iteration >= 1. At iteration 0,

@@ -30,6 +30,9 @@ DEFAULT_WORKFLOW_RUN_EVERY = 1
 DEFAULT_WORKFLOW_MUST_FOLLOW: str | None = None
 DEFAULT_WORKFLOW_NOT_BEFORE_ITERATION = 0
 DEFAULT_WORKFLOW_DESCRIPTION = ""
+DEFAULT_WORKFLOW_PRIORITY = 0
+DEFAULT_WORKFLOW_RUN_ON_START = False
+DEFAULT_WORKFLOW_EMITS_GOAL_CHECK = False
 
 
 class ConfigError(Exception):
@@ -37,22 +40,49 @@ class ConfigError(Exception):
 
 
 class RootConfig(BaseModel):
+    """Repo-level loop configuration loaded from loopy_loop_config.yaml."""
+
     model_config = ConfigDict(extra="forbid")
 
-    goal: str
-    completion_criteria: list[str]
-    stop_criteria: list[str]
-    max_turns: int = Field(...)
-    goal_check_consecutive_failures_cap: int = Field(
-        default=DEFAULT_GOAL_CHECK_FAILURE_CAP, ge=1
+    goal: str = Field(
+        description="Natural-language goal the loop is trying to satisfy."
     )
-    team_harness_provider: str = Field(default=DEFAULT_PROVIDER)
-    team_harness_model: str = Field(default=DEFAULT_MODEL)
-    team_harness_agents: list[str] = Field(default_factory=lambda: list(DEFAULT_AGENTS))
-    team_harness_api_base: str = Field(default=DEFAULT_API_BASE)
-    team_harness_api_key_env: str = Field(default=DEFAULT_API_KEY_ENV)
+    completion_criteria: list[str] = Field(
+        description="Observable criteria used by workflows and goal checks."
+    )
+    stop_criteria: list[str] = Field(
+        description="Conditions that should stop the loop before the goal is met."
+    )
+    max_turns: int = Field(
+        ..., description="Maximum number of completed workflow iterations."
+    )
+    goal_check_consecutive_failures_cap: int = Field(
+        default=DEFAULT_GOAL_CHECK_FAILURE_CAP,
+        ge=1,
+        description="Consecutive invalid goal-check outputs allowed before failure.",
+    )
+    team_harness_provider: str = Field(
+        default=DEFAULT_PROVIDER,
+        description="team-harness provider name used by workers.",
+    )
+    team_harness_model: str = Field(
+        default=DEFAULT_MODEL, description="Model name passed to team-harness."
+    )
+    team_harness_agents: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_AGENTS),
+        description="Agent names team-harness should make available.",
+    )
+    team_harness_api_base: str = Field(
+        default=DEFAULT_API_BASE,
+        description="OpenAI-compatible API base URL passed to team-harness.",
+    )
+    team_harness_api_key_env: str = Field(
+        default=DEFAULT_API_KEY_ENV,
+        description="Environment variable name containing the API key.",
+    )
     team_harness_system_prompt_extension: str = Field(
-        default=DEFAULT_SYSTEM_PROMPT_EXTENSION
+        default=DEFAULT_SYSTEM_PROMPT_EXTENSION,
+        description="Additional system prompt text appended for every harness run.",
     )
 
     @computed_field
@@ -73,19 +103,67 @@ class RootConfig(BaseModel):
         return normalize_api_base(value=value)
 
 
-class WorkflowConfig(BaseModel):
+class RunAfterSuccesses(BaseModel):
+    """Cadence rule that unlocks a workflow after successful runs of another."""
+
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = Field(default=DEFAULT_WORKFLOW_ENABLED)
-    run_every: int = Field(default=DEFAULT_WORKFLOW_RUN_EVERY, ge=1)
-    must_follow: str | None = Field(default=DEFAULT_WORKFLOW_MUST_FOLLOW)
-    not_before_iteration: int = Field(
-        default=DEFAULT_WORKFLOW_NOT_BEFORE_ITERATION, ge=0
+    workflow_id: str = Field(
+        ..., description="Workflow id whose successful runs drive this cadence."
     )
-    description: str = Field(default=DEFAULT_WORKFLOW_DESCRIPTION)
+    every: int = Field(
+        ..., ge=1, description="Run after this many new successful target runs."
+    )
+
+
+class WorkflowConfig(BaseModel):
+    """Per-workflow scheduling and execution configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(
+        default=DEFAULT_WORKFLOW_ENABLED,
+        description="Whether this workflow can be scheduled.",
+    )
+    run_every: int = Field(
+        default=DEFAULT_WORKFLOW_RUN_EVERY,
+        ge=1,
+        description="Minimum completed iterations between runs of this workflow.",
+    )
+    must_follow: str | None = Field(
+        default=DEFAULT_WORKFLOW_MUST_FOLLOW,
+        description="Required immediately previous successful workflow id.",
+    )
+    not_before_iteration: int = Field(
+        default=DEFAULT_WORKFLOW_NOT_BEFORE_ITERATION,
+        ge=0,
+        description="Earliest completed iteration count where workflow is eligible.",
+    )
+    description: str = Field(
+        default=DEFAULT_WORKFLOW_DESCRIPTION,
+        description="Human-readable purpose of this workflow.",
+    )
+    priority: int = Field(
+        default=DEFAULT_WORKFLOW_PRIORITY,
+        description="Tie-breaker among eligible workflows; higher runs first.",
+    )
+    run_on_start: bool = Field(
+        default=DEFAULT_WORKFLOW_RUN_ON_START,
+        description="Allow this workflow before any successful workflow has run.",
+    )
+    run_after_successes: RunAfterSuccesses | None = Field(
+        default=None,
+        description="Optional cadence based on successful runs of another workflow.",
+    )
+    emits_goal_check: bool = Field(
+        default=DEFAULT_WORKFLOW_EMITS_GOAL_CHECK,
+        description="Whether this workflow is expected to write goal_check.json.",
+    )
 
 
 class WorkflowDefinition(WorkflowConfig):
+    """Resolved workflow config plus its id and on-disk file locations."""
+
     id: str = Field(...)
     directory: Path = Field(...)
     prompt_path: Path = Field(...)
@@ -93,6 +171,8 @@ class WorkflowDefinition(WorkflowConfig):
 
 
 class PreflightResult(BaseModel):
+    """Validated root config and workflow definitions captured at startup."""
+
     root_config: RootConfig
     workflows: list[WorkflowDefinition]
 
@@ -157,12 +237,20 @@ def validate_workflow_graph(*, workflows: list[WorkflowDefinition]) -> None:
     workflow_ids = {workflow.id for workflow in workflows}
     unresolved: list[str] = []
     for workflow in workflows:
-        if workflow.must_follow is None:
-            continue
-        if workflow.must_follow not in workflow_ids:
+        if (
+            workflow.must_follow is not None
+            and workflow.must_follow not in workflow_ids
+        ):
             unresolved.append(
                 f"{workflow.id}: must_follow references missing workflow "
                 f"'{workflow.must_follow}'"
+            )
+        if workflow.run_after_successes is None:
+            continue
+        if workflow.run_after_successes.workflow_id not in workflow_ids:
+            unresolved.append(
+                f"{workflow.id}: run_after_successes references missing workflow "
+                f"'{workflow.run_after_successes.workflow_id}'"
             )
     if unresolved:
         joined = "\n".join(unresolved)

@@ -153,8 +153,54 @@ def test_worker_reads_prompt_from_disk(
     assert "Goal:" in captured["prompt"]
     assert "Completion criteria:" in captured["prompt"]
     assert "Stop criteria:" in captured["prompt"]
+    assert "Session directory:" in captured["prompt"]
+    assert "Session project_state directory:" in captured["prompt"]
+    assert "Session eval_checks directory:" in captured["prompt"]
     # Assignment ID should NOT appear.
     assert "Assignment ID" not in captured["prompt"]
+
+
+def test_worker_includes_goal_check_path_for_emitting_workflow(
+    repo_builder: Any, monkeypatch: Any, snapshot_factory: Any
+) -> None:
+    repo_root = repo_builder(
+        workflows={
+            "eval_runner": {
+                "prompt": "Run evals",
+                "config": {
+                    "enabled": True,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "emits_goal_check": True,
+                    "description": "",
+                },
+            }
+        }
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    captured: dict[str, str] = {}
+
+    def fake_run_harness_iteration(**kwargs: Any) -> IterationResult:
+        captured["prompt"] = kwargs["rendered_prompt"]
+        return IterationResult(success=True, text="ok", error=None, harness_run_id="r1")
+
+    monkeypatch.setattr(
+        "loopy_loop.worker.run_harness_iteration", fake_run_harness_iteration
+    )
+
+    task = TaskResponse.model_validate(
+        _make_run_response(
+            snapshot_factory=snapshot_factory,
+            workflow_id="eval_runner",
+            session_id="goal_20260419_143022_ab12cd34",
+            iteration=3,
+        )
+    )
+    _run_task(repo_root=repo_root, task=task)
+
+    assert "goal_check.json output path:" in captured["prompt"]
+    assert "0003_eval_runner/goal_check.json" in captured["prompt"]
 
 
 def test_worker_uses_config_snapshot_not_disk(
