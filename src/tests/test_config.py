@@ -20,6 +20,8 @@ def test_load_root_config_and_workflows(repo_builder: Any, monkeypatch: Any) -> 
     preflight = run_preflight(repo_root=repo_root)
 
     assert root_config.team_harness_api_base == "https://openrouter.ai/api/v1"
+    assert root_config.team_harness_agent_models == {}
+    assert root_config.team_harness_agent_reasoning_efforts == {}
     assert [workflow.id for workflow in workflows] == ["goal_check", "planner"]
     assert workflows[0].priority == 0
     assert workflows[0].run_on_start is False
@@ -153,6 +155,27 @@ def test_unknown_root_config_field_rejected(repo_builder: Any) -> None:
     repo_root = repo_builder(root_config={"model": "typo-should-be-team-harness-model"})
 
     with pytest.raises(ConfigError, match="model"):
+        load_root_config(repo_root=repo_root)
+
+
+def test_agent_model_maps_allow_non_empty_string_values(repo_builder: Any) -> None:
+    repo_root = repo_builder(
+        root_config={
+            "team_harness_agent_models": {"codex": "gpt-5.5"},
+            "team_harness_agent_reasoning_efforts": {"codex": "high"},
+        }
+    )
+
+    root_config = load_root_config(repo_root=repo_root)
+
+    assert root_config.team_harness_agent_models == {"codex": "gpt-5.5"}
+    assert root_config.team_harness_agent_reasoning_efforts == {"codex": "high"}
+
+
+def test_agent_model_maps_reject_empty_values(repo_builder: Any) -> None:
+    repo_root = repo_builder(root_config={"team_harness_agent_models": {"codex": ""}})
+
+    with pytest.raises(ConfigError, match="mapping value"):
         load_root_config(repo_root=repo_root)
 
 

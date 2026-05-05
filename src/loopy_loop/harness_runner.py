@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
+import inspect
 import json
 from pathlib import Path
 import traceback
@@ -38,16 +40,13 @@ def run_harness_iteration(
         config_snapshot.model_dump(exclude={"goal_hash"})
     )
     resolved_api_key = resolve_api_key(config=root_config)
-    harness = harness_factory(
-        provider=config_snapshot.team_harness_provider,
-        model=config_snapshot.team_harness_model,
-        api_base=normalize_api_base(value=config_snapshot.team_harness_api_base),
-        api_key=resolved_api_key,
-        agents=config_snapshot.team_harness_agents,
-        system_prompt=config_snapshot.team_harness_system_prompt_extension,
-        cwd=str(repo_root),
-        console_mode="silent",
+    harness_kwargs = _build_harness_kwargs(
+        repo_root=repo_root,
+        config_snapshot=config_snapshot,
+        resolved_api_key=resolved_api_key,
+        harness_factory=harness_factory,
     )
+    harness = harness_factory(**harness_kwargs)
     try:
         result = asyncio.run(harness.run(task=rendered_prompt))
     except ConfigError:
@@ -63,6 +62,50 @@ def run_harness_iteration(
             success=False, text=None, error=str(exc), harness_run_id=""
         )
     return _normalize_harness_result(result=result)
+
+
+def _build_harness_kwargs(
+    *,
+    repo_root: Path,
+    config_snapshot: RootConfigSnapshot,
+    resolved_api_key: str | None,
+    harness_factory: Callable[..., TeamHarnessLike],
+) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "provider": config_snapshot.team_harness_provider,
+        "model": config_snapshot.team_harness_model,
+        "api_base": normalize_api_base(value=config_snapshot.team_harness_api_base),
+        "api_key": resolved_api_key,
+        "agents": config_snapshot.team_harness_agents,
+        "system_prompt": config_snapshot.team_harness_system_prompt_extension,
+        "cwd": str(repo_root),
+        "console_mode": "silent",
+    }
+    agent_override_kwargs = {
+        "agent_models": config_snapshot.team_harness_agent_models,
+        "agent_reasoning_efforts": config_snapshot.team_harness_agent_reasoning_efforts,
+    }
+    if _supports_kwargs(
+        harness_factory=harness_factory, names=agent_override_kwargs.keys()
+    ):
+        kwargs.update(agent_override_kwargs)
+    elif any(agent_override_kwargs.values()):
+        raise ConfigError(
+            "Installed team-harness does not support per-agent model overrides; "
+            "upgrade team-harness or remove team_harness_agent_models and "
+            "team_harness_agent_reasoning_efforts from loopy_loop_config.yaml."
+        )
+    return kwargs
+
+
+def _supports_kwargs(
+    *, harness_factory: Callable[..., TeamHarnessLike], names: Iterable[str]
+) -> bool:
+    signature = inspect.signature(harness_factory)
+    parameters = signature.parameters.values()
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+        return True
+    return all(name in signature.parameters for name in names)
 
 
 def write_iteration_artifacts(

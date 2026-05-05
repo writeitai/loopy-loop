@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
 from team_harness import TeamHarnessError
 from team_harness import TeamHarnessResult
 
+from loopy_loop.config import ConfigError
 from loopy_loop.harness_runner import run_harness_iteration
 from loopy_loop.harness_runner import write_iteration_artifacts
 from loopy_loop.models import IterationResult
@@ -62,6 +64,8 @@ def test_harness_runner_passes_normalized_constructor_kwargs(
             team_harness_provider="openai_compat",
             team_harness_model="snapshot-model",
             team_harness_agents=["codex", "reviewer"],
+            team_harness_agent_models={"codex": "gpt-5.5"},
+            team_harness_agent_reasoning_efforts={"codex": "high"},
             team_harness_api_base="https://openrouter.ai/api",
             team_harness_system_prompt_extension="extra instructions",
         ),
@@ -75,6 +79,8 @@ def test_harness_runner_passes_normalized_constructor_kwargs(
         "api_base": "https://openrouter.ai/api/v1",
         "api_key": "secret",
         "agents": ["codex", "reviewer"],
+        "agent_models": {"codex": "gpt-5.5"},
+        "agent_reasoning_efforts": {"codex": "high"},
         "system_prompt": "extra instructions",
         "cwd": str(repo_root),
         "console_mode": "silent",
@@ -103,6 +109,40 @@ def test_harness_runner_passes_none_api_key_for_codex_provider(
 
     assert captured["provider"] == "codex"
     assert captured["api_key"] is None
+
+
+def test_harness_runner_rejects_agent_model_overrides_for_old_harness(
+    repo_root: Any, snapshot_factory: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+
+    class OldHarness:
+        def __init__(
+            self,
+            *,
+            provider: str,
+            model: str,
+            api_base: str,
+            api_key: str,
+            agents: list[str],
+            system_prompt: str,
+            cwd: str,
+            console_mode: str,
+        ) -> None:
+            pass
+
+        async def run(self, task: str) -> TeamHarnessResult:
+            return TeamHarnessResult(text="done", agents=[], run_id="run-123")
+
+    with pytest.raises(ConfigError, match="per-agent model overrides"):
+        run_harness_iteration(
+            repo_root=repo_root,
+            config_snapshot=snapshot_factory(
+                team_harness_agent_models={"codex": "gpt-5.5"}
+            ),
+            rendered_prompt="rendered prompt",
+            harness_factory=OldHarness,
+        )
 
 
 def test_harness_runner_normalizes_harness_error(

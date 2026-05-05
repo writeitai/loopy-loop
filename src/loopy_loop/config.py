@@ -72,6 +72,21 @@ class RootConfig(BaseModel):
         default_factory=lambda: list(DEFAULT_AGENTS),
         description="Agent names team-harness should make available.",
     )
+    team_harness_agent_models: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-agent worker model overrides passed to team-harness, keyed by "
+            "agent name such as codex or gemini."
+        ),
+    )
+    team_harness_agent_reasoning_efforts: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-agent reasoning-effort overrides passed to team-harness, keyed "
+            "by agent name. Only agents whose templates support a reasoning "
+            "effort flag will use this value."
+        ),
+    )
     team_harness_api_base: str = Field(
         default=DEFAULT_API_BASE,
         description="OpenAI-compatible API base URL passed to team-harness.",
@@ -95,6 +110,18 @@ class RootConfig(BaseModel):
     def validate_string_lists(cls, value: list[str]) -> list[str]:
         if not value:
             raise ValueError("list must not be empty")
+        return value
+
+    @field_validator(
+        "team_harness_agent_models", "team_harness_agent_reasoning_efforts"
+    )
+    @classmethod
+    def validate_non_empty_string_mapping(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, item in value.items():
+            if not key.strip():
+                raise ValueError("mapping keys must not be empty")
+            if not item.strip():
+                raise ValueError(f"mapping value for {key!r} must not be empty")
         return value
 
     @field_validator("team_harness_api_base")
