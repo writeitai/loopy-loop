@@ -34,7 +34,9 @@ def run_harness_iteration(
     rendered_prompt: str,
     harness_factory: Callable[..., TeamHarnessLike] = TeamHarness,
 ) -> IterationResult:
-    root_config = RootConfig.model_validate(config_snapshot.model_dump())
+    root_config = RootConfig.model_validate(
+        config_snapshot.model_dump(exclude={"goal_hash"})
+    )
     resolved_api_key = resolve_api_key(config=root_config)
     harness = harness_factory(
         provider=config_snapshot.team_harness_provider,

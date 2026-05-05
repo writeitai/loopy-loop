@@ -21,7 +21,6 @@ GITIGNORE_LINES = [
     ".loopy_loop/state.json.archive_*.json",
 ]
 ROOT_CONFIG_TEMPLATE = """goal: "Ship a minimal working landing page"
-goal_slug: "ship-landing-page"
 completion_criteria:
   - "Homepage renders without errors"
   - "Primary CTA is wired"

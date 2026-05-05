@@ -24,7 +24,7 @@ class RootConfigSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     goal: str = Field(...)
-    goal_slug: str = Field(...)
+    goal_hash: str = Field(...)
     completion_criteria: list[str] = Field(...)
     stop_criteria: list[str] = Field(...)
     max_turns: int = Field(...)
@@ -67,7 +67,7 @@ class LoopState(BaseModel):
     status: Literal["running", "stopped", "goal_met", "failed", "max_turns"] = Field(
         default="running"
     )
-    goal_slug: str = Field(...)
+    goal_hash: str = Field(...)
     max_turns: int = Field(...)
     active_session_id: str = Field(...)
     goal_met: bool = Field(default=False)

@@ -4,7 +4,6 @@ goal: |
   abilities bound to Q, W, E, R with cooldowns — in the spirit of League of
   Legends champion kits. The MVP supports 2-4 players on one map, destructible
   walls, chain explosions, pickups, and a last-player-standing win condition.
-goal_slug: "atomic-bomberman-lol"
 completion_criteria:
   - "Running `make run` (or the stack's documented equivalent) serves the game locally and opens it in a browser without errors"
   - "At least two players can join the same match and interact with each other's bombs and abilities"

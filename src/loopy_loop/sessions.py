@@ -19,20 +19,20 @@ CONTROL_FILENAME = "control.json"
 GOAL_CHECK_FILENAME = "goal_check.json"
 
 
-def create_session_id(*, goal_slug: str) -> str:
+def create_session_id(*, goal_hash: str) -> str:
     stamp = utc_now().strftime("%Y%m%d_%H%M%S")
     unique = uuid.uuid4().hex[:8]
-    return f"{goal_slug}_{stamp}_{unique}"
+    return f"{goal_hash}_{stamp}_{unique}"
 
 
-def create_session_dir(*, repo_root: Path, session_id: str, goal_slug: str) -> Path:
+def create_session_dir(*, repo_root: Path, session_id: str, goal_hash: str) -> Path:
     session_dir = session_dir_path(repo_root=repo_root, session_id=session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = session_dir / SESSION_METADATA_FILENAME
     if not metadata_path.exists():
         payload = {
             "session_id": session_id,
-            "goal_slug": goal_slug,
+            "goal_hash": goal_hash,
             "created_at": utc_now().isoformat().replace("+00:00", "Z"),
         }
         metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

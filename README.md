@@ -94,7 +94,6 @@ Root config (`loopy_loop_config.yaml` at the repo root):
 
 ```yaml
 goal: "Ship a minimal working landing page"
-goal_slug: "ship-landing-page"
 completion_criteria:
   - "Homepage renders without errors"
   - "Primary CTA is wired"
@@ -112,7 +111,8 @@ team_harness_system_prompt_extension: ""
 
 Rules:
 
-- `goal_slug` must match `^[a-z0-9][a-z0-9_-]{0,63}$`
+- Session ids and session metadata include a deterministic `goal_hash` derived
+  from the configured `goal`
 - `team_harness_api_base` is normalized by loopy-loop: trailing slash stripped, `/v1` appended when missing
 - `team_harness_api_key_env` must be set during coordinator preflight and again in the worker before `TeamHarness(...)`
 

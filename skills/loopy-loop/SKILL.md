@@ -58,7 +58,6 @@ loop has met its goal.
 
 ```yaml
 goal: "Ship a minimal working landing page"
-goal_slug: "ship-landing-page"           # ^[a-z0-9][a-z0-9_-]{0,63}$
 completion_criteria:
   - "Homepage renders without errors"
 stop_criteria:
@@ -75,7 +74,7 @@ team_harness_system_prompt_extension: ""
 
 Constraints:
 
-- `goal_slug` is part of session ids; the regex above is enforced.
+- `goal_hash` is derived from `goal` and used in session ids and session metadata.
 - `team_harness_api_base` is normalized: trailing slash stripped, `/v1` appended
   when missing — write whichever form you prefer.
 - Unknown config keys are rejected. All `team_harness_*` field names are exact.

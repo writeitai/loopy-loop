@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
-import re
 from typing import Any
 
 from pydantic import BaseModel
+from pydantic import computed_field
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import field_validator
@@ -15,7 +16,7 @@ import yaml
 ROOT_CONFIG_FILENAME = "loopy_loop_config.yaml"
 LOOPY_DIRNAME = ".loopy_loop"
 WORKFLOWS_DIRNAME = "workflows"
-GOAL_SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+GOAL_HASH_LENGTH = 12
 DEFAULT_GOAL_CHECK_FAILURE_CAP = 3
 DEFAULT_PROVIDER = "openai_compat"
 PROVIDERS_WITHOUT_API_KEY: frozenset[str] = frozenset({"codex"})
@@ -39,7 +40,6 @@ class RootConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     goal: str
-    goal_slug: str
     completion_criteria: list[str]
     stop_criteria: list[str]
     max_turns: int = Field(...)
@@ -55,12 +55,10 @@ class RootConfig(BaseModel):
         default=DEFAULT_SYSTEM_PROMPT_EXTENSION
     )
 
-    @field_validator("goal_slug")
-    @classmethod
-    def validate_goal_slug(cls, value: str) -> str:
-        if GOAL_SLUG_PATTERN.fullmatch(value) is None:
-            raise ValueError("goal_slug must match ^[a-z0-9][a-z0-9_-]{0,63}$")
-        return value
+    @computed_field
+    @property
+    def goal_hash(self) -> str:
+        return derive_goal_hash(goal=self.goal)
 
     @field_validator("completion_criteria", "stop_criteria")
     @classmethod
@@ -102,6 +100,10 @@ class PreflightResult(BaseModel):
 def normalize_api_base(*, value: str) -> str:
     base = value.rstrip("/")
     return base if base.endswith("/v1") else f"{base}/v1"
+
+
+def derive_goal_hash(*, goal: str) -> str:
+    return hashlib.sha256(goal.encode("utf-8")).hexdigest()[:GOAL_HASH_LENGTH]
 
 
 def load_root_config(*, repo_root: Path) -> RootConfig:
