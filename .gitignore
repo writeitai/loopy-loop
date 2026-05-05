@@ -9,6 +9,8 @@ __pycache__/
 .loopy_loop/state.json.archive_*.json
 
 .mcp.json
+.agents/
+.claude/
 _feature_planning/
 _outputs/
 _additional_context/
