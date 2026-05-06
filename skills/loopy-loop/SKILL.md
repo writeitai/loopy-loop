@@ -77,10 +77,10 @@ stop_criteria:
 max_turns: 20
 goal_check_consecutive_failures_cap: 3
 team_harness_provider: "openai_compat"   # or "codex", "claude", "gemini"
-team_harness_model: "gpt-5.4"
+team_harness_model: "gpt-5.5"
 team_harness_agents: ["codex"]
 team_harness_agent_models:
-  codex: "gpt-5.4"
+  codex: "gpt-5.5"
 team_harness_agent_reasoning_efforts: {}
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
@@ -105,6 +105,7 @@ Each session has:
 
 - `project_state/` for workflow-owned durable markdown state
 - `eval_checks/` for session-scoped eval-banana checks
+- `eval_results/` for session-scoped eval-banana run output
 - `updates_from_user.md` for user requests that arrive during a run
 - `project_state/finished.md` for outer-verified completed work
 - `harness_outputs/<NNNN>_<workflow_id>/<team_harness_run_id>/` for
@@ -114,6 +115,31 @@ Outer workflows should read `updates_from_user.md` every run. If it contains
 content, they should reflect it into `project_state/` first and clear the file
 only after doing so. Inner workflows should not append final entries to
 `finished.md`; the outer workflow owns verified completion tracking.
+
+Eval workflows should run eval-banana with `--output-dir` pointed at the
+session `eval_results/` directory, then summarize and link the resulting
+`report.json` / `report.md` from `project_state/eval_results.md`.
+
+## PR, Branch, and Merge Policy
+
+For implementation work that changes repo files, the default delivery path is:
+create a branch, open a PR, wait for checks, and merge it.
+
+Default to `PR expected: yes` and `Merge expected: yes` for implementation
+tasks. Default both to `no` only for session-state-only, eval-only,
+research-only, planning-only, or no-usable-remote/auth tasks.
+
+For multi-repo work, create and merge one PR per changed repo when possible.
+Record delivery evidence for each changed repo from `finished.md`: repo path or
+remote, branch, PR URL, merge status, merge commit when merged, and checks/CI
+status.
+
+Do not wait for a human for ordinary branch creation, PR creation, GitHub CLI
+use, browser use, write permissions, or available auth. Do not merge when
+checks fail, required review rules block merge, the merge would be destructive
+or monetary, or the task explicitly says not to merge. If PR creation or merge
+is blocked, record the exact blocker and remaining action in
+`project_state/current_state.md`.
 
 ### Custom workflows — `.loopy_loop/workflows/<id>/`
 
@@ -228,14 +254,24 @@ ownership rules in each workflow prompt. A common reusable pattern is:
 
 Useful `project_state/` files:
 
+`loopy_loop_goal.txt` is the source of truth for the target, constraints, and
+completion intent. Do not copy or restate the goal into `project_state/`.
+
+`project_state/README.md` should explain the state files and ownership rules:
+`memory.md` is essential durable facts only, `finished.md` is outer-owned
+accepted completions only, `eval_results.md` owns eval detail, and
+`current_state.md` carries only live status, the latest eval headline, and the
+next action.
+
 ```text
 project_state/
 ├── README.md
-├── what_we_are_building.md
+├── memory.md
 ├── what_we_have.md
 ├── current_state.md
 ├── decisions.md
 ├── eval_results.md
+├── finished.md
 └── what_we_should_do/
     ├── plan.md
     └── tasks/<task-id>/README.md
@@ -244,7 +280,10 @@ project_state/
 Session eval checks work well with eval-banana's explicit directory option:
 
 ```bash
-eval-banana run --check-dir .loopy_loop/sessions/<session_id>/eval_checks
+eval-banana run \
+  --cwd . \
+  --check-dir .loopy_loop/sessions/<session_id>/eval_checks \
+  --output-dir .loopy_loop/sessions/<session_id>/eval_results
 ```
 
 ## Run

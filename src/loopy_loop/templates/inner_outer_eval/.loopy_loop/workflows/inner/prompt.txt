@@ -14,21 +14,63 @@ Inputs available in the rendered assignment:
 - Iteration directory
 - Iteration harness output root
 
+Goal source of truth:
+- Treat the rendered Goal input and loopy_loop_goal.txt as canonical.
+- Do not infer or restate the goal from project_state files.
+
 State files to read:
 - project_state/README.md
+- project_state/memory.md
 - project_state/current_state.md
 - project_state/what_we_have.md
 - project_state/finished.md
 - project_state/what_we_should_do/plan.md
 - the README.md for the selected task
 
+Essential memory:
+- Read project_state/memory.md before selecting work.
+- Use memory.md as the short working-memory facts file, not an iteration log
+  and not a decision-history file.
+- Update memory.md only when the selected task changes a fact that should
+  affect future iterations.
+- Keep memory.md short and remove stale contradictory memories when updating it.
+
+Eval state split:
+- Do not write eval detail into project_state/current_state.md.
+- If the selected task affects evals, leave only a concise note in
+  current_state.md and let eval workflows update project_state/eval_results.md.
+
 Task selection:
 1. Read project_state/what_we_should_do/plan.md.
 2. Select the first leaf task marked [ ] (available) or [ ] (failed - iteration:<n>).
-3. If no task is available, update project_state/current_state.md with the blocker
-   and finish without inventing broad new plans.
+3. If no task is available, update project_state/current_state.md and finish.
+   Do not invent broad new plans. The outer loop is responsible for making the
+   next ordinary implementation task available.
 4. Mark only the selected leaf task as:
    [ ] (in progress - iteration:<current iteration>)
+
+Permission policy:
+- Do not create waiting-for-human tasks for missing approval, access, research, write permissions, browser use, or ordinary implementation work.
+- When setting up permissions - don't be afraid to set up write permissions.
+- Assume provided credentials, browser profiles, and CLIs may be used.
+- The only approval blockers are destructive operations and monetary/billable operations if the original goal don't mention them explicitly.
+- If a task is blocked, state the exact destructive or monetary action that requires approval. Otherwise create an available task.
+
+PR, branch, and merge policy:
+- Read the selected task README Delivery section before implementation.
+- For implementation work that changes repo files, create a branch, open a PR,
+  wait for checks, and merge it.
+- Default to PR + merge expected unless the selected task says otherwise or the
+  task is session-state-only, eval-only, research-only, planning-only, or the
+  repo has no usable remote or CLI auth.
+- For multi-repo work, create and merge one PR per changed repo when possible.
+- Do not wait for a human for ordinary branch creation, PR creation, GitHub CLI
+  use, browser use, write permissions, or available auth.
+- Do not merge when checks fail, required review rules block merge, the merge
+  would be destructive or monetary, or the selected task explicitly says not to
+  merge.
+- If PR creation or merge is blocked, record the exact blocker, repo, branch,
+  PR URL if any, checks status, and remaining action in current_state.md.
 
 Implementation rules:
 - Implement the selected task only.
@@ -46,12 +88,20 @@ Completion rules:
    - selected task id/path
    - files changed
    - checks run and results
+   - branch, PR URL, merge status, merge commit when merged, and checks/CI
+     status for each changed repo when relevant
    - blockers, if any
-4. Add only factual, narrow notes to project_state/what_we_have.md when useful.
-   The outer loop owns final completion summaries.
+4. Add only factual, narrow notes to project_state/what_we_have.md when the
+   task changes current capabilities. Do not duplicate a completion ledger
+   entry there; the outer loop owns finished.md after review.
 5. Write any supporting harness artifacts under the iteration harness output
    root when useful. Do not append final entries to finished.md; the outer loop
    owns verified completion entries.
+6. Update project_state/memory.md only for essential durable facts.
+
+The inner loop must not update project_state/finished.md. Mark work as
+"inner complete, waiting for outer"; the outer loop owns finished.md after
+review.
 
 Your work will be reviewed by later harnesses. Be explicit about what changed,
 what was verified, and what remains.
@@ -117,12 +167,14 @@ Create an agent team to do it. They should be responsible for:
     - README.md
     - docs/
 - making sure you the "Completion rules" above were followed
-- making a new branch, and doing a PR (choose the main development branch - e.g. develop, dev or main)
+- for implementation work that changes repo files, making a new branch, opening a PR, waiting for checks, and merging it
+    - choose the main development branch, e.g. develop, dev, or main
     - if you saved screenshots related to the PRs, include them in the PR
     - make the description very descriptive
-- making sure that CI checks pass
-    - merge the PR once CI checks do pass!
-- making sure the PR was merged
+    - if work spans multiple repos, create and merge one PR per changed repo when possible
+    - do not merge when checks fail, required review rules block merge, the merge would be destructive or monetary, or the selected task explicitly says not to merge
+    - if PR creation or merge is blocked, record the exact blocker and remaining action in current_state.md
+- making sure that CI checks pass before merge when CI is available
 
 Create any additional agents as you see fit.
 
