@@ -21,4 +21,4 @@ def test_terminal_state_is_archived_on_fresh_start(
     assert len(archives) == 1
     assert state is not None
     assert state.status == "running"
-    assert state.active_session_id != "cdbf6975e8a3_20260419_143022_ab12cd34"
+    assert state.active_session_id != "20260419_143022_cdbf6975e8a3_ab12cd34"

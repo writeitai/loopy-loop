@@ -115,8 +115,8 @@ team_harness_api_key_env: "OPENROUTER_API_KEY"
 
 Rules:
 
-- Session ids and session metadata include a deterministic `goal_hash` derived
-  from the text loaded from `goal_file`
+- Session ids start with a UTC timestamp for filesystem sorting and include a
+  deterministic `goal_hash` derived from the text loaded from `goal_file`
 - `goal_file` is resolved relative to `loopy_loop_config.yaml`; inline `goal`
   values in YAML are rejected
 - `completion_criteria`, `stop_criteria`, and

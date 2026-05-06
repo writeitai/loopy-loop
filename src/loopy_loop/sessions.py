@@ -27,7 +27,7 @@ GOAL_CHECK_FILENAME = "goal_check.json"
 def create_session_id(*, goal_hash: str) -> str:
     stamp = utc_now().strftime("%Y%m%d_%H%M%S")
     unique = uuid.uuid4().hex[:8]
-    return f"{goal_hash}_{stamp}_{unique}"
+    return f"{stamp}_{goal_hash}_{unique}"
 
 
 def create_session_dir(*, repo_root: Path, session_id: str, goal_hash: str) -> Path:

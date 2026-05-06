@@ -37,6 +37,8 @@ One session directory is created per fresh coordinator run and reused for all it
 
 - Session metadata written once when the session directory is created
 - Contains `session_id`, `goal_hash`, and `created_at`
+- New session ids use `<YYYYMMDD>_<HHMMSS>_<goal_hash>_<random>` so session
+  directories sort chronologically by name
 
 `events.jsonl`
 
