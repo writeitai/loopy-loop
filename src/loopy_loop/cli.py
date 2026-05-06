@@ -45,7 +45,7 @@ ROOT_CONFIG_TEMPLATE = f"""goal_file: "{DEFAULT_GOAL_FILENAME}"
 max_turns: 20
 goal_check_consecutive_failures_cap: 3
 team_harness_provider: "openai_compat"
-team_harness_model: "gpt-5.4"
+team_harness_model: "gpt-5.5"
 team_harness_agents:
   - "codex"
 team_harness_agent_models: {{}}

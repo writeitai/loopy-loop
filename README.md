@@ -103,10 +103,10 @@ goal_file: "loopy_loop_goal.txt"
 max_turns: 20
 goal_check_consecutive_failures_cap: 3
 team_harness_provider: "openai_compat"
-team_harness_model: "gpt-5.4"
+team_harness_model: "gpt-5.5"
 team_harness_agents: ["codex"]
 team_harness_agent_models:
-  codex: "gpt-5.4"
+  codex: "gpt-5.5"
 team_harness_agent_reasoning_efforts:
   codex: "high"
 team_harness_api_base: "https://openrouter.ai/api/v1"
@@ -208,6 +208,7 @@ eval definitions:
 
 - `.loopy_loop/sessions/<session_id>/project_state/`
 - `.loopy_loop/sessions/<session_id>/eval_checks/`
+- `.loopy_loop/sessions/<session_id>/eval_results/`
 - `.loopy_loop/sessions/<session_id>/updates_from_user.md`
 - `.loopy_loop/sessions/<session_id>/project_state/finished.md`
 - `.loopy_loop/sessions/<session_id>/harness_outputs/`
@@ -215,11 +216,33 @@ eval definitions:
 These directories are workflow-owned. The coordinator only owns
 `.loopy_loop/state.json` and iteration dispatch state.
 
+`loopy_loop_goal.txt` is the source of truth for the target, constraints, and
+completion intent. Workflow state should not copy or restate that goal.
+`project_state/README.md` should explain state ownership: `memory.md` is
+essential durable facts only, `finished.md` is outer-owned accepted completions
+only, `eval_results.md` owns eval detail, and `current_state.md` carries live
+status, the latest eval headline, and the next action.
+
 Write runtime requests for the outer loop into `updates_from_user.md`. The outer
 workflow should treat non-empty content as highest-priority planning input,
 reflect it into `project_state/`, and then clear the file. Verified completed
 work belongs in `project_state/finished.md`; `what_we_have.md` should remain the
 concise current capability summary.
+
+Eval workflows should run session checks with `--output-dir` pointing at
+`.loopy_loop/sessions/<session_id>/eval_results/`. Raw eval-banana reports stay
+there; `project_state/eval_results.md` should summarize and link the latest
+reports instead of copying them. `project_state/current_state.md` should only
+carry the latest eval headline and the next action.
+
+For implementation work that changes repo files, the default delivery path is a
+branch, PR, passing checks, and merge. Multi-repo work should create and merge
+one PR per changed repo when possible. Tasks should opt out only when they are
+session-state-only, eval-only, research-only, planning-only, or the repo has no
+usable remote or auth. `project_state/finished.md` should record delivery
+evidence for each changed repo: repo, branch, PR URL, merge status, merge
+commit, and checks/CI status. If PR creation or merge is blocked, record the
+exact blocker and remaining action in `project_state/current_state.md`.
 
 ## Control Files
 

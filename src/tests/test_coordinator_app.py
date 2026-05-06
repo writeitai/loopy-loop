@@ -35,7 +35,7 @@ def test_register_response_has_correct_fields(
     assert response["iteration"] == 1
     assert response["config_snapshot"] is not None
     assert response["config_snapshot"]["goal_hash"] == "71393ee22450"
-    assert response["config_snapshot"]["team_harness_model"] == "gpt-5.4"
+    assert response["config_snapshot"]["team_harness_model"] == "gpt-5.5"
     assert response["stop_reason"] is None
 
 

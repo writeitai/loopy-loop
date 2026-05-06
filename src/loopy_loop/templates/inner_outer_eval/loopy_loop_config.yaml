@@ -15,3 +15,26 @@ team_harness_agent_reasoning_efforts:
   codex: "high"
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
+team_harness_system_prompt_extension: |
+  Session state rule:
+  - project_state/finished.md is the accepted-completion ledger.
+  - Only the outer loop should add entries, after reviewing completed
+    inner-loop work.
+  - Other workers should link their artifacts from current_state.md or their
+    own outputs, not mark work finished.
+  - The outer loop must read updates_from_user.md every run. If it contains
+    content, reflect it into durable project_state files and clear it only
+    after doing so.
+  PR, branch, and merge rule:
+  - For implementation work that changes repo files, create a branch, open a
+    PR, wait for checks, and merge it.
+  - Default to PR + merge expected unless the task is session-state-only,
+    eval-only, research-only, planning-only, or the repo has no usable remote
+    or CLI auth.
+  - For multi-repo work, create and merge one PR per changed repo when possible.
+  - Do not wait for a human for ordinary branch creation, PR creation, GitHub
+    CLI use, browser use, write permissions, or available auth.
+  - Do not merge when checks fail, required review rules block merge, the merge
+    would be destructive or monetary, or the task explicitly says not to merge.
+  - If PR creation or merge is blocked, record the exact blocker, repo, branch,
+    PR URL if any, checks status, and remaining action in current_state.md.
