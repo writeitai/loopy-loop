@@ -18,7 +18,7 @@ Run response:
     "goal": "Ship a minimal working landing page",
     "goal_hash": "71393ee22450",
     "completion_criteria": ["Homepage renders without errors"],
-    "stop_criteria": ["A workflow writes an unresolvable error flag"],
+    "stop_criteria": ["A workflow updates session control.json to stopped"],
     "max_turns": 20,
     "goal_check_consecutive_failures_cap": 3,
     "team_harness_provider": "openai_compat",
@@ -81,6 +81,8 @@ Rules:
 - If `current_task` is `None` (no task is active), the coordinator dispatches the next
   available task as if `/register` had been called. If the state is terminal, it returns
   `action=stop`.
-- The coordinator reads `control.json` only from the current iteration directory.
+- The coordinator reads `control.json` only from the session directory.
 - The coordinator reads `goal_check.json` only from the current iteration directory
   when the workflow is `goal_check` or has `emits_goal_check=true`.
+- A valid `goal_check.json` is an eval artifact, not a stop switch. Workflows
+  stop the loop by updating session `control.json`.

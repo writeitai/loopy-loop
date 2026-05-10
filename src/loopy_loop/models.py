@@ -3,11 +3,13 @@ from __future__ import annotations
 from datetime import datetime
 from datetime import UTC
 from typing import Literal
+from typing import Self
 
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import field_validator
+from pydantic import model_validator
 
 DEFAULT_LOCK_TIMEOUT_SECONDS = 30.0
 CONTROL_SCHEMA_VERSION = 1
@@ -92,8 +94,9 @@ class FinishedRequest(BaseModel):
 
 
 class ControlSignal(BaseModel):
-    unresolvable_error: bool = Field(...)
+    state: Literal["running", "stopped"] = Field(...)
     reason: str = Field(...)
+    stop_reason: Literal["goal_met", "unresolvable_error"] | None = Field(default=None)
     schema_version: int = Field(...)
 
     @field_validator("schema_version")
@@ -102,6 +105,14 @@ class ControlSignal(BaseModel):
         if value != CONTROL_SCHEMA_VERSION:
             raise ValueError(f"schema_version must equal {CONTROL_SCHEMA_VERSION}")
         return value
+
+    @model_validator(mode="after")
+    def validate_stop_reason(self) -> Self:
+        if self.state == "running" and self.stop_reason is not None:
+            raise ValueError("running control state must not set stop_reason")
+        if self.state == "stopped" and self.stop_reason is None:
+            raise ValueError("stopped control state must set stop_reason")
+        return self
 
 
 class GoalCheckSignal(BaseModel):

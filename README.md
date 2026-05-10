@@ -159,7 +159,8 @@ run_after_successes:
 ```
 
 - `emits_goal_check=true` lets a non-`goal_check` workflow write `goal_check.json`
-  and participate in the same stop logic as the reserved `goal_check` workflow
+  as a required eval artifact. To stop the loop, the workflow must update the
+  session-scoped `control.json`.
 - `goal_check` is reserved and scaffolded with `not_before_iteration: 1`
 
 Cadence example:
@@ -210,6 +211,7 @@ eval definitions:
 - `.loopy_loop/sessions/<session_id>/eval_checks/`
 - `.loopy_loop/sessions/<session_id>/eval_results/`
 - `.loopy_loop/sessions/<session_id>/updates_from_user.md`
+- `.loopy_loop/sessions/<session_id>/control.json`
 - `.loopy_loop/sessions/<session_id>/project_state/finished.md`
 - `.loopy_loop/sessions/<session_id>/harness_outputs/`
 
@@ -246,14 +248,41 @@ exact blocker and remaining action in `project_state/current_state.md`.
 
 ## Control Files
 
-`control.json` is read only from the current iteration directory:
+`control.json` is the session-scoped workflow stop switch:
 
 ```json
-{"unresolvable_error": true, "reason": "Missing credentials", "schema_version": 1}
+{
+  "state": "running",
+  "reason": "session active",
+  "stop_reason": null,
+  "schema_version": 1
+}
 ```
 
-`goal_check.json` is authoritative only at the current iteration directory for
-the reserved `goal_check` workflow or any workflow with `emits_goal_check=true`:
+Workflows leave it alone while the loop should continue. To stop successfully:
+
+```json
+{
+  "state": "stopped",
+  "reason": "evals passed",
+  "stop_reason": "goal_met",
+  "schema_version": 1
+}
+```
+
+To stop because the loop cannot continue:
+
+```json
+{
+  "state": "stopped",
+  "reason": "specific terminal blocker",
+  "stop_reason": "unresolvable_error",
+  "schema_version": 1
+}
+```
+
+`goal_check.json` is a per-iteration eval artifact for the reserved
+`goal_check` workflow or any workflow with `emits_goal_check=true`:
 
 ```text
 .loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>/goal_check.json
@@ -263,4 +292,7 @@ the reserved `goal_check` workflow or any workflow with `emits_goal_check=true`:
 {"goal_met": false, "reason": "docs still missing", "schema_version": 1}
 ```
 
-If `goal_check.json` is missing or invalid repeatedly, the coordinator stops with `stop_reason="goal_check_broken"` after the configured failure cap.
+If `goal_check.json` is missing or invalid repeatedly, the coordinator stops
+with `stop_reason="goal_check_broken"` after the configured failure cap. A
+valid `goal_check.json` does not stop the loop by itself; stopping is controlled
+by session `control.json`.

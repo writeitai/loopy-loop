@@ -157,6 +157,7 @@ def test_worker_reads_prompt_from_disk(
     assert "Session project_state directory:" in captured["prompt"]
     assert "Session eval_checks directory:" in captured["prompt"]
     assert "Session updates_from_user path:" in captured["prompt"]
+    assert "Session control path:" in captured["prompt"]
     assert "Session finished ledger path:" in captured["prompt"]
     assert "Session harness outputs directory:" in captured["prompt"]
     # Assignment ID should NOT appear.

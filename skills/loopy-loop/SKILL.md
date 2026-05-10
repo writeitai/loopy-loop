@@ -59,10 +59,9 @@ workflow set named `inner_outer_eval` instead of the default `goal_check`
 workflow.
 
 `goal_check` is reserved. Don't rename or delete it — it runs from iteration 1
-onward and writes the authoritative `goal_check.json` that decides whether the
-loop has met its goal. Advanced workflows can also emit `goal_check.json` by
-setting `emits_goal_check: true`; keep the reserved `goal_check` workflow unless
-you intentionally replace its role with another completion-signal workflow.
+onward and writes the per-iteration `goal_check.json` eval artifact. Advanced
+workflows can also emit `goal_check.json` by setting `emits_goal_check: true`.
+Workflows stop the loop by updating the session-scoped `control.json`.
 
 ## Configure
 
@@ -73,7 +72,7 @@ goal: "Ship a minimal working landing page"
 completion_criteria:
   - "Homepage renders without errors"
 stop_criteria:
-  - "A workflow writes an unresolvable error flag"
+  - "A workflow updates session control.json to stopped"
 max_turns: 20
 goal_check_consecutive_failures_cap: 3
 team_harness_provider: "openai_compat"   # or "codex", "claude", "gemini"
@@ -182,8 +181,8 @@ run_after_successes:
 ```
 
 - `emits_goal_check: true` tells the worker to include a `goal_check.json`
-  output path in that workflow's prompt, and tells the coordinator to read it
-  using the same stop logic as the reserved `goal_check` workflow.
+  output path in that workflow's prompt. The workflow must update session
+  `control.json` if it wants the loop to stop.
 - `goal_check` is reserved — pick a different id for new workflows.
 
 Example cadence for an outer/inner loop with periodic evals:
@@ -208,7 +207,7 @@ run_after_successes:
   workflow_id: inner
   every: 10
 emits_goal_check: true
-description: "Run eval checks and stop when they pass."
+description: "Run eval checks and update session control when they pass."
 ```
 
 ```yaml
@@ -333,9 +332,12 @@ Per-iteration artifacts live at:
 .loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>/
 ```
 
-Authoritative control files live only inside the current iteration directory:
+The workflow stop switch lives at the session root:
 
-- `control.json` — `{"unresolvable_error": true, "reason": "...", "schema_version": 1}`
+- `control.json` — `{"state": "stopped", "reason": "...", "stop_reason": "goal_met", "schema_version": 1}`
+
+Per-iteration eval artifacts live inside the current iteration directory:
+
 - `goal_check.json` (inside `*_goal_check` iterations or workflows configured
   with `emits_goal_check: true`) —
   `{"goal_met": false, "reason": "...", "schema_version": 1}`
@@ -355,8 +357,8 @@ with `stop_reason="goal_check_broken"` after `goal_check_consecutive_failures_ca
 - **`run_after_successes.workflow_id` references a missing workflow** →
   preflight fails. The id must also match a workflow folder.
 - **Eval runner does not stop the loop** → confirm the workflow has
-  `emits_goal_check: true` and writes valid JSON to the exact
-  `goal_check.json output path` in its prompt.
+  `emits_goal_check: true`, writes valid JSON to the exact `goal_check.json`
+  output path, and updates session `control.json` when the goal is met.
 - **Workflow ignores project state** → loopy-loop only injects state paths.
   The workflow prompt must explicitly say which `project_state/` files to read
   and update.

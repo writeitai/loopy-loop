@@ -10,7 +10,7 @@ completion_criteria:
   - "README explains: how to install deps, how to run a local match, how abilities map to QWER keys, and lists every character's ability kit"
   - "A character-kit spec document (e.g. `docs/characters.md`) describes each champion's passive + QWER with damage, range, cooldown, and a one-line design intent"
 stop_criteria:
-  - "A workflow writes an unresolvable_error control flag"
+  - "A workflow updates session control.json to stopped with stop_reason unresolvable_error"
   - "The chosen stack requires a paid service or secret the agent cannot provision"
   - "Multiplayer requirement is incompatible with the execution environment (e.g. no way to bind a local port)"
   - "Three consecutive goal_check outputs are invalid or unreadable (handled automatically by goal_check_consecutive_failures_cap)"

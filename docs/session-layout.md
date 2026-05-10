@@ -8,6 +8,7 @@ One session directory is created per fresh coordinator run and reused for all it
     └── <session_id>/
         ├── session.json
         ├── events.jsonl
+        ├── control.json
         ├── updates_from_user.md
         ├── project_state/
         │   └── finished.md
@@ -25,14 +26,12 @@ One session directory is created per fresh coordinator run and reused for all it
             │   ├── prompt.txt
             │   ├── result.json
             │   ├── result_text.txt
-            │   ├── harness_run_id.txt
-            │   └── control.json
+            │   └── harness_run_id.txt
             └── 0002_goal_check/
                 ├── prompt.txt
                 ├── result.json
                 ├── result_text.txt
                 ├── harness_run_id.txt
-                ├── control.json
                 └── goal_check.json
 ```
 
@@ -49,6 +48,12 @@ One session directory is created per fresh coordinator run and reused for all it
 
 - Reserved append-only event log for diagnostics
 - Created at session start in v1
+
+`control.json`
+
+- Session-scoped workflow stop switch
+- Created with `state: "running"` when the session starts
+- Workflows update it only when they want the loop to stop
 
 `updates_from_user.md`
 
@@ -153,22 +158,35 @@ eval-banana run \
 
 `control.json`
 
-- Read only from the current iteration directory
-- Unknown keys are ignored
-- Required schema:
+- Read only from the session directory
+- Initial schema:
 
 ```json
 {
-  "unresolvable_error": true,
-  "reason": "Missing private package registry credentials",
+  "state": "running",
+  "reason": "session active",
+  "stop_reason": null,
   "schema_version": 1
 }
 ```
 
+- Stop schema:
+
+```json
+{
+  "state": "stopped",
+  "reason": "Accepted evidence satisfies the goal.",
+  "stop_reason": "goal_met",
+  "schema_version": 1
+}
+```
+
+- `stop_reason` must be `goal_met` or `unresolvable_error` when stopped
+
 `goal_check.json`
 
-- Authoritative only at the current iteration directory for `goal_check` or a
-  workflow configured with `emits_goal_check=true`:
+- Per-iteration eval artifact for `goal_check` or a workflow configured with
+  `emits_goal_check=true`:
 
 ```text
 .loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>/goal_check.json
@@ -183,3 +201,6 @@ eval-banana run \
   "schema_version": 1
 }
 ```
+
+- A valid `goal_check.json` does not stop the loop by itself. A workflow that
+  wants to stop must update session `control.json`.

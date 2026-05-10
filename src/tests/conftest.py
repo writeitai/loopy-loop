@@ -35,7 +35,7 @@ def repo_builder(repo_root: Path):
                 "Homepage renders without errors",
                 "Primary CTA is wired",
             ],
-            "stop_criteria": ["A workflow writes an unresolvable error flag"],
+            "stop_criteria": ["A workflow updates session control.json to stopped"],
             "max_turns": 20,
             "goal_check_consecutive_failures_cap": 3,
             "team_harness_provider": "openai_compat",

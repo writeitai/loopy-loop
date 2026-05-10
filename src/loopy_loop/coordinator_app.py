@@ -176,12 +176,7 @@ class CoordinatorService:
             success = request.success
             error = request.error
 
-            # 5b: Invalid control output overrides success.
-            if self._has_invalid_control_output(current_task=active):
-                success = False
-                error = "invalid_control_output"
-
-            # 5c: Goal-check signal handling.
+            # 5b: Goal-check artifact validation.
             if self._workflow_expects_goal_check_signal(workflow_id=active.workflow_id):
                 goal_signal = self._read_goal_check_signal(current_task=active)
                 if goal_signal is None:
@@ -196,20 +191,16 @@ class CoordinatorService:
                         current.status = "failed"
                 else:
                     current.goal_check_consecutive_failures = 0
-                    if goal_signal.goal_met:
-                        # Only set goal_met here; let _apply_stop_precedence set
-                        # stop_reason and status so there is a single authoritative path.
-                        current.goal_met = True
 
-            # 5d: Unresolvable error signal.
-            if self._has_unresolvable_error_signal(current_task=active):
-                current.unresolvable_error = True
-
-            # 5e: Apply stop precedence (skip if goal_check_broken already set).
+            # 5c: Read session control before recording history. The actual stop
+            # response is returned after the completed task is recorded below.
             if current.stop_reason != "goal_check_broken":
-                self._apply_stop_precedence(state=current)
+                self._apply_session_control(state=current)
+                if current.stop_reason == "invalid_control_output":
+                    success = False
+                    error = "invalid_control_output"
 
-            # 5f: Record history.
+            # 5d: Record history.
             current.history.append(
                 HistoryEntry(
                     iteration=active.iteration,
@@ -221,12 +212,12 @@ class CoordinatorService:
                     finished_at=now,
                 )
             )
-            # 5g: Increment iteration count.
+            # 5e: Increment iteration count.
             current.iteration_count += 1
-            # 5h: Clear current task.
+            # 5f: Clear current task.
             current.current_task = None
 
-            # Step 6: Special case — goal_check_broken stops immediately.
+            # Step 6: Special cases that stop immediately.
             if current.stop_reason == "goal_check_broken":
                 return current, TaskResponse(
                     action=STOP_ACTION, stop_reason="goal_check_broken"
@@ -325,6 +316,7 @@ class CoordinatorService:
         return None
 
     def _stop_response_if_needed(self, *, state: LoopState) -> TaskResponse | None:
+        self._apply_session_control(state=state)
         stop_reason = self._apply_stop_precedence(state=state)
         if stop_reason is not None:
             return TaskResponse(action=STOP_ACTION, stop_reason=stop_reason)
@@ -347,26 +339,26 @@ class CoordinatorService:
             workflow is not None and workflow.emits_goal_check
         )
 
-    def _has_unresolvable_error_signal(self, *, current_task: CurrentTask) -> bool:
+    def _apply_session_control(self, *, state: LoopState) -> None:
         path = control_path(
-            repo_root=self.repo_root,
-            session_id=current_task.session_id,
-            iteration=current_task.iteration,
-            workflow_id=current_task.workflow_id,
-        )
-        signal = _read_signal(path=path, model=ControlSignal)
-        return signal is not None and signal.unresolvable_error
-
-    def _has_invalid_control_output(self, *, current_task: CurrentTask) -> bool:
-        path = control_path(
-            repo_root=self.repo_root,
-            session_id=current_task.session_id,
-            iteration=current_task.iteration,
-            workflow_id=current_task.workflow_id,
+            repo_root=self.repo_root, session_id=state.active_session_id
         )
         if not path.exists():
-            return False
-        return _read_signal(path=path, model=ControlSignal) is None
+            return
+        signal = _read_signal(path=path, model=ControlSignal)
+        if signal is None:
+            state.status = "failed"
+            state.stop_reason = "invalid_control_output"
+            return
+        if signal.state == "running":
+            return
+        if signal.stop_reason == "goal_met":
+            state.goal_met = True
+            return
+        if signal.stop_reason == "unresolvable_error":
+            state.unresolvable_error = True
+            return
+        raise RuntimeError("unreachable")
 
 
 def _build_run_response(

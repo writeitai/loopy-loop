@@ -69,6 +69,15 @@ Write exactly one JSON file to the provided goal_check.json output path using:
   "reason": "brief explanation",
   "schema_version": 1
 }
+
+If and only if goal_met is true, update the Session control path to stop the
+loop using:
+{
+  "state": "stopped",
+  "reason": "goal_check verified the loop goal is satisfied",
+  "stop_reason": "goal_met",
+  "schema_version": 1
+}
 """
 
 
