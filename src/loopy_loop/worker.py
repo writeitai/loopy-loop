@@ -16,6 +16,7 @@ from loopy_loop.models import FinishedRequest
 from loopy_loop.models import IterationResult
 from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.models import TaskResponse
+from loopy_loop.sessions import control_path
 from loopy_loop.sessions import ensure_iteration_dir
 from loopy_loop.sessions import eval_checks_dir_path
 from loopy_loop.sessions import finished_path
@@ -186,6 +187,7 @@ def _render_prompt(
         f"{eval_checks_dir_path(repo_root=root, session_id=session_id)}",
         "Session updates_from_user path: "
         f"{updates_from_user_path(repo_root=root, session_id=session_id)}",
+        f"Session control path: {control_path(repo_root=root, session_id=session_id)}",
         "Session finished ledger path: "
         f"{finished_path(repo_root=root, session_id=session_id)}",
         "Session harness outputs directory: "

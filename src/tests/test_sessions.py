@@ -4,6 +4,7 @@ import json
 import re
 from typing import Any
 
+from loopy_loop.sessions import control_path
 from loopy_loop.sessions import create_session_dir
 from loopy_loop.sessions import create_session_id
 from loopy_loop.sessions import ensure_iteration_dir
@@ -37,6 +38,16 @@ def test_create_session_and_iteration_dirs(repo_root: Any) -> None:
     assert metadata["session_id"] == "71393ee22450_20260419_143022_ab12cd34"
     assert metadata["goal_hash"] == "71393ee22450"
     assert (session_dir / "events.jsonl").exists()
+    assert json.loads(
+        control_path(
+            repo_root=repo_root, session_id="71393ee22450_20260419_143022_ab12cd34"
+        ).read_text(encoding="utf-8")
+    ) == {
+        "state": "running",
+        "reason": "session active",
+        "stop_reason": None,
+        "schema_version": 1,
+    }
     assert updates_from_user_path(
         repo_root=repo_root, session_id="71393ee22450_20260419_143022_ab12cd34"
     ).exists()

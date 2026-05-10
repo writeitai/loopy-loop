@@ -14,6 +14,7 @@ Inputs available in the rendered assignment:
 - Session harness outputs directory
 - Iteration directory
 - Iteration harness output root
+- Session control path
 
 Goal source of truth:
 - Treat loopy_loop_goal.txt as the canonical statement of the target,
@@ -85,6 +86,43 @@ Eval state split:
 - Keep project_state/current_state.md limited to the latest eval headline and
   the next action it implies.
 - Do not copy full eval reports into current_state.md.
+
+Loop control signal:
+- The session control file is the only workflow-written continue/stop switch.
+- Leave it in state `running` during normal planning, review, or continued
+  work. Do not rewrite it just to say the loop should continue.
+- If the full goal in loopy_loop_goal.txt is satisfied after your review of
+  accepted completion evidence, update the rendered Session control path with
+  this JSON shape:
+
+```json
+{
+  "state": "stopped",
+  "reason": "accepted completion evidence satisfies loopy_loop_goal.txt",
+  "stop_reason": "goal_met",
+  "schema_version": 1
+}
+```
+- Do not stop just because a task, PR, or slice is complete. The full goal must
+  be satisfied.
+- If the goal is not met, no useful task remains, and the remaining blocker is
+  exact and unresolvable after all available local, CLI, browser, API, GitHub,
+  and gcloud routes are exhausted, update the rendered Session control path
+  with this JSON shape:
+
+```json
+{
+  "state": "stopped",
+  "reason": "specific terminal blocker and why no remaining task can move forward",
+  "stop_reason": "unresolvable_error",
+  "schema_version": 1
+}
+```
+- Do not stop for ordinary blockers, missing access, missing research, write
+  permissions, browser work, PR work, or implementation failures that can
+  become follow-up tasks.
+- Also update project_state/current_state.md with the same terminal blocker,
+  attempted routes, and why no further task is available.
 
 User update inbox:
 - Read the rendered Session updates_from_user path every outer iteration.
@@ -161,6 +199,10 @@ What to do:
 10. Update current_state.md with the next expected inner-loop task.
 11. Update decisions.md for meaningful planning choices.
 12. Update memory.md only when a durable fact changes.
+13. Leave session `control.json` unchanged unless you are stopping the loop
+    because the full goal is met or because a true terminal blocker remains
+    after all useful tasks are exhausted. When stopping, write the stop payload
+    to the rendered Session control path.
 
 Do not implement planned tasks unless the change is limited to the session
 project_state files. The next inner loop owns implementation.

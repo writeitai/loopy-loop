@@ -44,6 +44,7 @@ def create_session_dir(*, repo_root: Path, session_id: str, goal_hash: str) -> P
     events_path = session_dir / EVENTS_FILENAME
     if not events_path.exists():
         events_path.write_text("", encoding="utf-8")
+    control_path(repo_root=repo_root, session_id=session_id)
     updates_path = updates_from_user_path(repo_root=repo_root, session_id=session_id)
     if not updates_path.exists():
         updates_path.write_text("", encoding="utf-8")
@@ -133,18 +134,20 @@ def ensure_iteration_dir(
     return iteration_dir
 
 
-def control_path(
-    *, repo_root: Path, session_id: str, iteration: int, workflow_id: str
-) -> Path:
-    return (
-        ensure_iteration_dir(
-            repo_root=repo_root,
-            session_id=session_id,
-            iteration=iteration,
-            workflow_id=workflow_id,
-        )
-        / CONTROL_FILENAME
+def control_path(*, repo_root: Path, session_id: str) -> Path:
+    path = (
+        session_dir_path(repo_root=repo_root, session_id=session_id) / CONTROL_FILENAME
     )
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "state": "running",
+            "reason": "session active",
+            "stop_reason": None,
+            "schema_version": 1,
+        }
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
 
 
 def goal_check_path(

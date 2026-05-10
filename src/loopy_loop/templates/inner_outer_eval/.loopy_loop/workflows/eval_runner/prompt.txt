@@ -12,6 +12,7 @@ Inputs available in the rendered assignment:
 - Session harness outputs directory
 - Iteration directory
 - Iteration harness output root
+- Session control path
 - goal_check.json output path
 
 Goal source of truth:
@@ -58,6 +59,8 @@ What to do:
 9. Write supporting eval logs or reports under the iteration harness output root
    when useful.
 10. Write goal_check.json to the exact path from the rendered assignment.
+11. If and only if goal_check.json has goal_met true, update the rendered
+    Session control path to stop the loop with stop_reason goal_met.
 
 goal_check.json schema:
 {
@@ -73,3 +76,11 @@ Set goal_met to true only when:
 
 If eval-banana is unavailable, checks are missing, validation fails, or any
 scenario fails, set goal_met to false and explain why in the reason.
+
+Session control stop schema:
+{
+  "state": "stopped",
+  "reason": "eval-banana validation and run passed; all scenarios passed",
+  "stop_reason": "goal_met",
+  "schema_version": 1
+}

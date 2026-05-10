@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from loopy_loop.coordinator_app import create_coordinator_app
+from loopy_loop.sessions import control_path
 from loopy_loop.state_store import StateStore
 
 
@@ -347,7 +348,7 @@ def test_stop_precedence_goal_met(repo_builder: Any, monkeypatch: Any) -> None:
     assert response["stop_reason"] == "goal_met"
 
 
-def test_control_signal_sets_unresolvable_error(
+def test_session_control_signal_sets_unresolvable_error(
     repo_builder: Any, monkeypatch: Any, current_task_factory: Any
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
@@ -361,21 +362,13 @@ def test_control_signal_sets_unresolvable_error(
     )
     state.current_task = current_task
     store.write_state(state=state)
-    control_path = (
-        repo_root
-        / ".loopy_loop"
-        / "sessions"
-        / state.active_session_id
-        / "iterations"
-        / "0001_planner"
-        / "control.json"
-    )
-    control_path.parent.mkdir(parents=True, exist_ok=True)
-    control_path.write_text(
+    control = control_path(repo_root=repo_root, session_id=state.active_session_id)
+    control.write_text(
         json.dumps(
             {
-                "unresolvable_error": True,
+                "state": "stopped",
                 "reason": "missing secret",
+                "stop_reason": "unresolvable_error",
                 "schema_version": 1,
             }
         ),
@@ -398,6 +391,61 @@ def test_control_signal_sets_unresolvable_error(
     assert response["stop_reason"] == "unresolvable_error"
     assert updated is not None
     assert updated.unresolvable_error is True
+
+
+def test_session_control_signal_sets_goal_met(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    store = StateStore(repo_root=repo_root)
+    state = store.read_state()
+    assert state is not None
+    control_path(repo_root=repo_root, session_id=state.active_session_id).write_text(
+        json.dumps(
+            {
+                "state": "stopped",
+                "reason": "done",
+                "stop_reason": "goal_met",
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.post("/register", json={}).json()
+    updated = store.read_state()
+
+    assert response["action"] == "stop"
+    assert response["stop_reason"] == "goal_met"
+    assert updated is not None
+    assert updated.goal_met is True
+
+
+def test_invalid_session_control_signal_stops(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    store = StateStore(repo_root=repo_root)
+    state = store.read_state()
+    assert state is not None
+    control_path(repo_root=repo_root, session_id=state.active_session_id).write_text(
+        json.dumps(
+            {"state": "stopped", "reason": "missing stop reason", "schema_version": 1}
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.post("/register", json={}).json()
+    updated = store.read_state()
+
+    assert response["action"] == "stop"
+    assert response["stop_reason"] == "invalid_control_output"
+    assert updated is not None
+    assert updated.status == "failed"
 
 
 def test_invalid_goal_check_output_stops_at_failure_cap(
@@ -439,7 +487,7 @@ def test_invalid_goal_check_output_stops_at_failure_cap(
     assert updated.goal_check_consecutive_failures == 1
 
 
-def test_goal_check_sets_goal_met(
+def test_goal_check_does_not_stop_without_session_control(
     repo_builder: Any,
     monkeypatch: Any,
     current_task_factory: Any,
@@ -485,13 +533,12 @@ def test_goal_check_sets_goal_met(
     ).json()
     updated = store.read_state()
 
-    assert response["action"] == "stop"
-    assert response["stop_reason"] == "goal_met"
+    assert response["action"] == "run"
     assert updated is not None
-    assert updated.goal_met is True
+    assert updated.goal_met is False
 
 
-def test_emits_goal_check_workflow_sets_goal_met(
+def test_emits_goal_check_workflow_stops_with_session_control(
     repo_builder: Any, monkeypatch: Any, current_task_factory: Any
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
@@ -531,6 +578,17 @@ def test_emits_goal_check_workflow_sets_goal_met(
     goal_check_path.parent.mkdir(parents=True, exist_ok=True)
     goal_check_path.write_text(
         json.dumps({"goal_met": True, "reason": "evals passed", "schema_version": 1}),
+        encoding="utf-8",
+    )
+    control_path(repo_root=repo_root, session_id=state.active_session_id).write_text(
+        json.dumps(
+            {
+                "state": "stopped",
+                "reason": "evals passed",
+                "stop_reason": "goal_met",
+                "schema_version": 1,
+            }
+        ),
         encoding="utf-8",
     )
 
