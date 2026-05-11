@@ -110,14 +110,19 @@ what was verified, and what remains.
 You will make an agentic team to achieve the implementation part.
 
 Create an agent team to do it. They should be responsible for:
-- preparing the analysis using CODEX
+- making preparation steps using CODEX
     - create a dedicated directory in `_feature_planning/` withing the session directory.
-- decide if a research step is necessary using CODEX
+- deciding if a research/analysis step is necessary using CODEX
+    - take this step especially seriously when the selected task mentions
+      meaningful uncertainty, third-party APIs, SaaS behavior, auth, browser
+      setup, SDK/version ambiguity, or unclear live-system contracts.
 - if the research step is necessary, then trigger researching agents using GEMINI, CODEX, CLAUDE
-    - you can look into the repos directory for inspiration how other projects do it
-    - you can use internet
-    - write down your findings into the markdown file
-    - you can also use Github CLI to explore other GH repos - you can even download them to _additional_context/ directory (part of .gitignore) and continue research there
+    - use internet, GitHub search/CLI, official docs, source repos, SDK
+      examples, GitHub issues, CLI help, browser automation, live read-only
+      probes, and downloaded repos/docs as appropriate.
+    - do not be afraid to download relevant repos, SDKs, examples, or docs into
+      `_additional_context/` and inspect them locally.
+    - write down your findings into markdown file/s.
 - coming up with a plan how to do it using CODEX
     - the plan should be outputted to `/_feature_planning` directory and should be based on the findings from the previous research
     - Create a dedicated directory withing the `/_feature_planning` and then create markdown file there called "plan.md".
