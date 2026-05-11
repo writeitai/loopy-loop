@@ -133,6 +133,25 @@ User update inbox:
 - If you cannot safely process the request, leave updates_from_user.md non-empty
   and record the blocker in current_state.md.
 
+Research and analysis nudge:
+- When planning work with meaningful uncertainty, give the next task an
+  explicit analysis/research expectation instead of jumping straight to
+  implementation.
+- This is especially useful for third-party APIs, live SaaS products, auth
+  flows, browser-only setup, versioned SDKs, undocumented payloads,
+  integration status checks, or tasks where there are several plausible ways
+  the system could work.
+- Keep the research direction high-level. Point agents toward kinds of
+  sources, not a rigid checklist: official docs, source repos, SDK examples,
+  GitHub issues, CLI help, existing project docs, live read-only probes, and
+  tenant evidence when available.
+- Agents should not be afraid to use the internet, GitHub search/CLI, browser
+  automation, or to download relevant repos/docs into `_additional_context/`
+  for local inspection.
+- The goal is not to slow down implementation. The goal is to avoid building
+  on guessed external contracts when a short research pass can clarify the
+  real API, payload, status field, setup path, or failure mode.
+
 Progressive disclosure rules:
 - Keep what_we_should_do/plan.md readable.
 - Expand only the next useful slice of work.
@@ -196,6 +215,9 @@ What to do:
      Default PR expected and Merge expected to yes for implementation tasks
      that change repo files. Default both to no only for session-state-only,
      eval-only, research-only, or planning-only tasks.
+   - Analysis / research expectations when the task has meaningful
+     uncertainty. Keep this high-level: describe the uncertainty and useful
+     source types, not a rigid research script.
 10. Update current_state.md with the next expected inner-loop task.
 11. Update decisions.md for meaningful planning choices.
 12. Update memory.md only when a durable fact changes.
@@ -212,14 +234,19 @@ project_state files. The next inner loop owns implementation.
 You will make an agentic team to achieve the implementation part.
 
 Create an agent team to do it. They should be responsible for:
-- preparing the analysis using CODEX
+- making preparation steps using CODEX
     - create a dedicated directory in `_feature_planning/` withing the session directory.
-- decide if a research step is necessary using CODEX
+- deciding if a research/analysis step is necessary using CODEX
+    - take this step especially seriously when the selected task mentions
+      meaningful uncertainty, third-party APIs, SaaS behavior, auth, browser
+      setup, SDK/version ambiguity, or unclear live-system contracts.
 - if the research step is necessary, then trigger researching agents using GEMINI, CODEX, CLAUDE
-    - you can look into the repos directory for inspiration how other projects do it
-    - you can use internet
-    - write down your findings into the markdown file
-    - you can also use Github CLI to explore other GH repos - you can even download them to _additional_context/ directory (part of .gitignore) and continue research there
+    - use internet, GitHub search/CLI, official docs, source repos, SDK
+      examples, GitHub issues, CLI help, browser automation, live read-only
+      probes, and downloaded repos/docs as appropriate.
+    - do not be afraid to download relevant repos, SDKs, examples, or docs into
+      `_additional_context/` and inspect them locally.
+    - write down your findings into markdown file/s.
 - coming up with a plan how to do it using CODEX
     - the plan should be outputted to `_feature_planning` directory and should be based on the findings from the previous research
     - Create a dedicated directory withing the `_feature_planning` and then create markdown file there called "plan.md".
