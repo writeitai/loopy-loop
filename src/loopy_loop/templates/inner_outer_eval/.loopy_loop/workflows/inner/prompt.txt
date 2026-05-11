@@ -79,6 +79,28 @@ Implementation rules:
 - Do not mark parent tasks completed.
 - Do not rewrite the high-level plan except for the selected leaf task status.
 
+Skill capture:
+- When research, analysis, trial-and-error, debugging, or fixed issues reveal
+  durable operational knowledge, consider creating a new skill or updating an
+  existing relevant skill.
+- Durable operational knowledge includes repeatable login/setup steps, correct
+  API endpoints or payload shapes, SDK/CLI quirks, browser automation
+  sequences, integration readiness checks, common failure modes, and links to
+  authoritative docs or source repos.
+- Prefer updating an existing skill when the knowledge clearly belongs there.
+  Create a new skill when it describes a reusable workflow or capability that
+  future agents should invoke directly.
+- If `.agents/skills/skill-creator/SKILL.md` is available, read it before
+  creating or substantially changing a skill.
+- Be sure to understand where to place the skill. For example, a project may
+  have a central `skills/` directory that is synced into harness directories
+  such as `.agents/skills/` or `.claude/skills/` via `npx skills`, a Makefile
+  target, or similar install command.
+- Keep skills practical: include when to use the skill, exact steps or
+  invariants, source links or local reference paths, and what not to assume.
+- Do not put secrets, raw tokens, cookies, passwords, or sensitive screenshots
+  in skills.
+
 Completion rules:
 1. If implementation and checks succeed, mark the selected leaf task:
    [ ] (inner complete, waiting for outer - iteration:<current iteration>)
@@ -155,6 +177,12 @@ Create an agent team to do it. They should be responsible for:
     - make sure that all new functionality is well unit-tested
     - unit tests must be robust, do the actual testing of the functionality
     - also run the linting and pyright checks at the end
+- capturing durable operational knowledge as a skill when the work reveals
+  reusable login/setup/API/browser/CLI/integration guidance
+    - use skill-creator if available
+    - understand the project's skill source/install layout before choosing
+      where to add or update the skill
+    - update an existing skill when appropriate instead of creating duplicates
 - reviewing that the plan was followed and that the acceptance criteria were met using CLAUDE
     - be extra thorough in you examination
     - if there are any shortcomings in the implementation, return it back to the execution agent
