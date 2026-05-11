@@ -1,5 +1,5 @@
-goal_file: "loopy_loop_goal.txt"
-max_turns: 60
+goal_file: loopy_loop_goal.txt
+max_turns: 160
 goal_check_consecutive_failures_cap: 3
 team_harness_provider: "codex"
 team_harness_model: "gpt-5.5"
@@ -9,8 +9,8 @@ team_harness_agents:
   - "gemini"
 team_harness_agent_models:
   codex: "gpt-5.5"
-  claude: "claude-sonnet-4-6"
-  gemini: "gemini-2.5-pro"
+  claude: "claude-opus-4-7"
+  gemini: "gemini-3-flash"
 team_harness_agent_reasoning_efforts:
   codex: "high"
 team_harness_api_base: "https://openrouter.ai/api/v1"
