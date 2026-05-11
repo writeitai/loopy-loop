@@ -163,6 +163,26 @@ Integrated implementation bias:
   be concrete implementation details. Plan the next task so agents wire the
   actual system, run it, capture the real error, and fix or narrow that error.
 
+Suspected blocker handling:
+- Treat a newly reported blocker as a hypothesis, not as final truth.
+- Before marking a task blocked or stopping the loop, prefer creating a focused
+  follow-up task to investigate the root cause, retry through a different
+  route, use a different harness/agent, or find an alternative path.
+- This is especially important for browser/UI auth failures, missing-access
+  claims, ambiguous API errors, 404/unsupported endpoint errors, tenant setup
+  uncertainty, and external integration readiness checks.
+- The follow-up task should ask the inner loop to determine whether the issue
+  is an execution mistake, a wrong endpoint/API/resource assumption, a missing
+  setup/configuration step, a transient/tooling problem, or a true blocker.
+- The inner loop may confirm a true blocker only after it has attempted
+  reasonable alternate routes, such as browser vs API, official docs vs live
+  probing, different agent/harness, CLI vs UI, or a smaller integrated retry.
+- If the issue is not a true blocker, the follow-up task should fix the path or
+  create the next implementation task.
+- If the issue is a true blocker, require precise evidence: what was tried,
+  what failed, why alternatives do not apply, and the exact
+  human/destructive/monetary action required if any.
+
 Progressive disclosure rules:
 - Keep what_we_should_do/plan.md readable.
 - Expand only the next useful slice of work.
@@ -231,6 +251,9 @@ What to do:
      source types, not a rigid research script.
    - Execution shape: prefer an integrated runnable slice unless a small proof
      is needed to resolve a major conceptual, destructive, or monetary risk.
+   - Suspected blocker handling when relevant: require root-cause
+     investigation, alternate routes, and precise evidence before accepting a
+     blocker.
 10. Update current_state.md with the next expected inner-loop task.
 11. Update decisions.md for meaningful planning choices.
 12. Update memory.md only when a durable fact changes.
