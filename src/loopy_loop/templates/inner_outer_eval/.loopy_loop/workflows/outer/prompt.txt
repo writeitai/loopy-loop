@@ -152,6 +152,17 @@ Research and analysis nudge:
   on guessed external contracts when a short research pass can clarify the
   real API, payload, status field, setup path, or failure mode.
 
+Integrated implementation bias:
+- Prefer tasks that build the real integrated path and then observe/fix real
+  errors rather than long chains of one-off proof scripts or isolated
+  connectivity experiments.
+- Use small proofs only when they remove a major conceptual unknown or prevent
+  destructive/monetary mistakes. Do not create proof cycles for every ordinary
+  integration technicality.
+- After reasonable research/analysis, assume remaining failures are likely to
+  be concrete implementation details. Plan the next task so agents wire the
+  actual system, run it, capture the real error, and fix or narrow that error.
+
 Progressive disclosure rules:
 - Keep what_we_should_do/plan.md readable.
 - Expand only the next useful slice of work.
@@ -218,6 +229,8 @@ What to do:
    - Analysis / research expectations when the task has meaningful
      uncertainty. Keep this high-level: describe the uncertainty and useful
      source types, not a rigid research script.
+   - Execution shape: prefer an integrated runnable slice unless a small proof
+     is needed to resolve a major conceptual, destructive, or monetary risk.
 10. Update current_state.md with the next expected inner-loop task.
 11. Update decisions.md for meaningful planning choices.
 12. Update memory.md only when a durable fact changes.
