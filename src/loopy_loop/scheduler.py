@@ -18,29 +18,14 @@ def choose_next_workflow(
     )
 
     for workflow in workflows:
-        if not workflow.enabled:
-            continue
-        if iteration_count < workflow.not_before_iteration:
-            continue
-        if workflow.id == "goal_check" and not has_successful_non_goal_check:
-            continue
-        if (
-            workflow.must_follow is not None
-            and workflow.must_follow != last_successful_workflow_id
-        ):
-            continue
-        is_run_on_start = workflow.run_on_start and not has_successful_history
-        if (
-            workflow.run_after_successes is not None
-            and not is_run_on_start
-            and not _run_after_successes_satisfied(workflow=workflow, history=history)
-        ):
-            continue
-        if not _run_every_satisfied(
-            workflow_id=workflow.id,
+        if not _workflow_eligible(
+            workflow=workflow,
             history=history,
             iteration_count=iteration_count,
-            run_every=workflow.run_every,
+            last_successful_workflow_id=last_successful_workflow_id,
+            has_successful_history=has_successful_history,
+            has_successful_non_goal_check=has_successful_non_goal_check,
+            ignore_run_every=False,
         ):
             continue
         eligible.append(
@@ -57,8 +42,94 @@ def choose_next_workflow(
         )
 
     if not eligible:
-        return None
+        return _failed_workflow_retry(
+            workflows=workflows,
+            history=history,
+            iteration_count=iteration_count,
+            last_successful_workflow_id=last_successful_workflow_id,
+            has_successful_history=has_successful_history,
+            has_successful_non_goal_check=has_successful_non_goal_check,
+        )
     return max(eligible, key=lambda item: (item[0], item[1], item[2].id))[2]
+
+
+def _workflow_eligible(
+    *,
+    workflow: WorkflowDefinition,
+    history: list[HistoryEntry],
+    iteration_count: int,
+    last_successful_workflow_id: str | None,
+    has_successful_history: bool,
+    has_successful_non_goal_check: bool,
+    ignore_run_every: bool,
+) -> bool:
+    if not workflow.enabled:
+        return False
+    if iteration_count < workflow.not_before_iteration:
+        return False
+    if workflow.id == "goal_check" and not has_successful_non_goal_check:
+        return False
+    if (
+        workflow.must_follow is not None
+        and workflow.must_follow != last_successful_workflow_id
+    ):
+        return False
+    is_run_on_start = workflow.run_on_start and not has_successful_history
+    if (
+        workflow.run_after_successes is not None
+        and not is_run_on_start
+        and not _run_after_successes_satisfied(workflow=workflow, history=history)
+    ):
+        return False
+    if ignore_run_every:
+        return True
+    return _run_every_satisfied(
+        workflow_id=workflow.id,
+        history=history,
+        iteration_count=iteration_count,
+        run_every=workflow.run_every,
+    )
+
+
+def _failed_workflow_retry(
+    *,
+    workflows: list[WorkflowDefinition],
+    history: list[HistoryEntry],
+    iteration_count: int,
+    last_successful_workflow_id: str | None,
+    has_successful_history: bool,
+    has_successful_non_goal_check: bool,
+) -> WorkflowDefinition | None:
+    """Retry the latest failed workflow only when normal scheduling is stuck.
+
+    A failed run should not unlock downstream must_follow workflows, but it also
+    should not consume its own cadence slot so completely that the loop has no
+    recoverable next workflow. This fallback preserves the normal scheduling
+    pass and bypasses only run_every for the same workflow that just failed.
+    """
+    if not history or history[-1].success:
+        return None
+    workflow = next(
+        (
+            candidate
+            for candidate in workflows
+            if candidate.id == history[-1].workflow_id
+        ),
+        None,
+    )
+    if workflow is None:
+        return None
+    if not _workflow_eligible(
+        workflow=workflow,
+        history=history,
+        iteration_count=iteration_count,
+        last_successful_workflow_id=last_successful_workflow_id,
+        has_successful_history=has_successful_history,
+        has_successful_non_goal_check=has_successful_non_goal_check,
+        ignore_run_every=True,
+    ):
+        return None
+    return workflow
 
 
 def _last_successful_workflow_id(*, history: list[HistoryEntry]) -> str | None:

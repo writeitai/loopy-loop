@@ -53,6 +53,89 @@ def test_run_every_and_not_before_iteration_are_enforced(
     assert chosen is None
 
 
+def test_failed_outer_retries_when_inner_is_blocked(
+    repo_builder: Any, history_entry_factory: Any
+) -> None:
+    repo_root = repo_builder(
+        workflows={
+            "outer": {
+                "prompt": "Plan",
+                "config": {
+                    "enabled": True,
+                    "priority": 10,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "",
+                },
+            },
+            "inner": {
+                "prompt": "Implement",
+                "config": {
+                    "enabled": True,
+                    "priority": 20,
+                    "run_every": 1,
+                    "must_follow": "outer",
+                    "not_before_iteration": 1,
+                    "description": "",
+                },
+            },
+        }
+    )
+    workflows = load_workflow_definitions(repo_root=repo_root)
+    history = [
+        history_entry_factory(iteration=37, workflow_id="inner", success=True),
+        history_entry_factory(iteration=38, workflow_id="outer", success=False),
+    ]
+
+    chosen = choose_next_workflow(
+        workflows=workflows, history=history, iteration_count=38
+    )
+
+    assert chosen is not None
+    assert chosen.id == "outer"
+
+
+def test_failed_retry_does_not_preempt_normally_eligible_workflow(
+    repo_builder: Any, history_entry_factory: Any
+) -> None:
+    repo_root = repo_builder(
+        workflows={
+            "outer": {
+                "prompt": "Plan",
+                "config": {
+                    "enabled": True,
+                    "priority": 10,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "",
+                },
+            },
+            "reviewer": {
+                "prompt": "Review",
+                "config": {
+                    "enabled": True,
+                    "priority": 20,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "",
+                },
+            },
+        }
+    )
+    workflows = load_workflow_definitions(repo_root=repo_root)
+    history = [history_entry_factory(iteration=2, workflow_id="outer", success=False)]
+
+    chosen = choose_next_workflow(
+        workflows=workflows, history=history, iteration_count=2
+    )
+
+    assert chosen is not None
+    assert chosen.id == "reviewer"
+
+
 def test_no_eligible_workflow_returns_none(
     repo_builder: Any, history_entry_factory: Any
 ) -> None:
