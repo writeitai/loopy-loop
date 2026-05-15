@@ -109,6 +109,10 @@ team_harness_agent_models:
   codex: "gpt-5.5"
 team_harness_agent_reasoning_efforts:
   codex: "high"
+# Optional coordinator retry controls. Omit to use team-harness defaults.
+# team_harness_max_retries: 8
+# team_harness_retry_base_delay_s: 2.0
+# team_harness_retry_max_delay_s: 60.0
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
 ```
@@ -128,6 +132,9 @@ Rules:
 - `team_harness_api_key_env` must be set during coordinator preflight and again in the worker before `TeamHarness(...)`
 - `team_harness_agent_reasoning_efforts` is optional and only affects workers
   whose team-harness template supports a reasoning-effort flag
+- `team_harness_max_retries`, `team_harness_retry_base_delay_s`, and
+  `team_harness_retry_max_delay_s` are optional coordinator retry controls for
+  transient team-harness API/network errors
 
 Workflow config:
 

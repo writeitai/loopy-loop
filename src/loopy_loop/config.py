@@ -10,6 +10,7 @@ from pydantic import computed_field
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import field_validator
+from pydantic import model_validator
 from pydantic import ValidationError
 import yaml
 
@@ -90,6 +91,29 @@ class RootConfig(BaseModel):
             "effort flag will use this value."
         ),
     )
+    team_harness_max_retries: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Optional coordinator retry budget passed to team-harness. Leave null "
+            "to use the installed team-harness default."
+        ),
+    )
+    team_harness_retry_base_delay_s: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Optional base delay in seconds for team-harness coordinator retry backoff."
+        ),
+    )
+    team_harness_retry_max_delay_s: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Optional maximum delay in seconds for team-harness coordinator retry "
+            "backoff."
+        ),
+    )
     team_harness_api_base: str = Field(
         default=DEFAULT_API_BASE,
         description="OpenAI-compatible API base URL passed to team-harness.",
@@ -124,6 +148,20 @@ class RootConfig(BaseModel):
     @classmethod
     def normalize_api_base_value(cls, value: str) -> str:
         return normalize_api_base(value=value)
+
+    @model_validator(mode="after")
+    def validate_retry_delay_bounds(self) -> "RootConfig":
+        if (
+            self.team_harness_retry_base_delay_s is not None
+            and self.team_harness_retry_max_delay_s is not None
+            and self.team_harness_retry_max_delay_s
+            < self.team_harness_retry_base_delay_s
+        ):
+            raise ValueError(
+                "team_harness_retry_max_delay_s must be greater than or equal to "
+                "team_harness_retry_base_delay_s"
+            )
+        return self
 
 
 class RunAfterSuccesses(BaseModel):

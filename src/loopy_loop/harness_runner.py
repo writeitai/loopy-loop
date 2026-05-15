@@ -55,12 +55,16 @@ def run_harness_iteration(
         raise
     except TeamHarnessError as exc:
         traceback.print_exc()
+        harness_run_id, harness_output_dir = _failure_harness_paths(
+            detail=exc.detail, harness_output_root=harness_output_root
+        )
         return IterationResult(
             success=False,
             text=None,
             error=str(exc),
             error_detail=exc.detail,
-            harness_run_id="",
+            harness_run_id=harness_run_id,
+            harness_output_dir=harness_output_dir,
         )
     except Exception as exc:
         traceback.print_exc()
@@ -90,6 +94,26 @@ def _build_harness_kwargs(
         "cwd": str(repo_root),
         "console_mode": "silent",
     }
+    retry_kwargs = {
+        "max_retries": config_snapshot.team_harness_max_retries,
+        "retry_base_delay_s": config_snapshot.team_harness_retry_base_delay_s,
+        "retry_max_delay_s": config_snapshot.team_harness_retry_max_delay_s,
+    }
+    configured_retry_kwargs = {
+        key: value for key, value in retry_kwargs.items() if value is not None
+    }
+    if configured_retry_kwargs:
+        if _supports_kwargs(
+            harness_factory=harness_factory, names=configured_retry_kwargs.keys()
+        ):
+            kwargs.update(configured_retry_kwargs)
+        else:
+            raise ConfigError(
+                "Installed team-harness does not support coordinator retry "
+                "controls; upgrade team-harness or remove "
+                "team_harness_max_retries, team_harness_retry_base_delay_s, "
+                "and team_harness_retry_max_delay_s from loopy_loop_config.yaml."
+            )
     agent_override_kwargs = {
         "agent_models": config_snapshot.team_harness_agent_models,
         "agent_reasoning_efforts": config_snapshot.team_harness_agent_reasoning_efforts,
@@ -123,6 +147,20 @@ def _supports_kwargs(
     if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters):
         return True
     return all(name in signature.parameters for name in names)
+
+
+def _failure_harness_paths(
+    *, detail: dict[str, object] | None, harness_output_root: Path | None
+) -> tuple[str, str]:
+    if not detail:
+        return "", ""
+    run_id_value = detail.get("run_id")
+    output_dir_value = detail.get("session_output_dir")
+    run_id = run_id_value if isinstance(run_id_value, str) else ""
+    output_dir = output_dir_value if isinstance(output_dir_value, str) else ""
+    if not output_dir and run_id and harness_output_root is not None:
+        output_dir = str(harness_output_root / run_id)
+    return run_id, output_dir
 
 
 def write_iteration_artifacts(
