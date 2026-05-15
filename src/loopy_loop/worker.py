@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import json
 from pathlib import Path
 import sys
 import time
@@ -23,21 +25,30 @@ from loopy_loop.sessions import finished_path
 from loopy_loop.sessions import GOAL_CHECK_FILENAME
 from loopy_loop.sessions import harness_outputs_dir_path
 from loopy_loop.sessions import iteration_harness_output_root
+from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.sessions import project_state_dir_path
 from loopy_loop.sessions import session_dir_path
 from loopy_loop.sessions import updates_from_user_path
 
 # Internal retry constants for /finished — not configurable externally.
 # If all retries fail, the exception propagates and the process exits;
-# the next invocation recovers via the abandoned-task path in /register.
+# the next invocation recovers via the completed-task or abandoned-task path in /register.
 _FINISHED_RETRY_ATTEMPTS = 2
 _FINISHED_RETRY_BACKOFF_SECONDS = 1.0
 
 
 class FatalAssignmentError(Exception):
-    def __init__(self, *, request: FinishedRequest, message: str) -> None:
+    def __init__(
+        self, *, finished_assignment: FinishedAssignment, message: str
+    ) -> None:
         super().__init__(message)
-        self.request = request
+        self.finished_assignment = finished_assignment
+
+
+@dataclass(frozen=True)
+class FinishedAssignment:
+    request: FinishedRequest
+    pending_path: Path
 
 
 def run_worker_loop(*, repo_root: Path, coordinator_url: str) -> None:
@@ -46,16 +57,24 @@ def run_worker_loop(*, repo_root: Path, coordinator_url: str) -> None:
         task = _post_register(client=client, coordinator_url=base_url)
         while task.action == "run":
             try:
-                finished_request = _run_task(repo_root=repo_root, task=task)
+                finished_assignment = _run_task(repo_root=repo_root, task=task)
             except FatalAssignmentError as exc:
                 print(str(exc), file=sys.stderr)
                 _post_finished(
-                    client=client, coordinator_url=base_url, request=exc.request
+                    client=client,
+                    coordinator_url=base_url,
+                    request=exc.finished_assignment.request,
+                )
+                _clear_pending_finished_request(
+                    path=exc.finished_assignment.pending_path
                 )
                 sys.exit(2)
             task = _post_finished(
-                client=client, coordinator_url=base_url, request=finished_request
+                client=client,
+                coordinator_url=base_url,
+                request=finished_assignment.request,
             )
+            _clear_pending_finished_request(path=finished_assignment.pending_path)
 
 
 def _post_register(*, client: httpx.Client, coordinator_url: str) -> TaskResponse:
@@ -82,7 +101,7 @@ def _post_finished(
     raise RuntimeError("unreachable")
 
 
-def _run_task(*, repo_root: Path, task: TaskResponse) -> FinishedRequest:
+def _run_task(*, repo_root: Path, task: TaskResponse) -> FinishedAssignment:
     if (
         task.session_id is None
         or task.workflow_id is None
@@ -146,13 +165,39 @@ def _run_task(*, repo_root: Path, task: TaskResponse) -> FinishedRequest:
     finished_request = FinishedRequest(
         session_id=task.session_id,
         workflow_id=task.workflow_id,
+        iteration=task.iteration,
         success=iteration_result.success,
         text=iteration_result.text,
         error=iteration_result.error,
     )
+    pending_path = _write_pending_finished_request(
+        repo_root=repo_root, request=finished_request
+    )
+    finished_assignment = FinishedAssignment(
+        request=finished_request, pending_path=pending_path
+    )
     if fatal_error is not None:
-        raise FatalAssignmentError(request=finished_request, message=fatal_error)
-    return finished_request
+        raise FatalAssignmentError(
+            finished_assignment=finished_assignment, message=fatal_error
+        )
+    return finished_assignment
+
+
+def _write_pending_finished_request(
+    *, repo_root: Path, request: FinishedRequest
+) -> Path:
+    path = pending_finished_request_path(
+        repo_root=repo_root,
+        session_id=request.session_id,
+        iteration=request.iteration,
+        workflow_id=request.workflow_id,
+    )
+    path.write_text(json.dumps(request.model_dump(), indent=2), encoding="utf-8")
+    return path
+
+
+def _clear_pending_finished_request(*, path: Path) -> None:
+    path.unlink(missing_ok=True)
 
 
 def _render_prompt(

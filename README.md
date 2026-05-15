@@ -194,9 +194,12 @@ Both endpoints return a `TaskResponse` with `action` of either `"run"` or `"stop
 A `run` response carries `workflow_id`, `session_id`, `iteration`, and `config_snapshot`.
 A `stop` response carries `stop_reason`.
 
-Stale `/finished` calls (mismatched `session_id` or `workflow_id`) do not mutate state and
-return the current running task's response. If there is no active task, `/finished` acts
-like `/register` and dispatches the next available task.
+Stale `/finished` calls (mismatched `session_id`, `workflow_id`, or
+`iteration`) do not mutate state and return the current running task's response.
+If there is no active task, `/finished` acts like `/register` and dispatches the
+next available task. If a worker exits after writing `result.json` but before
+`/finished` is acknowledged, the next `/register` recovers the completed result
+from the iteration directory instead of marking it `abandoned`.
 
 See [docs/http-contract.md](docs/http-contract.md) for the exact JSON payloads.
 

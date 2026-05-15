@@ -26,7 +26,8 @@ One session directory is created per fresh coordinator run and reused for all it
             │   ├── prompt.txt
             │   ├── result.json
             │   ├── result_text.txt
-            │   └── harness_run_id.txt
+            │   ├── harness_run_id.txt
+            │   └── pending_finished_request.json
             └── 0002_goal_check/
                 ├── prompt.txt
                 ├── result.json
@@ -153,6 +154,16 @@ eval-banana run \
 `harness_run_id.txt`
 
 - The `team_harness` run id, or empty string on failure before a run id exists
+
+`pending_finished_request.json`
+
+- Durable handoff record written after `result.json` and before the worker calls
+  `/finished`
+- Removed after `/finished` is acknowledged or after `/register` recovers it
+- If a worker exits in that handoff window, the next `/register` uses this file
+  to record the completed task instead of marking it `abandoned`
+- If the file is missing but `result.json` exists for the active task, the
+  coordinator can reconstruct the finished request from `result.json`
 
 ## Control Contracts
 

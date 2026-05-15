@@ -20,6 +20,7 @@ PROMPT_FILENAME = "prompt.txt"
 RESULT_FILENAME = "result.json"
 RESULT_TEXT_FILENAME = "result_text.txt"
 HARNESS_RUN_ID_FILENAME = "harness_run_id.txt"
+PENDING_FINISHED_REQUEST_FILENAME = "pending_finished_request.json"
 CONTROL_FILENAME = "control.json"
 GOAL_CHECK_FILENAME = "goal_check.json"
 
@@ -116,6 +117,14 @@ def iteration_dir_name(*, iteration: int, workflow_id: str) -> str:
     return f"{iteration:04d}_{workflow_id}"
 
 
+def iteration_dir_path(
+    *, repo_root: Path, session_id: str, iteration: int, workflow_id: str
+) -> Path:
+    return iterations_dir_path(repo_root=repo_root, session_id=session_id) / (
+        iteration_dir_name(iteration=iteration, workflow_id=workflow_id)
+    )
+
+
 def iteration_harness_output_root(
     *, repo_root: Path, session_id: str, iteration: int, workflow_id: str
 ) -> Path:
@@ -127,11 +136,42 @@ def iteration_harness_output_root(
 def ensure_iteration_dir(
     *, repo_root: Path, session_id: str, iteration: int, workflow_id: str
 ) -> Path:
-    iteration_dir = iterations_dir_path(
-        repo_root=repo_root, session_id=session_id
-    ) / iteration_dir_name(iteration=iteration, workflow_id=workflow_id)
+    iteration_dir = iteration_dir_path(
+        repo_root=repo_root,
+        session_id=session_id,
+        iteration=iteration,
+        workflow_id=workflow_id,
+    )
     iteration_dir.mkdir(parents=True, exist_ok=True)
     return iteration_dir
+
+
+def pending_finished_request_path(
+    *, repo_root: Path, session_id: str, iteration: int, workflow_id: str
+) -> Path:
+    return (
+        iteration_dir_path(
+            repo_root=repo_root,
+            session_id=session_id,
+            iteration=iteration,
+            workflow_id=workflow_id,
+        )
+        / PENDING_FINISHED_REQUEST_FILENAME
+    )
+
+
+def result_path(
+    *, repo_root: Path, session_id: str, iteration: int, workflow_id: str
+) -> Path:
+    return (
+        iteration_dir_path(
+            repo_root=repo_root,
+            session_id=session_id,
+            iteration=iteration,
+            workflow_id=workflow_id,
+        )
+        / RESULT_FILENAME
+    )
 
 
 def control_path(*, repo_root: Path, session_id: str) -> Path:

@@ -91,6 +91,7 @@ class LoopState(BaseModel):
 class FinishedRequest(BaseModel):
     workflow_id: str = Field(...)
     session_id: str = Field(...)
+    iteration: int = Field(...)
     success: bool = Field(...)
     text: str | None = Field(default=None)
     error: str | None = Field(default=None)
