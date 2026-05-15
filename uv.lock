@@ -259,7 +259,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "rich", specifier = ">=14.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
-    { name = "team-harness", specifier = ">=0.2.8" },
+    { name = "team-harness", specifier = ">=0.2.9" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]
 
@@ -556,7 +556,7 @@ wheels = [
 
 [[package]]
 name = "team-harness"
-version = "0.2.8"
+version = "0.2.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -567,9 +567,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f3/b1/e4d1496481edc550efa949d0ad04b7c9810d90eb6ada75e773bcc53daffb/team_harness-0.2.8.tar.gz", hash = "sha256:d29c361f5398b6553520439afb30fa3d0c6bff6e6e5468c40050e73e711c7a39", size = 1955706 }
+sdist = { url = "https://files.pythonhosted.org/packages/a3/58/fc508f4e59d123b5a0647576636c2aa18d8f5f525b1e68f1e04831348b77/team_harness-0.2.9.tar.gz", hash = "sha256:c7635cc6c5546c34512493c90f0b5728e6f9c1075f0a10e91b8e224e6bd16b64", size = 1959046 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2e/59/8cf24202cefc3e487342dbcd5b18c95a3fe924bb3243fd86f089fc678b2b/team_harness-0.2.8-py3-none-any.whl", hash = "sha256:0f5d6551a9f4e3a4eaa9c89b09b9c9c48c1b1646965eb021da19009f027a0cd6", size = 101150 },
+    { url = "https://files.pythonhosted.org/packages/26/a2/9b4d3efe0f803e6ad1d76ee2407bff73ebfd6e12bfe851285996d1861a50/team_harness-0.2.9-py3-none-any.whl", hash = "sha256:e01b3ac67fc094566855aa811ba17fa9a8926d8e8460fe86c8db9a24898c4959", size = 103561 },
 ]
 
 [[package]]

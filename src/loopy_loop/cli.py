@@ -50,6 +50,10 @@ team_harness_agents:
   - "codex"
 team_harness_agent_models: {{}}
 team_harness_agent_reasoning_efforts: {{}}
+# Optional coordinator retry controls. Omit to use team-harness defaults.
+# team_harness_max_retries: 8
+# team_harness_retry_base_delay_s: 2.0
+# team_harness_retry_max_delay_s: 60.0
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
 """

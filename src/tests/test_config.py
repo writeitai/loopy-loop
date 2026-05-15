@@ -22,6 +22,9 @@ def test_load_root_config_and_workflows(repo_builder: Any, monkeypatch: Any) -> 
     assert root_config.team_harness_api_base == "https://openrouter.ai/api/v1"
     assert root_config.team_harness_agent_models == {}
     assert root_config.team_harness_agent_reasoning_efforts == {}
+    assert root_config.team_harness_max_retries is None
+    assert root_config.team_harness_retry_base_delay_s is None
+    assert root_config.team_harness_retry_max_delay_s is None
     assert root_config.goal == "Ship a minimal working landing page"
     assert [workflow.id for workflow in workflows] == ["goal_check", "planner"]
     assert workflows[0].priority == 0
@@ -59,6 +62,36 @@ def test_load_root_config_uses_goal_file_and_optional_defaults(
     assert root_config.completion_criteria == []
     assert root_config.stop_criteria == []
     assert root_config.team_harness_system_prompt_extension == ""
+
+
+def test_load_root_config_accepts_team_harness_retry_controls(
+    repo_builder: Any,
+) -> None:
+    repo_root = repo_builder(
+        root_config={
+            "team_harness_max_retries": 8,
+            "team_harness_retry_base_delay_s": 2.0,
+            "team_harness_retry_max_delay_s": 60.0,
+        }
+    )
+
+    root_config = load_root_config(repo_root=repo_root)
+
+    assert root_config.team_harness_max_retries == 8
+    assert root_config.team_harness_retry_base_delay_s == 2.0
+    assert root_config.team_harness_retry_max_delay_s == 60.0
+
+
+def test_load_root_config_rejects_invalid_retry_delay_bounds(repo_builder: Any) -> None:
+    repo_root = repo_builder(
+        root_config={
+            "team_harness_retry_base_delay_s": 10.0,
+            "team_harness_retry_max_delay_s": 1.0,
+        }
+    )
+
+    with pytest.raises(ConfigError, match="team_harness_retry_max_delay_s"):
+        load_root_config(repo_root=repo_root)
 
 
 def test_load_root_config_rejects_inline_goal(repo_builder: Any) -> None:
