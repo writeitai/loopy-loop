@@ -8,6 +8,8 @@ import pytest
 
 from loopy_loop.coordinator_app import create_coordinator_app
 from loopy_loop.sessions import control_path
+from loopy_loop.sessions import pending_finished_request_path
+from loopy_loop.sessions import result_path
 from loopy_loop.state_store import StateStore
 
 
@@ -68,6 +70,7 @@ def test_finished_records_history(repo_builder: Any, monkeypatch: Any) -> None:
         json={
             "workflow_id": reg["workflow_id"],
             "session_id": reg["session_id"],
+            "iteration": reg["iteration"],
             "success": True,
             "text": "done",
             "error": None,
@@ -97,6 +100,7 @@ def test_finished_returns_next_run(repo_builder: Any, monkeypatch: Any) -> None:
         json={
             "workflow_id": reg["workflow_id"],
             "session_id": reg["session_id"],
+            "iteration": reg["iteration"],
             "success": True,
             "text": "done",
             "error": None,
@@ -122,6 +126,7 @@ def test_finished_stale_mismatch_does_not_mutate(
         json={
             "workflow_id": reg["workflow_id"],
             "session_id": "wrong-session-id",
+            "iteration": reg["iteration"],
             "success": True,
             "text": "done",
             "error": None,
@@ -160,6 +165,7 @@ def test_finished_stale_no_current_task_dispatches_fresh(
         json={
             "workflow_id": "planner",
             "session_id": state.active_session_id,
+            "iteration": 1,
             "success": True,
             "text": "done",
             "error": None,
@@ -189,6 +195,7 @@ def test_finished_stale_no_current_task_terminal_returns_stop(
         json={
             "workflow_id": "planner",
             "session_id": state.active_session_id,
+            "iteration": 1,
             "success": True,
             "text": "done",
             "error": None,
@@ -252,6 +259,106 @@ def test_register_recovers_abandoned_task(
     # Fresh task dispatched (planner has no prior history so it is eligible).
     assert response["action"] == "run"
     assert response["iteration"] == 2
+
+
+def test_register_recovers_completed_task_from_pending_finished_request(
+    repo_builder: Any, monkeypatch: Any, current_task_factory: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    store = StateStore(repo_root=repo_root)
+    state = store.read_state()
+    assert state is not None
+    current_task = current_task_factory(
+        workflow_id="planner", session_id=state.active_session_id, iteration=1
+    )
+    state.current_task = current_task
+    state.stop_requested = True
+    store.write_state(state=state)
+    pending_path = pending_finished_request_path(
+        repo_root=repo_root,
+        session_id=current_task.session_id,
+        iteration=current_task.iteration,
+        workflow_id=current_task.workflow_id,
+    )
+    pending_path.parent.mkdir(parents=True, exist_ok=True)
+    pending_path.write_text(
+        json.dumps(
+            {
+                "workflow_id": current_task.workflow_id,
+                "session_id": current_task.session_id,
+                "iteration": current_task.iteration,
+                "success": True,
+                "text": "done",
+                "error": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.post("/register", json={}).json()
+    updated = store.read_state()
+
+    assert response["action"] == "stop"
+    assert response["stop_reason"] == "stop_requested"
+    assert updated is not None
+    assert updated.status == "stopped"
+    assert updated.current_task is None
+    assert updated.history[0].iteration == current_task.iteration
+    assert updated.history[0].workflow_id == current_task.workflow_id
+    assert updated.history[0].success is True
+    assert updated.history[0].error is None
+    assert not pending_path.exists()
+
+
+def test_register_recovers_completed_task_from_result_json(
+    repo_builder: Any, monkeypatch: Any, current_task_factory: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    store = StateStore(repo_root=repo_root)
+    state = store.read_state()
+    assert state is not None
+    current_task = current_task_factory(
+        workflow_id="planner", session_id=state.active_session_id, iteration=1
+    )
+    state.current_task = current_task
+    state.stop_requested = True
+    store.write_state(state=state)
+    result_json_path = result_path(
+        repo_root=repo_root,
+        session_id=current_task.session_id,
+        iteration=current_task.iteration,
+        workflow_id=current_task.workflow_id,
+    )
+    result_json_path.parent.mkdir(parents=True, exist_ok=True)
+    result_json_path.write_text(
+        json.dumps(
+            {
+                "success": True,
+                "text": "done",
+                "error": None,
+                "error_detail": None,
+                "harness_run_id": "run-1",
+                "harness_output_dir": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.post("/register", json={}).json()
+    updated = store.read_state()
+
+    assert response["action"] == "stop"
+    assert response["stop_reason"] == "stop_requested"
+    assert updated is not None
+    assert updated.status == "stopped"
+    assert updated.current_task is None
+    assert updated.history[0].iteration == current_task.iteration
+    assert updated.history[0].success is True
+    assert updated.history[0].error is None
 
 
 def test_register_terminal_plus_abandoned_task_cleanup_first(
@@ -318,6 +425,7 @@ def test_finished_stop_after_max_turns(repo_builder: Any, monkeypatch: Any) -> N
         json={
             "workflow_id": reg["workflow_id"],
             "session_id": reg["session_id"],
+            "iteration": reg["iteration"],
             "success": True,
             "text": "done",
             "error": None,
@@ -380,6 +488,7 @@ def test_session_control_signal_sets_unresolvable_error(
         json={
             "workflow_id": "planner",
             "session_id": state.active_session_id,
+            "iteration": current_task.iteration,
             "success": True,
             "text": "done",
             "error": None,
@@ -474,6 +583,7 @@ def test_invalid_goal_check_output_stops_at_failure_cap(
         json={
             "workflow_id": "goal_check",
             "session_id": state.active_session_id,
+            "iteration": current_task.iteration,
             "success": True,
             "text": "done",
             "error": None,
@@ -526,6 +636,7 @@ def test_goal_check_does_not_stop_without_session_control(
         json={
             "workflow_id": "goal_check",
             "session_id": state.active_session_id,
+            "iteration": current_task.iteration,
             "success": True,
             "text": "done",
             "error": None,
@@ -597,6 +708,7 @@ def test_emits_goal_check_workflow_stops_with_session_control(
         json={
             "workflow_id": "eval_runner",
             "session_id": state.active_session_id,
+            "iteration": current_task.iteration,
             "success": True,
             "text": "done",
             "error": None,
@@ -645,6 +757,7 @@ def test_invalid_emits_goal_check_output_stops_at_failure_cap(
         json={
             "workflow_id": "eval_runner",
             "session_id": state.active_session_id,
+            "iteration": current_task.iteration,
             "success": True,
             "text": "done",
             "error": None,

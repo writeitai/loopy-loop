@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import logging
 from pathlib import Path
@@ -16,6 +17,7 @@ from loopy_loop.models import CurrentTask
 from loopy_loop.models import FinishedRequest
 from loopy_loop.models import GoalCheckSignal
 from loopy_loop.models import HistoryEntry
+from loopy_loop.models import IterationResult
 from loopy_loop.models import LoopState
 from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.models import STOP_ACTION
@@ -26,6 +28,8 @@ from loopy_loop.sessions import control_path
 from loopy_loop.sessions import create_session_dir
 from loopy_loop.sessions import create_session_id
 from loopy_loop.sessions import goal_check_path
+from loopy_loop.sessions import pending_finished_request_path
+from loopy_loop.sessions import result_path
 from loopy_loop.state_store import StateStore
 
 logger = logging.getLogger(__name__)
@@ -68,29 +72,45 @@ class CoordinatorService:
         self._prepare_state(resume=resume)
 
     def register_worker(self) -> TaskResponse:
+        recovered_pending_paths: list[Path] = []
+
         def mutator(state: LoopState | None) -> tuple[LoopState, TaskResponse]:
             current = _require_state(state=state)
             now = utc_now()
 
             # Step 3: If current_task is set (crash recovery from previous worker crash),
-            # record it as abandoned BEFORE checking stop conditions.
+            # recover a locally completed result before calling it abandoned.
             # Important: this increment can itself trigger max_turns — that is correct
             # behaviour. The stop check (step 4) will catch it immediately after.
             if current.current_task is not None:
                 orphaned = current.current_task
-                current.history.append(
-                    HistoryEntry(
-                        iteration=orphaned.iteration,
-                        workflow_id=orphaned.workflow_id,
-                        session_id=orphaned.session_id,
-                        success=False,
-                        error="abandoned",
-                        started_at=orphaned.started_at,
-                        finished_at=now,
-                    )
+                recovered = self._read_recoverable_finished_request(
+                    current_task=orphaned
                 )
-                current.iteration_count += 1
-                current.current_task = None
+                if recovered is None:
+                    current.history.append(
+                        HistoryEntry(
+                            iteration=orphaned.iteration,
+                            workflow_id=orphaned.workflow_id,
+                            session_id=orphaned.session_id,
+                            success=False,
+                            error="abandoned",
+                            started_at=orphaned.started_at,
+                            finished_at=now,
+                        )
+                    )
+                    current.iteration_count += 1
+                    current.current_task = None
+                else:
+                    recovered_request, pending_path = recovered
+                    if pending_path is not None:
+                        recovered_pending_paths.append(pending_path)
+                    self._record_finished_task(
+                        state=current,
+                        active=orphaned,
+                        request=recovered_request,
+                        now=now,
+                    )
 
             # Step 4: Check stop conditions after abandoned-task cleanup.
             stop_response = self._stop_response_if_needed(state=current)
@@ -122,7 +142,10 @@ class CoordinatorService:
                 config_snapshot=current.config_snapshot,
             )
 
-        return self.state_store.mutate(mutator)
+        response = self.state_store.mutate(mutator)
+        for path in recovered_pending_paths:
+            path.unlink(missing_ok=True)
+        return response
 
     def finish_assignment(self, *, request: FinishedRequest) -> TaskResponse:
         def mutator(state: LoopState | None) -> tuple[LoopState, TaskResponse]:
@@ -167,55 +190,16 @@ class CoordinatorService:
             if (
                 request.session_id != active.session_id
                 or request.workflow_id != active.workflow_id
+                or request.iteration != active.iteration
             ):
                 return current, _build_run_response(
                     current_task=active, config_snapshot=current.config_snapshot
                 )
 
             # Step 5: Match confirmed — process result.
-            success = request.success
-            error = request.error
-
-            # 5b: Goal-check artifact validation.
-            if self._workflow_expects_goal_check_signal(workflow_id=active.workflow_id):
-                goal_signal = self._read_goal_check_signal(current_task=active)
-                if goal_signal is None:
-                    success = False
-                    error = "invalid_goal_check_output"
-                    current.goal_check_consecutive_failures += 1
-                    if (
-                        current.goal_check_consecutive_failures
-                        >= current.config_snapshot.goal_check_consecutive_failures_cap
-                    ):
-                        current.stop_reason = "goal_check_broken"
-                        current.status = "failed"
-                else:
-                    current.goal_check_consecutive_failures = 0
-
-            # 5c: Read session control before recording history. The actual stop
-            # response is returned after the completed task is recorded below.
-            if current.stop_reason != "goal_check_broken":
-                self._apply_session_control(state=current)
-                if current.stop_reason == "invalid_control_output":
-                    success = False
-                    error = "invalid_control_output"
-
-            # 5d: Record history.
-            current.history.append(
-                HistoryEntry(
-                    iteration=active.iteration,
-                    workflow_id=active.workflow_id,
-                    session_id=active.session_id,
-                    success=success,
-                    error=error,
-                    started_at=active.started_at,
-                    finished_at=now,
-                )
+            self._record_finished_task(
+                state=current, active=active, request=request, now=now
             )
-            # 5e: Increment iteration count.
-            current.iteration_count += 1
-            # 5f: Clear current task.
-            current.current_task = None
 
             # Step 6: Special cases that stop immediately.
             if current.stop_reason == "goal_check_broken":
@@ -254,6 +238,90 @@ class CoordinatorService:
             )
 
         return self.state_store.mutate(mutator)
+
+    def _record_finished_task(
+        self,
+        *,
+        state: LoopState,
+        active: CurrentTask,
+        request: FinishedRequest,
+        now: datetime,
+    ) -> None:
+        success = request.success
+        error = request.error
+
+        if self._workflow_expects_goal_check_signal(workflow_id=active.workflow_id):
+            goal_signal = self._read_goal_check_signal(current_task=active)
+            if goal_signal is None:
+                success = False
+                error = "invalid_goal_check_output"
+                state.goal_check_consecutive_failures += 1
+                if (
+                    state.goal_check_consecutive_failures
+                    >= state.config_snapshot.goal_check_consecutive_failures_cap
+                ):
+                    state.stop_reason = "goal_check_broken"
+                    state.status = "failed"
+            else:
+                state.goal_check_consecutive_failures = 0
+
+        if state.stop_reason != "goal_check_broken":
+            self._apply_session_control(state=state)
+            if state.stop_reason == "invalid_control_output":
+                success = False
+                error = "invalid_control_output"
+
+        state.history.append(
+            HistoryEntry(
+                iteration=active.iteration,
+                workflow_id=active.workflow_id,
+                session_id=active.session_id,
+                success=success,
+                error=error,
+                started_at=active.started_at,
+                finished_at=now,
+            )
+        )
+        state.iteration_count += 1
+        state.current_task = None
+
+    def _read_recoverable_finished_request(
+        self, *, current_task: CurrentTask
+    ) -> tuple[FinishedRequest, Path | None] | None:
+        pending = pending_finished_request_path(
+            repo_root=self.repo_root,
+            session_id=current_task.session_id,
+            iteration=current_task.iteration,
+            workflow_id=current_task.workflow_id,
+        )
+        request = _read_signal(path=pending, model=FinishedRequest)
+        if request is not None and _matches_current_task(
+            request=request, current_task=current_task
+        ):
+            return request, pending
+
+        result = _read_signal(
+            path=result_path(
+                repo_root=self.repo_root,
+                session_id=current_task.session_id,
+                iteration=current_task.iteration,
+                workflow_id=current_task.workflow_id,
+            ),
+            model=IterationResult,
+        )
+        if result is None:
+            return None
+        return (
+            FinishedRequest(
+                session_id=current_task.session_id,
+                workflow_id=current_task.workflow_id,
+                iteration=current_task.iteration,
+                success=result.success,
+                text=result.text,
+                error=result.error,
+            ),
+            None,
+        )
 
     def _prepare_state(self, *, resume: bool) -> None:
         existing_state = self.state_store.read_state()
@@ -379,6 +447,16 @@ def _require_state(*, state: LoopState | None) -> LoopState:
     return state
 
 
+def _matches_current_task(
+    *, request: FinishedRequest, current_task: CurrentTask
+) -> bool:
+    return (
+        request.session_id == current_task.session_id
+        and request.workflow_id == current_task.workflow_id
+        and request.iteration == current_task.iteration
+    )
+
+
 SignalModel = TypeVar("SignalModel", bound=BaseModel)
 
 
@@ -395,7 +473,8 @@ def _read_signal(*, path: Path, model: type[SignalModel]) -> SignalModel | None:
     except Exception:
         logger.warning("Ignoring invalid signal schema at %s", path)
         return None
-    if getattr(signal, "schema_version", None) != 1:
+    schema_version = getattr(signal, "schema_version", None)
+    if schema_version is not None and schema_version != 1:
         logger.warning("Ignoring unsupported signal schema_version at %s", path)
         return None
     return signal

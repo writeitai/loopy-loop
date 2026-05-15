@@ -7,6 +7,7 @@ import pytest
 
 from loopy_loop.models import IterationResult
 from loopy_loop.models import TaskResponse
+from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.worker import _run_task
 from loopy_loop.worker import run_worker_loop
 
@@ -106,6 +107,13 @@ def test_worker_runs_one_task_and_stops(
     assert posted[0]["url"] == "http://coord/register"
     assert posted[1]["url"] == "http://coord/finished"
     assert len(posted) == 2
+    pending_path = pending_finished_request_path(
+        repo_root=repo_root,
+        session_id="goal_20260419_143022_ab12cd34",
+        iteration=1,
+        workflow_id="planner",
+    )
+    assert not pending_path.exists()
 
 
 def test_worker_reads_prompt_from_disk(
@@ -315,6 +323,7 @@ def test_worker_retries_finished_on_transient_error(
     finished_calls = [p for p in posted if "/finished" in p["url"]]
     # Two /finished calls: one that failed (raised ConnectError) and one that succeeded.
     assert len(finished_calls) == 2
+    assert finished_calls[0]["json"]["iteration"] == 1
 
 
 def test_worker_all_finished_retries_exhausted(
@@ -345,6 +354,13 @@ def test_worker_all_finished_retries_exhausted(
 
     with pytest.raises(httpx.ConnectError):
         run_worker_loop(repo_root=repo_root, coordinator_url="http://coord")
+    pending_path = pending_finished_request_path(
+        repo_root=repo_root,
+        session_id="goal_20260419_143022_ab12cd34",
+        iteration=1,
+        workflow_id="planner",
+    )
+    assert pending_path.exists()
 
 
 def test_finished_payload_has_no_assignment_id(
@@ -375,3 +391,4 @@ def test_finished_payload_has_no_assignment_id(
     finished_calls = [p for p in posted if "/finished" in p["url"]]
     assert len(finished_calls) == 1
     assert "assignment_id" not in finished_calls[0]["json"]
+    assert finished_calls[0]["json"]["iteration"] == 1

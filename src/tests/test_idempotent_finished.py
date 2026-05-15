@@ -24,6 +24,7 @@ def test_stale_finished_mismatch_does_not_record_history_twice(
         json={
             "workflow_id": reg["workflow_id"],
             "session_id": reg["session_id"],
+            "iteration": reg["iteration"],
             "success": True,
             "text": "done",
             "error": None,
@@ -38,6 +39,7 @@ def test_stale_finished_mismatch_does_not_record_history_twice(
         json={
             "workflow_id": reg["workflow_id"],
             "session_id": reg["session_id"],
+            "iteration": reg["iteration"],
             "success": True,
             "text": "done again",
             "error": None,
@@ -70,6 +72,7 @@ def test_stale_finished_returns_current_task_run_response(
         json={
             "workflow_id": reg["workflow_id"],
             "session_id": "stale-session-id",
+            "iteration": reg["iteration"],
             "success": True,
             "text": "done",
             "error": None,
@@ -106,6 +109,7 @@ def test_finished_no_current_task_dispatches_fresh(
         json={
             "workflow_id": "planner",
             "session_id": state.active_session_id,
+            "iteration": 1,
             "success": True,
             "text": "done",
             "error": None,
@@ -138,6 +142,7 @@ def test_finished_no_current_task_when_terminal_returns_stop(
         json={
             "workflow_id": "planner",
             "session_id": state.active_session_id,
+            "iteration": 1,
             "success": True,
             "text": "done",
             "error": None,

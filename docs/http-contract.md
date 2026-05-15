@@ -55,9 +55,12 @@ Rules:
 - `config_snapshot.goal` is the resolved goal text loaded from
   `loopy_loop_config.yaml`'s `goal_file`; workers and team-harness never receive
   the goal file path as the goal.
-- If `current_task` is already set (previous worker crashed without calling `/finished`),
-  `/register` records it as failed (`error="abandoned"`) in history and then dispatches
-  fresh work. Abandoned cleanup always runs before stop-condition evaluation.
+- If `current_task` is already set (previous worker crashed without calling
+  `/finished`), `/register` first checks the current iteration directory for
+  `pending_finished_request.json` or `result.json`. If either file proves the
+  task completed, the coordinator records the completed task in history before
+  checking stop conditions. Only tasks with no recoverable local completion are
+  recorded as failed with `error="abandoned"`.
 - If the loop is in a terminal state, `/register` immediately returns `action=stop`.
 
 ## POST /finished
@@ -68,6 +71,7 @@ Request:
 {
   "workflow_id": "planner",
   "session_id": "20260419_143022_71393ee22450_ab12cd34",
+  "iteration": 3,
   "success": true,
   "text": "done",
   "error": null
@@ -78,9 +82,9 @@ Response: same shape as `/register` response (`action` is either `"run"` or `"st
 
 Rules:
 
-- If `session_id` + `workflow_id` does not match `current_task`, the call is treated as
-  stale: state is not mutated, `current_task` is not changed, and the current task's run
-  response is returned to the caller.
+- If `session_id` + `workflow_id` + `iteration` does not match `current_task`,
+  the call is treated as stale: state is not mutated, `current_task` is not
+  changed, and the current task's run response is returned to the caller.
 - If `current_task` is `None` (no task is active), the coordinator dispatches the next
   available task as if `/register` had been called. If the state is terminal, it returns
   `action=stop`.
