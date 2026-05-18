@@ -150,6 +150,31 @@ def test_init_inner_outer_eval_template_preserves_existing_files(
         assert gitignore_lines.count(line) == 1
 
 
+def test_init_pm_planner_dispatcher_template_scaffolds_expected_files(
+    repo_root: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.chdir(repo_root)
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["init", "--template", "pm_planner_dispatcher"])
+
+    assert result.exit_code == 0
+    assert repo_root.joinpath("loopy_loop_config.yaml").exists()
+    assert repo_root.joinpath("loopy_loop_goal.txt").exists()
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/planner/prompt.txt"
+    ).exists()
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/dispatcher/prompt.txt"
+    ).exists()
+    assert "workflow_set: pm_planner_dispatcher" in repo_root.joinpath(
+        "loopy_loop_config.yaml"
+    ).read_text(encoding="utf-8")
+    assert "Child request schema:" in repo_root.joinpath(
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/dispatcher/prompt.txt"
+    ).read_text(encoding="utf-8")
+
+
 def test_init_rejects_unknown_template(repo_root: Any, monkeypatch: Any) -> None:
     monkeypatch.chdir(repo_root)
     runner = CliRunner()

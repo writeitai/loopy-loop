@@ -1,0 +1,1 @@
+Manage project work by selecting one concrete implementation item at a time, dispatching it to a child implementation loop, and reviewing the child evidence before accepting completion.

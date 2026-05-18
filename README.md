@@ -54,6 +54,7 @@ target repo/
 ```bash
 loopy init
 loopy init --template inner_outer_eval
+loopy init --template pm_planner_dispatcher
 loopy coordinator --host 127.0.0.1 --port 8080
 loopy worker --coordinator http://127.0.0.1:8080
 loopy status
@@ -69,14 +70,18 @@ loopy stop
 
 Use `loopy init --template inner_outer_eval` to scaffold the packaged workflow
 set for outer planning, inner implementation, eval review, and eval running.
+Use `loopy init --template pm_planner_dispatcher` to scaffold the packaged PM
+workflow set for planner/dispatcher orchestration that starts child sessions.
 
 ## CLI Reference
 
-`loopy init [--template default|inner_outer_eval]`
+`loopy init [--template default|inner_outer_eval|pm_planner_dispatcher]`
 
 - Scaffolds the root config and reserved `goal_check` workflow.
 - `--template inner_outer_eval` scaffolds the packaged inner/outer/eval workflow
   set instead: `outer`, `inner`, `eval_reviewer`, and `eval_runner`.
+- `--template pm_planner_dispatcher` scaffolds the packaged PM orchestration
+  workflow set: `planner` and `dispatcher`.
 - Does not overwrite existing workflow files.
 
 `loopy coordinator --host 0.0.0.0 --port 8080 [--resume] [--workflow-set NAME] [--goal-file PATH]`
@@ -209,6 +214,14 @@ The coordinator creates the child session under the parent session's
 `children/` directory, copies the request goal into the child `goal.md`, runs
 the requested workflow set, and resumes the parent session after the child
 reaches a terminal state. v1 is depth-first and single-child-at-a-time.
+
+The packaged `pm_planner_dispatcher` workflow set uses this contract as a
+generic parent loop:
+
+- `planner` maintains PM state, selects one work item, and reviews terminal
+  child-session evidence.
+- `dispatcher` writes one child request for the selected work item or imports
+  terminal child evidence back into PM state.
 
 Cadence example:
 
