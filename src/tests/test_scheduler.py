@@ -8,7 +8,7 @@ from loopy_loop.scheduler import choose_next_workflow
 
 def test_iteration_one_never_picks_goal_check(repo_builder: Any) -> None:
     repo_root = repo_builder()
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
 
     chosen = choose_next_workflow(workflows=workflows, history=[], iteration_count=0)
 
@@ -43,7 +43,7 @@ def test_run_every_and_not_before_iteration_are_enforced(
             },
         }
     )
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
     history = [history_entry_factory(iteration=1, workflow_id="planner")]
 
     chosen = choose_next_workflow(
@@ -82,7 +82,7 @@ def test_failed_outer_retries_when_inner_is_blocked(
             },
         }
     )
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
     history = [
         history_entry_factory(iteration=37, workflow_id="inner", success=True),
         history_entry_factory(iteration=38, workflow_id="outer", success=False),
@@ -125,7 +125,7 @@ def test_failed_retry_does_not_preempt_normally_eligible_workflow(
             },
         }
     )
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
     history = [history_entry_factory(iteration=2, workflow_id="outer", success=False)]
 
     chosen = choose_next_workflow(
@@ -153,7 +153,7 @@ def test_no_eligible_workflow_returns_none(
             }
         }
     )
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
 
     chosen = choose_next_workflow(
         workflows=workflows,
@@ -211,7 +211,7 @@ def test_scheduler_skips_disabled_and_requires_most_recent_successful_predecesso
             },
         }
     )
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
     history = [
         history_entry_factory(iteration=1, workflow_id="planner", success=True),
         history_entry_factory(
@@ -284,7 +284,7 @@ def test_run_on_start_priority_wins_first_iteration(repo_builder: Any) -> None:
             },
         }
     )
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
 
     chosen = choose_next_workflow(workflows=workflows, history=[], iteration_count=0)
 
@@ -333,7 +333,7 @@ def test_run_after_successes_waits_for_target_success_count(
             },
         }
     )
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
     history = [history_entry_factory(iteration=1, workflow_id="eval_reviewer")]
     for index in range(9):
         history.extend(
@@ -392,7 +392,7 @@ def test_run_after_successes_does_not_repeat_same_bucket(
             },
         }
     )
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
     history = [
         history_entry_factory(iteration=iteration, workflow_id="inner")
         for iteration in range(1, 11)
@@ -450,7 +450,7 @@ def test_eval_runner_waits_for_eval_reviewer_predecessor(
             },
         }
     )
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
     history = [
         history_entry_factory(iteration=iteration, workflow_id="inner")
         for iteration in range(1, 11)

@@ -27,6 +27,7 @@ class RootConfigSnapshot(BaseModel):
 
     goal: str = Field(...)
     goal_hash: str = Field(...)
+    workflow_set: str = Field(...)
     completion_criteria: list[str] = Field(...)
     stop_criteria: list[str] = Field(...)
     max_turns: int = Field(...)
@@ -45,6 +46,7 @@ class RootConfigSnapshot(BaseModel):
 
 
 class CurrentTask(BaseModel):
+    workflow_set: str = Field(...)
     workflow_id: str = Field(...)
     session_id: str = Field(...)
     iteration: int = Field(...)
@@ -53,6 +55,7 @@ class CurrentTask(BaseModel):
 
 class TaskResponse(BaseModel):
     action: Literal["run", "stop"] = Field(...)
+    workflow_set: str | None = Field(default=None)
     workflow_id: str | None = Field(default=None)
     session_id: str | None = Field(default=None)
     iteration: int | None = Field(default=None)
@@ -62,6 +65,7 @@ class TaskResponse(BaseModel):
 
 class HistoryEntry(BaseModel):
     iteration: int = Field(...)
+    workflow_set: str = Field(...)
     workflow_id: str = Field(...)
     session_id: str = Field(...)
     success: bool = Field(...)
@@ -75,6 +79,8 @@ class LoopState(BaseModel):
         default="running"
     )
     goal_hash: str = Field(...)
+    workflow_set: str = Field(...)
+    parent_session_id: str | None = Field(default=None)
     max_turns: int = Field(...)
     active_session_id: str = Field(...)
     goal_met: bool = Field(default=False)
@@ -132,3 +138,26 @@ class IterationResult(BaseModel):
     error_detail: dict[str, object] | None = Field(default=None)
     harness_run_id: str = Field(default="")
     harness_output_dir: str = Field(default="")
+
+
+class ChildSessionRequest(BaseModel):
+    workflow_set: str = Field(...)
+    goal: str = Field(...)
+    schema_version: int = Field(default=1)
+
+    @field_validator("schema_version")
+    @classmethod
+    def validate_schema_version(cls, value: int) -> int:
+        if value != 1:
+            raise ValueError("schema_version must equal 1")
+        return value
+
+
+class ChildSessionRecord(BaseModel):
+    session_id: str = Field(...)
+    workflow_set: str = Field(...)
+    goal_hash: str = Field(...)
+    status: str = Field(...)
+    created_at: datetime = Field(...)
+    completed_at: datetime | None = Field(default=None)
+    stop_reason: str | None = Field(default=None)

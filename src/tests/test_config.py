@@ -16,7 +16,7 @@ def test_load_root_config_and_workflows(repo_builder: Any, monkeypatch: Any) -> 
     repo_root = repo_builder()
 
     root_config = load_root_config(repo_root=repo_root)
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
     preflight = run_preflight(repo_root=repo_root)
 
     assert root_config.team_harness_api_base == "https://openrouter.ai/api/v1"
@@ -27,6 +27,7 @@ def test_load_root_config_and_workflows(repo_builder: Any, monkeypatch: Any) -> 
     assert root_config.team_harness_retry_max_delay_s is None
     assert root_config.goal == "Ship a minimal working landing page"
     assert [workflow.id for workflow in workflows] == ["goal_check", "planner"]
+    assert workflows[0].workflow_set == "main"
     assert workflows[0].priority == 0
     assert workflows[0].run_on_start is False
     assert workflows[0].run_after_successes is None
@@ -34,6 +35,81 @@ def test_load_root_config_and_workflows(repo_builder: Any, monkeypatch: Any) -> 
     assert preflight.root_config.goal_hash == derive_goal_hash(
         goal="Ship a minimal working landing page"
     )
+    assert preflight.workflow_set == "main"
+
+
+def test_preflight_uses_configured_workflow_set(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder(root_config={"workflow_set": "pm_planner_dispatcher"})
+
+    preflight = run_preflight(repo_root=repo_root)
+
+    assert preflight.workflow_set == "pm_planner_dispatcher"
+    assert {workflow.workflow_set for workflow in preflight.workflows} == {
+        "pm_planner_dispatcher"
+    }
+
+
+def test_preflight_override_updates_config_snapshot_workflow_set(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder(root_config={"workflow_set": "main"})
+    workflow_dir = (
+        repo_root / ".loopy_loop" / "workflow_sets" / "other" / "workflows" / "work"
+    )
+    workflow_dir.mkdir(parents=True)
+    workflow_dir.joinpath("prompt.txt").write_text("Work", encoding="utf-8")
+    workflow_dir.joinpath("config.yaml").write_text(
+        "enabled: true\nrun_every: 1\n", encoding="utf-8"
+    )
+
+    preflight = run_preflight(repo_root=repo_root, workflow_set="other")
+
+    assert preflight.workflow_set == "other"
+    assert preflight.root_config.workflow_set == "other"
+
+
+def test_legacy_workflows_directory_is_not_loaded(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    legacy = repo_root / ".loopy_loop" / "workflows" / "legacy"
+    legacy.mkdir(parents=True)
+    legacy.joinpath("prompt.txt").write_text("Legacy prompt", encoding="utf-8")
+    legacy.joinpath("config.yaml").write_text(
+        "enabled: true\nrun_every: 1\n", encoding="utf-8"
+    )
+
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
+
+    assert "legacy" not in {workflow.id for workflow in workflows}
+
+
+def test_preflight_reports_legacy_workflows_directory(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    config_path = repo_root / "loopy_loop_config.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "workflow_set: main", "workflow_set: missing"
+        ),
+        encoding="utf-8",
+    )
+    legacy = repo_root / ".loopy_loop" / "workflows" / "legacy"
+    legacy.mkdir(parents=True)
+    legacy.joinpath("prompt.txt").write_text("Legacy prompt", encoding="utf-8")
+    legacy.joinpath("config.yaml").write_text(
+        "enabled: true\nrun_every: 1\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError, match="Legacy workflow directory"):
+        run_preflight(repo_root=repo_root)
 
 
 def test_load_root_config_uses_goal_file_and_optional_defaults(
@@ -45,6 +121,7 @@ def test_load_root_config_uses_goal_file_and_optional_defaults(
         "\n".join(
             [
                 'goal_file: "custom_goal.txt"',
+                'workflow_set: "main"',
                 "max_turns: 20",
                 'team_harness_provider: "codex"',
             ]
@@ -59,6 +136,7 @@ def test_load_root_config_uses_goal_file_and_optional_defaults(
     root_config = load_root_config(repo_root=repo_root)
 
     assert root_config.goal == "Build the simplest useful thing."
+    assert root_config.workflow_set == "main"
     assert root_config.completion_criteria == []
     assert root_config.stop_criteria == []
     assert root_config.team_harness_system_prompt_extension == ""
@@ -117,6 +195,24 @@ def test_load_root_config_rejects_empty_goal_file(repo_builder: Any) -> None:
         load_root_config(repo_root=repo_root)
 
 
+def test_load_root_config_requires_workflow_set(repo_builder: Any) -> None:
+    repo_root = repo_builder()
+    repo_root.joinpath("loopy_loop_config.yaml").write_text(
+        "\n".join(
+            [
+                'goal_file: "loopy_loop_goal.txt"',
+                "max_turns: 20",
+                'team_harness_provider: "codex"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="workflow_set"):
+        load_root_config(repo_root=repo_root)
+
+
 def test_invalid_run_every_raises(repo_builder: Any) -> None:
     repo_root = repo_builder(
         workflows={
@@ -134,7 +230,7 @@ def test_invalid_run_every_raises(repo_builder: Any) -> None:
     )
 
     with pytest.raises(ConfigError, match="run_every"):
-        load_workflow_definitions(repo_root=repo_root)
+        load_workflow_definitions(repo_root=repo_root, workflow_set="main")
 
 
 def test_unresolved_must_follow_fails_preflight(
@@ -214,7 +310,7 @@ def test_invalid_run_after_successes_every_raises(repo_builder: Any) -> None:
     )
 
     with pytest.raises(ConfigError, match="every"):
-        load_workflow_definitions(repo_root=repo_root)
+        load_workflow_definitions(repo_root=repo_root, workflow_set="main")
 
 
 def test_missing_api_key_env_is_reported(repo_builder: Any, monkeypatch: Any) -> None:
@@ -282,4 +378,4 @@ def test_unknown_workflow_config_field_rejected(repo_builder: Any) -> None:
     )
 
     with pytest.raises(ConfigError, match="unknown_key"):
-        load_workflow_definitions(repo_root=repo_root)
+        load_workflow_definitions(repo_root=repo_root, workflow_set="main")

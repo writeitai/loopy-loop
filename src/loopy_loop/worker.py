@@ -11,13 +11,14 @@ import httpx
 
 from loopy_loop.config import ConfigError
 from loopy_loop.config import load_workflow_config
-from loopy_loop.config import LOOPY_DIRNAME
+from loopy_loop.config import workflow_set_workflows_dir_path
 from loopy_loop.harness_runner import run_harness_iteration
 from loopy_loop.harness_runner import write_iteration_artifacts
 from loopy_loop.models import FinishedRequest
 from loopy_loop.models import IterationResult
 from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.models import TaskResponse
+from loopy_loop.sessions import child_requests_dir_path
 from loopy_loop.sessions import control_path
 from loopy_loop.sessions import ensure_iteration_dir
 from loopy_loop.sessions import eval_checks_dir_path
@@ -28,6 +29,7 @@ from loopy_loop.sessions import iteration_harness_output_root
 from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.sessions import project_state_dir_path
 from loopy_loop.sessions import session_dir_path
+from loopy_loop.sessions import session_goal_path
 from loopy_loop.sessions import updates_from_user_path
 
 # Internal retry constants for /finished — not configurable externally.
@@ -104,6 +106,7 @@ def _post_finished(
 def _run_task(*, repo_root: Path, task: TaskResponse) -> FinishedAssignment:
     if (
         task.session_id is None
+        or task.workflow_set is None
         or task.workflow_id is None
         or task.iteration is None
         or task.config_snapshot is None
@@ -113,7 +116,12 @@ def _run_task(*, repo_root: Path, task: TaskResponse) -> FinishedAssignment:
     config_snapshot = RootConfigSnapshot.model_validate(
         task.config_snapshot.model_dump()
     )
-    workflow_dir = repo_root / LOOPY_DIRNAME / "workflows" / task.workflow_id
+    workflow_dir = (
+        workflow_set_workflows_dir_path(
+            repo_root=repo_root, workflow_set=task.workflow_set
+        )
+        / task.workflow_id
+    )
     workflow_config = load_workflow_config(workflow_dir=workflow_dir)
     prompt_text = (workflow_dir / "prompt.txt").read_text(encoding="utf-8")
     iteration_dir = ensure_iteration_dir(
@@ -131,6 +139,7 @@ def _run_task(*, repo_root: Path, task: TaskResponse) -> FinishedAssignment:
     rendered_prompt = _render_prompt(
         config_snapshot=config_snapshot,
         session_id=task.session_id,
+        workflow_set=task.workflow_set,
         iteration=task.iteration,
         workflow_id=task.workflow_id,
         iteration_dir=iteration_dir,
@@ -204,6 +213,7 @@ def _render_prompt(
     *,
     config_snapshot: RootConfigSnapshot,
     session_id: str,
+    workflow_set: str,
     iteration: int,
     workflow_id: str,
     iteration_dir: Path,
@@ -213,6 +223,7 @@ def _render_prompt(
     repo_root: Path | None = None,
 ) -> str:
     root = repo_root or Path.cwd()
+    session_dir = session_dir_path(repo_root=root, session_id=session_id)
     lines = [
         "loopy-loop assignment",
         "",
@@ -223,15 +234,19 @@ def _render_prompt(
         *[f"- {item}" for item in config_snapshot.stop_criteria],
         "",
         f"Session ID: {session_id}",
+        f"Workflow set: {workflow_set}",
         f"Iteration: {iteration}",
         f"Workflow ID: {workflow_id}",
-        f"Session directory: {session_dir_path(repo_root=root, session_id=session_id)}",
+        f"Session directory: {session_dir}",
+        f"Session goal path: {session_goal_path(repo_root=root, session_id=session_id)}",
         "Session project_state directory: "
         f"{project_state_dir_path(repo_root=root, session_id=session_id)}",
         "Session eval_checks directory: "
         f"{eval_checks_dir_path(repo_root=root, session_id=session_id)}",
         "Session updates_from_user path: "
         f"{updates_from_user_path(repo_root=root, session_id=session_id)}",
+        "Session child_requests directory: "
+        f"{child_requests_dir_path(repo_root=root, session_id=session_id)}",
         f"Session control path: {control_path(repo_root=root, session_id=session_id)}",
         "Session finished ledger path: "
         f"{finished_path(repo_root=root, session_id=session_id)}",
@@ -240,6 +255,8 @@ def _render_prompt(
         f"Iteration directory: {iteration_dir}",
         f"Iteration harness output root: {harness_output_root}",
     ]
+    if session_dir.parent.name == "children":
+        lines.append(f"Parent session directory: {session_dir.parent.parent}")
     if workflow_id == "goal_check" or emits_goal_check:
         lines.append(
             f"goal_check.json output path: {iteration_dir / GOAL_CHECK_FILENAME}"

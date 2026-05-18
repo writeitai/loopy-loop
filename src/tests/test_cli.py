@@ -17,7 +17,9 @@ def test_init_scaffolds_expected_files(repo_root: Any, monkeypatch: Any) -> None
     assert result.exit_code == 0
     assert repo_root.joinpath("loopy_loop_config.yaml").exists()
     assert repo_root.joinpath("loopy_loop_goal.txt").exists()
-    assert repo_root.joinpath(".loopy_loop/workflows/goal_check/prompt.txt").exists()
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/main/workflows/goal_check/prompt.txt"
+    ).exists()
 
 
 def test_init_is_idempotent(repo_root: Any, monkeypatch: Any) -> None:
@@ -39,7 +41,14 @@ def test_init_preserves_existing_files_and_updates_gitignore(
     runner = CliRunner()
     root_config = repo_root / "loopy_loop_config.yaml"
     goal_file = repo_root / "loopy_loop_goal.txt"
-    workflow_dir = repo_root / ".loopy_loop" / "workflows" / "goal_check"
+    workflow_dir = (
+        repo_root
+        / ".loopy_loop"
+        / "workflow_sets"
+        / "main"
+        / "workflows"
+        / "goal_check"
+    )
     workflow_dir.mkdir(parents=True, exist_ok=True)
     goal_check_config = workflow_dir / "config.yaml"
     goal_check_prompt = workflow_dir / "prompt.txt"
@@ -58,12 +67,7 @@ def test_init_preserves_existing_files_and_updates_gitignore(
     assert goal_file.read_text(encoding="utf-8") == "goal sentinel\n"
     assert goal_check_config.read_text(encoding="utf-8") == "sentinel-config\n"
     assert goal_check_prompt.read_text(encoding="utf-8") == "sentinel-prompt\n"
-    for line in [
-        ".loopy_loop/sessions/",
-        ".loopy_loop/state.json",
-        ".loopy_loop/state.json.lock",
-        ".loopy_loop/state.json.archive_*.json",
-    ]:
+    for line in [".loopy_loop/sessions/"]:
         assert gitignore_lines.count(line) == 1
 
 
@@ -78,15 +82,23 @@ def test_init_inner_outer_eval_template_scaffolds_expected_files(
     assert result.exit_code == 0
     assert repo_root.joinpath("loopy_loop_config.yaml").exists()
     assert repo_root.joinpath("loopy_loop_goal.txt").exists()
-    assert repo_root.joinpath(".loopy_loop/workflows/eval_reviewer/prompt.txt").exists()
-    assert repo_root.joinpath(".loopy_loop/workflows/eval_runner/prompt.txt").exists()
-    assert repo_root.joinpath(".loopy_loop/workflows/inner/prompt.txt").exists()
-    assert repo_root.joinpath(".loopy_loop/workflows/outer/prompt.txt").exists()
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_reviewer/prompt.txt"
+    ).exists()
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_runner/prompt.txt"
+    ).exists()
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/inner/prompt.txt"
+    ).exists()
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/outer/prompt.txt"
+    ).exists()
     assert not repo_root.joinpath(
-        ".loopy_loop/workflows/goal_check/prompt.txt"
+        ".loopy_loop/workflow_sets/main/workflows/goal_check/prompt.txt"
     ).exists()
     assert "You are the outer loop for this loopy-loop session." in repo_root.joinpath(
-        ".loopy_loop/workflows/outer/prompt.txt"
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/outer/prompt.txt"
     ).read_text(encoding="utf-8")
 
 
@@ -110,7 +122,14 @@ def test_init_inner_outer_eval_template_preserves_existing_files(
     monkeypatch.chdir(repo_root)
     runner = CliRunner()
     root_config = repo_root / "loopy_loop_config.yaml"
-    workflow_dir = repo_root / ".loopy_loop" / "workflows" / "outer"
+    workflow_dir = (
+        repo_root
+        / ".loopy_loop"
+        / "workflow_sets"
+        / "inner_outer_eval"
+        / "workflows"
+        / "outer"
+    )
     workflow_dir.mkdir(parents=True, exist_ok=True)
     outer_prompt = workflow_dir / "prompt.txt"
     gitignore = repo_root / ".gitignore"
@@ -124,13 +143,10 @@ def test_init_inner_outer_eval_template_preserves_existing_files(
     assert result.exit_code == 0
     assert root_config.read_text(encoding="utf-8") == 'goal_file: "keep_me.txt"\n'
     assert outer_prompt.read_text(encoding="utf-8") == "sentinel-prompt\n"
-    assert repo_root.joinpath(".loopy_loop/workflows/inner/prompt.txt").exists()
-    for line in [
-        ".loopy_loop/sessions/",
-        ".loopy_loop/state.json",
-        ".loopy_loop/state.json.lock",
-        ".loopy_loop/state.json.archive_*.json",
-    ]:
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/inner/prompt.txt"
+    ).exists()
+    for line in [".loopy_loop/sessions/"]:
         assert gitignore_lines.count(line) == 1
 
 

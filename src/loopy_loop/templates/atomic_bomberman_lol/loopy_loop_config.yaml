@@ -1,4 +1,5 @@
 goal_file: "loopy_loop_goal.txt"
+workflow_set: "main"
 completion_criteria:
   - "Running `make run` (or the stack's documented equivalent) serves the game locally and opens it in a browser without errors"
   - "At least two players can join the same match and interact with each other's bombs and abilities"

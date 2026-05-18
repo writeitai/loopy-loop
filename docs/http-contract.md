@@ -11,12 +11,14 @@ Run response:
 ```json
 {
   "action": "run",
+  "workflow_set": "main",
   "workflow_id": "planner",
   "session_id": "20260419_143022_71393ee22450_ab12cd34",
   "iteration": 3,
   "config_snapshot": {
     "goal": "Ship a minimal working landing page",
     "goal_hash": "71393ee22450",
+    "workflow_set": "main",
     "completion_criteria": ["Homepage renders without errors"],
     "stop_criteria": ["A workflow updates session control.json to stopped"],
     "max_turns": 20,
@@ -43,6 +45,7 @@ Stop response:
 {
   "action": "stop",
   "stop_reason": "goal_met",
+  "workflow_set": null,
   "workflow_id": null,
   "session_id": null,
   "iteration": null,
@@ -55,6 +58,9 @@ Rules:
 - `config_snapshot.goal` is the resolved goal text loaded from
   `loopy_loop_config.yaml`'s `goal_file`; workers and team-harness never receive
   the goal file path as the goal.
+- `workflow_set` tells the worker which
+  `.loopy_loop/workflow_sets/<workflow_set>/workflows/<workflow_id>/` directory
+  to load.
 - If `current_task` is already set (previous worker crashed without calling
   `/finished`), `/register` first checks the current iteration directory for
   `pending_finished_request.json` or `result.json`. If either file proves the
@@ -93,3 +99,8 @@ Rules:
   when the workflow is `goal_check` or has `emits_goal_check=true`.
 - A valid `goal_check.json` is an eval artifact, not a stop switch. Workflows
   stop the loop by updating session `control.json`.
+- A parent workflow can request a depth-first child loop by writing a
+  `schema_version: 1` JSON request with `workflow_set` and `goal` under the
+  active session's `child_requests/` directory. The next response dispatches the
+  child workflow set; after the child session stops, the coordinator resumes the
+  parent session.

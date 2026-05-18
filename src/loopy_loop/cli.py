@@ -18,30 +18,27 @@ from loopy_loop.worker import run_worker_loop
 
 GOAL_CHECK_WORKFLOW_ID = "goal_check"
 DEFAULT_TEMPLATE_NAME = "default"
+MAIN_WORKFLOW_SET_NAME = "main"
 INNER_OUTER_EVAL_TEMPLATE_NAME = "inner_outer_eval"
 PACKAGED_TEMPLATE_FILES_BY_NAME = {
     INNER_OUTER_EVAL_TEMPLATE_NAME: [
         ".gitignore",
         ROOT_CONFIG_FILENAME,
         DEFAULT_GOAL_FILENAME,
-        ".loopy_loop/workflows/eval_reviewer/config.yaml",
-        ".loopy_loop/workflows/eval_reviewer/prompt.txt",
-        ".loopy_loop/workflows/eval_runner/config.yaml",
-        ".loopy_loop/workflows/eval_runner/prompt.txt",
-        ".loopy_loop/workflows/inner/config.yaml",
-        ".loopy_loop/workflows/inner/prompt.txt",
-        ".loopy_loop/workflows/outer/config.yaml",
-        ".loopy_loop/workflows/outer/prompt.txt",
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_reviewer/config.yaml",
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_reviewer/prompt.txt",
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_runner/config.yaml",
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_runner/prompt.txt",
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/inner/config.yaml",
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/inner/prompt.txt",
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/outer/config.yaml",
+        ".loopy_loop/workflow_sets/inner_outer_eval/workflows/outer/prompt.txt",
     ]
 }
 PACKAGED_TEMPLATE_NAMES = list(PACKAGED_TEMPLATE_FILES_BY_NAME)
-GITIGNORE_LINES = [
-    ".loopy_loop/sessions/",
-    ".loopy_loop/state.json",
-    ".loopy_loop/state.json.lock",
-    ".loopy_loop/state.json.archive_*.json",
-]
+GITIGNORE_LINES = [".loopy_loop/sessions/"]
 ROOT_CONFIG_TEMPLATE = f"""goal_file: "{DEFAULT_GOAL_FILENAME}"
+workflow_set: "{MAIN_WORKFLOW_SET_NAME}"
 max_turns: 20
 goal_check_consecutive_failures_cap: 3
 team_harness_provider: "openai_compat"
@@ -120,7 +117,13 @@ def init(template_name: str) -> None:
 
 def _init_default_template(*, repo_root: Path) -> list[str]:
     loopy_dir = repo_root / LOOPY_DIRNAME
-    workflow_dir = loopy_dir / "workflows" / GOAL_CHECK_WORKFLOW_ID
+    workflow_dir = (
+        loopy_dir
+        / "workflow_sets"
+        / MAIN_WORKFLOW_SET_NAME
+        / "workflows"
+        / GOAL_CHECK_WORKFLOW_ID
+    )
     loopy_dir.mkdir(parents=True, exist_ok=True)
     workflow_dir.mkdir(parents=True, exist_ok=True)
 
@@ -173,11 +176,29 @@ def _copy_template_file_if_missing(
 @click.option("--host", default="0.0.0.0", show_default=True)
 @click.option("--port", default=8080, show_default=True, type=int)
 @click.option("--resume", is_flag=True, default=False)
-def coordinator(host: str, port: int, resume: bool) -> None:
+@click.option(
+    "--workflow-set",
+    default=None,
+    help="Workflow set to run instead of the workflow_set in config.",
+)
+@click.option(
+    "--goal-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Goal file to copy into the new session as goal.md.",
+)
+def coordinator(
+    host: str, port: int, resume: bool, workflow_set: str | None, goal_file: Path | None
+) -> None:
     """Run the coordinator server with exactly two endpoints: /register and /finished."""
     repo_root = Path.cwd()
     try:
-        app = create_coordinator_app(repo_root=repo_root, resume=resume)
+        app = create_coordinator_app(
+            repo_root=repo_root,
+            resume=resume,
+            workflow_set=workflow_set,
+            goal_file=goal_file,
+        )
     except ConfigError as exc:
         raise click.ClickException(str(exc)) from exc
     uvicorn.run(app, host=host, port=port)

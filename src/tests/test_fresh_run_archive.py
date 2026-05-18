@@ -15,8 +15,10 @@ def test_terminal_state_is_archived_on_fresh_start(
     store.write_state(state=state_factory(status="failed", stop_reason="failed"))
 
     create_coordinator_app(repo_root=repo_root, resume=False)
-    archives = sorted((repo_root / ".loopy_loop").glob("state.json.archive_*.json"))
-    state = store.read_state()
+    archives = sorted(
+        (repo_root / ".loopy_loop" / "sessions").rglob("state.json.archive_*.json")
+    )
+    state = StateStore(repo_root=repo_root).read_state()
 
     assert len(archives) == 1
     assert state is not None
