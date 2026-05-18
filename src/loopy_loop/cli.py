@@ -20,6 +20,7 @@ GOAL_CHECK_WORKFLOW_ID = "goal_check"
 DEFAULT_TEMPLATE_NAME = "default"
 MAIN_WORKFLOW_SET_NAME = "main"
 INNER_OUTER_EVAL_TEMPLATE_NAME = "inner_outer_eval"
+PM_PLANNER_DISPATCHER_TEMPLATE_NAME = "pm_planner_dispatcher"
 PACKAGED_TEMPLATE_FILES_BY_NAME = {
     INNER_OUTER_EVAL_TEMPLATE_NAME: [
         ".gitignore",
@@ -33,7 +34,16 @@ PACKAGED_TEMPLATE_FILES_BY_NAME = {
         ".loopy_loop/workflow_sets/inner_outer_eval/workflows/inner/prompt.txt",
         ".loopy_loop/workflow_sets/inner_outer_eval/workflows/outer/config.yaml",
         ".loopy_loop/workflow_sets/inner_outer_eval/workflows/outer/prompt.txt",
-    ]
+    ],
+    PM_PLANNER_DISPATCHER_TEMPLATE_NAME: [
+        ".gitignore",
+        ROOT_CONFIG_FILENAME,
+        DEFAULT_GOAL_FILENAME,
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/planner/config.yaml",
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/planner/prompt.txt",
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/dispatcher/config.yaml",
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/dispatcher/prompt.txt",
+    ],
 }
 PACKAGED_TEMPLATE_NAMES = list(PACKAGED_TEMPLATE_FILES_BY_NAME)
 GITIGNORE_LINES = [".loopy_loop/sessions/"]
