@@ -33,7 +33,7 @@ def test_must_follow_uses_last_successful_workflow(
             },
         }
     )
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
     history = [history_entry_factory(workflow_id="planner", success=True)]
 
     chosen = choose_next_workflow(
@@ -71,7 +71,7 @@ def test_failed_predecessor_retries_instead_of_unlocking_dependent(
             },
         }
     )
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
     history = [history_entry_factory(workflow_id="planner", success=False)]
 
     chosen = choose_next_workflow(

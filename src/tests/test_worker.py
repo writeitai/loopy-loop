@@ -7,7 +7,9 @@ import pytest
 
 from loopy_loop.models import IterationResult
 from loopy_loop.models import TaskResponse
+from loopy_loop.sessions import create_session_dir
 from loopy_loop.sessions import pending_finished_request_path
+from loopy_loop.worker import _render_prompt
 from loopy_loop.worker import _run_task
 from loopy_loop.worker import run_worker_loop
 
@@ -22,6 +24,7 @@ def _make_run_response(
 ) -> dict[str, object]:
     return {
         "action": "run",
+        "workflow_set": "main",
         "workflow_id": workflow_id,
         "session_id": session_id,
         "iteration": iteration,
@@ -34,6 +37,7 @@ def _make_stop_response(*, stop_reason: str = "goal_met") -> dict[str, object]:
     return {
         "action": "stop",
         "stop_reason": stop_reason,
+        "workflow_set": None,
         "workflow_id": None,
         "session_id": None,
         "iteration": None,
@@ -161,10 +165,13 @@ def test_worker_reads_prompt_from_disk(
     assert "Goal:" in captured["prompt"]
     assert "Completion criteria:" in captured["prompt"]
     assert "Stop criteria:" in captured["prompt"]
+    assert "Workflow set: main" in captured["prompt"]
     assert "Session directory:" in captured["prompt"]
+    assert "Session goal path:" in captured["prompt"]
     assert "Session project_state directory:" in captured["prompt"]
     assert "Session eval_checks directory:" in captured["prompt"]
     assert "Session updates_from_user path:" in captured["prompt"]
+    assert "Session child_requests directory:" in captured["prompt"]
     assert "Session control path:" in captured["prompt"]
     assert "Session finished ledger path:" in captured["prompt"]
     assert "Session harness outputs directory:" in captured["prompt"]
@@ -215,6 +222,41 @@ def test_worker_includes_goal_check_path_for_emitting_workflow(
     assert "0003_eval_runner/goal_check.json" in captured["prompt"]
     assert "Iteration harness output root:" in captured["prompt"]
     assert "harness_outputs/0003_eval_runner" in captured["prompt"]
+
+
+def test_render_prompt_includes_parent_session_for_child(
+    repo_root: Any, snapshot_factory: Any
+) -> None:
+    parent_session_id = "20260419_143022_71393ee22450_ab12cd34"
+    child_session_id = "20260419_143123_91aa0ab84591_cd34ef56"
+    create_session_dir(
+        repo_root=repo_root,
+        session_id=parent_session_id,
+        goal_hash="71393ee22450",
+        workflow_set="main",
+    )
+    child_dir = create_session_dir(
+        repo_root=repo_root,
+        session_id=child_session_id,
+        goal_hash="91aa0ab84591",
+        workflow_set="inner_outer_eval",
+        parent_session_id=parent_session_id,
+    )
+
+    prompt = _render_prompt(
+        config_snapshot=snapshot_factory(),
+        session_id=child_session_id,
+        workflow_set="inner_outer_eval",
+        iteration=1,
+        workflow_id="inner",
+        iteration_dir=child_dir / "iterations" / "0001_inner",
+        harness_output_root=child_dir / "harness_outputs" / "0001_inner",
+        workflow_prompt="Do child work.",
+        repo_root=repo_root,
+    )
+
+    assert "Parent session directory:" in prompt
+    assert parent_session_id in prompt
 
 
 def test_worker_uses_config_snapshot_not_disk(

@@ -11,6 +11,8 @@ from loopy_loop.config import LOOPY_DIRNAME
 from loopy_loop.models import DEFAULT_LOCK_TIMEOUT_SECONDS
 from loopy_loop.models import LoopState
 from loopy_loop.models import utc_now
+from loopy_loop.sessions import latest_top_level_state_path
+from loopy_loop.sessions import state_path as session_state_path
 
 STATE_FILENAME = "state.json"
 LOCK_FILENAME = "state.json.lock"
@@ -26,13 +28,12 @@ class StateStore:
         self,
         *,
         repo_root: Path,
+        state_path: Path | None = None,
         lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
     ) -> None:
         self.repo_root = repo_root
         self.loopy_dir = repo_root / LOOPY_DIRNAME
-        self.state_path = self.loopy_dir / STATE_FILENAME
-        self.lock_path = self.loopy_dir / LOCK_FILENAME
-        self.temp_path = self.loopy_dir / TEMP_FILENAME
+        self.state_path = state_path
         self.lock_timeout_seconds = lock_timeout_seconds
 
     def read_state(self) -> LoopState | None:
@@ -54,7 +55,7 @@ class StateStore:
     def archive_state(self) -> Path | None:
         with self._lock():
             current = self._read_state_unlocked()
-            if current is None:
+            if current is None or self.state_path is None:
                 return None
             archive_path = self._archive_path()
             os.replace(self.state_path, archive_path)
@@ -62,7 +63,7 @@ class StateStore:
 
     def clear_state(self) -> None:
         with self._lock():
-            if self.state_path.exists():
+            if self.state_path is not None and self.state_path.exists():
                 self.state_path.unlink()
 
     def is_terminal_state(self, *, state: LoopState) -> bool:
@@ -70,20 +71,40 @@ class StateStore:
 
     def _lock(self) -> FileLock:
         self.loopy_dir.mkdir(parents=True, exist_ok=True)
-        return FileLock(str(self.lock_path), timeout=self.lock_timeout_seconds)
+        lock_path = self._effective_state_path()
+        if lock_path is None:
+            lock_path = self.loopy_dir / LOCK_FILENAME
+        else:
+            lock_path = lock_path.with_name(LOCK_FILENAME)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        return FileLock(str(lock_path), timeout=self.lock_timeout_seconds)
 
     def _read_state_unlocked(self) -> LoopState | None:
-        if not self.state_path.exists():
+        state_path = self._effective_state_path()
+        if state_path is None or not state_path.exists():
             return None
-        raw = self.state_path.read_text(encoding="utf-8")
+        self.state_path = state_path
+        raw = state_path.read_text(encoding="utf-8")
         return LoopState.model_validate_json(raw)
 
     def _write_state_unlocked(self, *, state: LoopState) -> None:
-        self.loopy_dir.mkdir(parents=True, exist_ok=True)
+        if self.state_path is None:
+            self.state_path = session_state_path(
+                repo_root=self.repo_root, session_id=state.active_session_id
+            )
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.state_path.with_name(TEMP_FILENAME)
         payload = state.model_dump_json(indent=2)
-        self.temp_path.write_text(payload, encoding="utf-8")
-        os.replace(self.temp_path, self.state_path)
+        temp_path.write_text(payload, encoding="utf-8")
+        os.replace(temp_path, self.state_path)
 
     def _archive_path(self) -> Path:
+        if self.state_path is None:
+            raise RuntimeError("Cannot archive without a state path")
         stamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
-        return self.loopy_dir / f"{ARCHIVE_PREFIX}{stamp}.json"
+        return self.state_path.with_name(f"{ARCHIVE_PREFIX}{stamp}.json")
+
+    def _effective_state_path(self) -> Path | None:
+        if self.state_path is not None:
+            return self.state_path
+        return latest_top_level_state_path(repo_root=self.repo_root)

@@ -31,6 +31,7 @@ def repo_builder(repo_root: Path):
     ) -> Path:
         config = {
             "goal_file": "loopy_loop_goal.txt",
+            "workflow_set": "main",
             "completion_criteria": [
                 "Homepage renders without errors",
                 "Primary CTA is wired",
@@ -80,7 +81,14 @@ def repo_builder(repo_root: Path):
                 },
             },
         }
-        workflows_dir = repo_root / ".loopy_loop" / "workflows"
+        workflow_set = config["workflow_set"]
+        workflows_dir = (
+            repo_root
+            / ".loopy_loop"
+            / "workflow_sets"
+            / str(workflow_set)
+            / "workflows"
+        )
         for workflow_id, workflow in workflow_map.items():
             workflow_dir = workflows_dir / workflow_id
             workflow_dir.mkdir(parents=True, exist_ok=True)
@@ -101,6 +109,7 @@ def snapshot_factory():
         data = {
             "goal": "Goal",
             "goal_hash": "cdbf6975e8a3",
+            "workflow_set": "main",
             "completion_criteria": ["done"],
             "stop_criteria": ["blocked"],
             "max_turns": 20,
@@ -128,6 +137,7 @@ def history_entry_factory():
         now = utc_now()
         data = {
             "iteration": 1,
+            "workflow_set": "main",
             "workflow_id": "planner",
             "session_id": "20260419_143022_cdbf6975e8a3_ab12cd34",
             "success": True,
@@ -146,6 +156,7 @@ def current_task_factory():
     def factory(**overrides: Any) -> CurrentTask:
         data = {
             "workflow_id": "planner",
+            "workflow_set": "main",
             "session_id": "20260419_143022_cdbf6975e8a3_ab12cd34",
             "iteration": 1,
             "started_at": utc_now(),
@@ -163,6 +174,8 @@ def state_factory(snapshot_factory: Any):
         data = {
             "status": "running",
             "goal_hash": snapshot.goal_hash,
+            "workflow_set": snapshot.workflow_set,
+            "parent_session_id": None,
             "max_turns": snapshot.max_turns,
             "active_session_id": "20260419_143022_cdbf6975e8a3_ab12cd34",
             "goal_met": False,

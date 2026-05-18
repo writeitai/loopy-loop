@@ -18,6 +18,7 @@ ROOT_CONFIG_FILENAME = "loopy_loop_config.yaml"
 DEFAULT_GOAL_FILENAME = "loopy_loop_goal.txt"
 LOOPY_DIRNAME = ".loopy_loop"
 WORKFLOWS_DIRNAME = "workflows"
+WORKFLOW_SETS_DIRNAME = "workflow_sets"
 GOAL_HASH_LENGTH = 12
 DEFAULT_GOAL_CHECK_FAILURE_CAP = 3
 DEFAULT_PROVIDER = "openai_compat"
@@ -48,6 +49,10 @@ class RootConfig(BaseModel):
 
     goal: str = Field(
         description="Natural-language goal the loop is trying to satisfy."
+    )
+    workflow_set: str = Field(
+        ...,
+        description="Workflow set used when the coordinator is started without an override.",
     )
     completion_criteria: list[str] = Field(
         default_factory=list,
@@ -144,6 +149,13 @@ class RootConfig(BaseModel):
                 raise ValueError(f"mapping value for {key!r} must not be empty")
         return value
 
+    @field_validator("workflow_set")
+    @classmethod
+    def validate_workflow_set(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("workflow_set must not be empty")
+        return value
+
     @field_validator("team_harness_api_base")
     @classmethod
     def normalize_api_base_value(cls, value: str) -> str:
@@ -225,6 +237,7 @@ class WorkflowConfig(BaseModel):
 class WorkflowDefinition(WorkflowConfig):
     """Resolved workflow config plus its id and on-disk file locations."""
 
+    workflow_set: str = Field(...)
     id: str = Field(...)
     directory: Path = Field(...)
     prompt_path: Path = Field(...)
@@ -235,6 +248,7 @@ class PreflightResult(BaseModel):
     """Validated root config and workflow definitions captured at startup."""
 
     root_config: RootConfig
+    workflow_set: str
     workflows: list[WorkflowDefinition]
 
 
@@ -247,9 +261,11 @@ def derive_goal_hash(*, goal: str) -> str:
     return hashlib.sha256(goal.encode("utf-8")).hexdigest()[:GOAL_HASH_LENGTH]
 
 
-def load_root_config(*, repo_root: Path) -> RootConfig:
+def load_root_config(*, repo_root: Path, goal_file: Path | None = None) -> RootConfig:
     config_path = repo_root / ROOT_CONFIG_FILENAME
     data = _read_yaml_mapping(path=config_path)
+    if goal_file is not None:
+        data["goal_file"] = str(goal_file)
     data = _resolve_root_config_goal(data=data, config_path=config_path)
     try:
         return RootConfig.model_validate(data)
@@ -266,8 +282,23 @@ def load_workflow_config(*, workflow_dir: Path) -> WorkflowConfig:
         raise ConfigError(f"Invalid workflow config at {config_path}: {exc}") from exc
 
 
-def load_workflow_definitions(*, repo_root: Path) -> list[WorkflowDefinition]:
-    workflows_dir = repo_root / LOOPY_DIRNAME / WORKFLOWS_DIRNAME
+def workflow_set_dir_path(*, repo_root: Path, workflow_set: str) -> Path:
+    return repo_root / LOOPY_DIRNAME / WORKFLOW_SETS_DIRNAME / workflow_set
+
+
+def workflow_set_workflows_dir_path(*, repo_root: Path, workflow_set: str) -> Path:
+    return workflow_set_dir_path(repo_root=repo_root, workflow_set=workflow_set) / (
+        WORKFLOWS_DIRNAME
+    )
+
+
+def load_workflow_definitions(
+    *, repo_root: Path, workflow_set: str
+) -> list[WorkflowDefinition]:
+    selected_workflow_set = workflow_set
+    workflows_dir = workflow_set_workflows_dir_path(
+        repo_root=repo_root, workflow_set=selected_workflow_set
+    )
     if not workflows_dir.exists():
         return []
     definitions: list[WorkflowDefinition] = []
@@ -281,6 +312,7 @@ def load_workflow_definitions(*, repo_root: Path) -> list[WorkflowDefinition]:
             definition = WorkflowDefinition.model_validate(
                 {
                     **config.model_dump(),
+                    "workflow_set": selected_workflow_set,
                     "id": workflow_dir.name,
                     "directory": workflow_dir,
                     "prompt_path": prompt_path,
@@ -330,20 +362,32 @@ def resolve_api_key(*, config: RootConfig) -> str | None:
     return value
 
 
-def run_preflight(*, repo_root: Path) -> PreflightResult:
+def run_preflight(
+    *, repo_root: Path, workflow_set: str | None = None, goal_file: Path | None = None
+) -> PreflightResult:
     errors: list[str] = []
     root_config: RootConfig | None = None
     workflows: list[WorkflowDefinition] = []
+    selected_workflow_set = workflow_set
 
     try:
-        root_config = load_root_config(repo_root=repo_root)
+        root_config = load_root_config(repo_root=repo_root, goal_file=goal_file)
+        selected_workflow_set = workflow_set or root_config.workflow_set
+        root_config = root_config.model_copy(
+            update={"workflow_set": selected_workflow_set}
+        )
     except ConfigError as exc:
         errors.append(str(exc))
 
-    try:
-        workflows = load_workflow_definitions(repo_root=repo_root)
-    except ConfigError as exc:
-        errors.append(str(exc))
+    if selected_workflow_set is None:
+        errors.append("No workflow_set specified in config or CLI override")
+    else:
+        try:
+            workflows = load_workflow_definitions(
+                repo_root=repo_root, workflow_set=selected_workflow_set
+            )
+        except ConfigError as exc:
+            errors.append(str(exc))
 
     if workflows:
         for workflow in workflows:
@@ -363,16 +407,31 @@ def run_preflight(*, repo_root: Path) -> PreflightResult:
             errors.append(str(exc))
 
     if not workflows:
-        errors.append(
-            f"No workflows found under {repo_root / LOOPY_DIRNAME / WORKFLOWS_DIRNAME}"
-        )
+        if selected_workflow_set is None:
+            errors.append("No workflows found because no workflow_set was specified")
+        else:
+            legacy_workflows_dir = repo_root / LOOPY_DIRNAME / WORKFLOWS_DIRNAME
+            if legacy_workflows_dir.exists():
+                errors.append(
+                    "Legacy workflow directory is not supported at runtime: "
+                    f"{legacy_workflows_dir}. Move workflows under "
+                    f"{repo_root / LOOPY_DIRNAME / WORKFLOW_SETS_DIRNAME}/"
+                    "<workflow_set>/workflows/"
+                )
+            errors.append(
+                "No workflows found under "
+                f"{workflow_set_workflows_dir_path(repo_root=repo_root, workflow_set=selected_workflow_set)}"
+            )
 
     if errors:
         joined = "\n".join(f"- {error}" for error in errors)
         raise ConfigError(f"Preflight failed:\n{joined}")
 
     assert root_config is not None
-    return PreflightResult(root_config=root_config, workflows=workflows)
+    assert selected_workflow_set is not None
+    return PreflightResult(
+        root_config=root_config, workflow_set=selected_workflow_set, workflows=workflows
+    )
 
 
 def load_workflow_prompt(*, workflow: WorkflowDefinition) -> str:

@@ -1,4 +1,5 @@
 goal_file: loopy_loop_goal.txt
+workflow_set: inner_outer_eval
 max_turns: 160
 goal_check_consecutive_failures_cap: 3
 team_harness_provider: "codex"

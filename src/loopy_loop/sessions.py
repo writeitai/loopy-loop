@@ -9,7 +9,13 @@ from loopy_loop.models import utc_now
 
 SESSIONS_DIRNAME = "sessions"
 ITERATIONS_DIRNAME = "iterations"
+CHILDREN_DIRNAME = "children"
+CHILD_REQUESTS_DIRNAME = "child_requests"
 SESSION_METADATA_FILENAME = "session.json"
+STATE_FILENAME = "state.json"
+CHILDREN_FILENAME = "children.json"
+PARENT_FILENAME = "parent.json"
+GOAL_FILENAME = "goal.md"
 EVENTS_FILENAME = "events.jsonl"
 PROJECT_STATE_DIRNAME = "project_state"
 EVAL_CHECKS_DIRNAME = "eval_checks"
@@ -31,17 +37,55 @@ def create_session_id(*, goal_hash: str) -> str:
     return f"{stamp}_{goal_hash}_{unique}"
 
 
-def create_session_dir(*, repo_root: Path, session_id: str, goal_hash: str) -> Path:
-    session_dir = session_dir_path(repo_root=repo_root, session_id=session_id)
+def create_session_dir(
+    *,
+    repo_root: Path,
+    session_id: str,
+    goal_hash: str,
+    goal: str = "",
+    workflow_set: str,
+    parent_session_id: str | None = None,
+) -> Path:
+    created_at = utc_now().isoformat().replace("+00:00", "Z")
+    if parent_session_id is None:
+        session_dir = sessions_root_path(repo_root=repo_root) / session_id
+    else:
+        session_dir = (
+            session_dir_path(repo_root=repo_root, session_id=parent_session_id)
+            / CHILDREN_DIRNAME
+            / session_id
+        )
     session_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = session_dir / SESSION_METADATA_FILENAME
     if not metadata_path.exists():
         payload = {
             "session_id": session_id,
             "goal_hash": goal_hash,
-            "created_at": utc_now().isoformat().replace("+00:00", "Z"),
+            "workflow_set": workflow_set,
+            "parent_session_id": parent_session_id,
+            "created_at": created_at,
         }
         metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    if parent_session_id is not None:
+        parent_path = session_dir / PARENT_FILENAME
+        if not parent_path.exists():
+            payload = {
+                "schema_version": 1,
+                "parent_session_id": parent_session_id,
+                "parent_relative_path": "../..",
+                "created_at": created_at,
+            }
+            parent_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    goal_path = session_dir / GOAL_FILENAME
+    if goal and not goal_path.exists():
+        goal_path.write_text(goal.rstrip() + "\n", encoding="utf-8")
+    children = session_dir / CHILDREN_FILENAME
+    if not children.exists():
+        payload = {"schema_version": 1, "children": []}
+        children.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    child_requests_dir_path(repo_root=repo_root, session_id=session_id).mkdir(
+        parents=True, exist_ok=True
+    )
     events_path = session_dir / EVENTS_FILENAME
     if not events_path.exists():
         events_path.write_text("", encoding="utf-8")
@@ -67,8 +111,73 @@ def create_session_dir(*, repo_root: Path, session_id: str, goal_hash: str) -> P
     return session_dir
 
 
+def sessions_root_path(*, repo_root: Path) -> Path:
+    return repo_root / LOOPY_DIRNAME / SESSIONS_DIRNAME
+
+
 def session_dir_path(*, repo_root: Path, session_id: str) -> Path:
-    return repo_root / LOOPY_DIRNAME / SESSIONS_DIRNAME / session_id
+    root = sessions_root_path(repo_root=repo_root)
+    direct = root / session_id
+    if direct.exists():
+        return direct
+    if root.exists():
+        for candidate in sorted(root.rglob(session_id)):
+            if candidate.is_dir() and candidate.name == session_id:
+                return candidate
+    return direct
+
+
+def state_path(*, repo_root: Path, session_id: str) -> Path:
+    return session_dir_path(repo_root=repo_root, session_id=session_id) / STATE_FILENAME
+
+
+def children_path(*, repo_root: Path, session_id: str) -> Path:
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id) / CHILDREN_FILENAME
+    )
+
+
+def parent_path(*, repo_root: Path, session_id: str) -> Path:
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id) / PARENT_FILENAME
+    )
+
+
+def child_requests_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id)
+        / CHILD_REQUESTS_DIRNAME
+    )
+
+
+def child_sessions_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id) / CHILDREN_DIRNAME
+    )
+
+
+def session_goal_path(*, repo_root: Path, session_id: str) -> Path:
+    return session_dir_path(repo_root=repo_root, session_id=session_id) / GOAL_FILENAME
+
+
+def latest_top_level_state_path(*, repo_root: Path) -> Path | None:
+    root = sessions_root_path(repo_root=repo_root)
+    if not root.exists():
+        return None
+    candidates = [
+        path / STATE_FILENAME
+        for path in root.iterdir()
+        if path.is_dir() and (path / STATE_FILENAME).exists()
+    ]
+    return sorted(candidates)[-1] if candidates else None
+
+
+def latest_state_path(*, repo_root: Path) -> Path | None:
+    root = sessions_root_path(repo_root=repo_root)
+    if not root.exists():
+        return None
+    candidates = sorted(root.rglob(STATE_FILENAME))
+    return candidates[-1] if candidates else None
 
 
 def iterations_dir_path(*, repo_root: Path, session_id: str) -> Path:

@@ -7,9 +7,12 @@ from fastapi.testclient import TestClient
 import pytest
 
 from loopy_loop.coordinator_app import create_coordinator_app
+from loopy_loop.sessions import child_requests_dir_path
+from loopy_loop.sessions import children_path
 from loopy_loop.sessions import control_path
 from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.sessions import result_path
+from loopy_loop.sessions import session_dir_path
 from loopy_loop.state_store import StateStore
 
 
@@ -109,6 +112,178 @@ def test_finished_returns_next_run(repo_builder: Any, monkeypatch: Any) -> None:
 
     assert finished["action"] == "run"
     assert finished["iteration"] == 2
+
+
+def test_child_session_runs_inside_parent_and_resumes_parent(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    child_workflow_dir = (
+        repo_root
+        / ".loopy_loop"
+        / "workflow_sets"
+        / "child_set"
+        / "workflows"
+        / "child_work"
+    )
+    child_workflow_dir.mkdir(parents=True)
+    child_workflow_dir.joinpath("prompt.txt").write_text(
+        "Do the child work.", encoding="utf-8"
+    )
+    child_workflow_dir.joinpath("config.yaml").write_text(
+        "\n".join(
+            [
+                "enabled: true",
+                "run_every: 1",
+                "must_follow: null",
+                "not_before_iteration: 0",
+                "description: Child work",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    store = StateStore(repo_root=repo_root)
+
+    parent_task = client.post("/register", json={}).json()
+    request_dir = child_requests_dir_path(
+        repo_root=repo_root, session_id=parent_task["session_id"]
+    )
+    request_dir.joinpath("child.json").write_text(
+        json.dumps(
+            {
+                "workflow_set": "child_set",
+                "goal": "Handle a focused child task.",
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    child_task = client.post(
+        "/finished",
+        json={
+            "workflow_id": parent_task["workflow_id"],
+            "session_id": parent_task["session_id"],
+            "iteration": parent_task["iteration"],
+            "success": True,
+            "text": "parent planned child",
+            "error": None,
+        },
+    ).json()
+
+    assert child_task["action"] == "run"
+    assert child_task["workflow_set"] == "child_set"
+    assert child_task["workflow_id"] == "child_work"
+    assert child_task["session_id"] != parent_task["session_id"]
+    child_dir = session_dir_path(
+        repo_root=repo_root, session_id=child_task["session_id"]
+    )
+    assert child_dir.parent.name == "children"
+    assert child_dir.joinpath("goal.md").read_text(encoding="utf-8") == (
+        "Handle a focused child task.\n"
+    )
+    parent_metadata = json.loads(child_dir.joinpath("parent.json").read_text())
+    assert parent_metadata["parent_session_id"] == parent_task["session_id"]
+
+    control_path(repo_root=repo_root, session_id=child_task["session_id"]).write_text(
+        json.dumps(
+            {
+                "state": "stopped",
+                "reason": "child complete",
+                "stop_reason": "goal_met",
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    resumed_parent = client.post(
+        "/finished",
+        json={
+            "workflow_id": child_task["workflow_id"],
+            "session_id": child_task["session_id"],
+            "iteration": child_task["iteration"],
+            "success": True,
+            "text": "child done",
+            "error": None,
+        },
+    ).json()
+
+    assert resumed_parent["action"] == "run"
+    assert resumed_parent["workflow_set"] == "main"
+    assert resumed_parent["session_id"] == parent_task["session_id"]
+    state = store.read_state()
+    assert state is not None
+    assert state.current_task is not None
+    assert state.current_task.session_id == parent_task["session_id"]
+    records = json.loads(
+        children_path(
+            repo_root=repo_root, session_id=parent_task["session_id"]
+        ).read_text(encoding="utf-8")
+    )
+    assert records["schema_version"] == 1
+    assert records["children"][0]["session_id"] == child_task["session_id"]
+    assert records["children"][0]["status"] == "goal_met"
+
+
+def test_failed_parent_iteration_does_not_dispatch_child_request(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    child_workflow_dir = (
+        repo_root
+        / ".loopy_loop"
+        / "workflow_sets"
+        / "child_set"
+        / "workflows"
+        / "child_work"
+    )
+    child_workflow_dir.mkdir(parents=True)
+    child_workflow_dir.joinpath("prompt.txt").write_text(
+        "Do the child work.", encoding="utf-8"
+    )
+    child_workflow_dir.joinpath("config.yaml").write_text(
+        "enabled: true\nrun_every: 1\n", encoding="utf-8"
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+
+    parent_task = client.post("/register", json={}).json()
+    request_path = (
+        child_requests_dir_path(
+            repo_root=repo_root, session_id=parent_task["session_id"]
+        )
+        / "child.json"
+    )
+    request_path.write_text(
+        json.dumps(
+            {
+                "workflow_set": "child_set",
+                "goal": "Handle a focused child task.",
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    next_task = client.post(
+        "/finished",
+        json={
+            "workflow_id": parent_task["workflow_id"],
+            "session_id": parent_task["session_id"],
+            "iteration": parent_task["iteration"],
+            "success": False,
+            "text": None,
+            "error": "failed before child dispatch",
+        },
+    ).json()
+
+    assert next_task["action"] == "run"
+    assert next_task["workflow_set"] == "main"
+    assert next_task["session_id"] == parent_task["session_id"]
+    assert request_path.exists()
 
 
 def test_finished_stale_mismatch_does_not_mutate(

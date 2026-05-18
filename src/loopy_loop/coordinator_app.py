@@ -4,14 +4,19 @@ from datetime import datetime
 import json
 import logging
 from pathlib import Path
+from typing import Any
 from typing import TypeVar
 
 from fastapi import FastAPI
 from pydantic import BaseModel
 
 from loopy_loop.config import ConfigError
+from loopy_loop.config import derive_goal_hash
 from loopy_loop.config import PreflightResult
 from loopy_loop.config import run_preflight
+from loopy_loop.config import WorkflowDefinition
+from loopy_loop.models import ChildSessionRecord
+from loopy_loop.models import ChildSessionRequest
 from loopy_loop.models import ControlSignal
 from loopy_loop.models import CurrentTask
 from loopy_loop.models import FinishedRequest
@@ -24,19 +29,30 @@ from loopy_loop.models import STOP_ACTION
 from loopy_loop.models import TaskResponse
 from loopy_loop.models import utc_now
 from loopy_loop.scheduler import choose_next_workflow
+from loopy_loop.sessions import child_requests_dir_path
+from loopy_loop.sessions import children_path
 from loopy_loop.sessions import control_path
 from loopy_loop.sessions import create_session_dir
 from loopy_loop.sessions import create_session_id
 from loopy_loop.sessions import goal_check_path
 from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.sessions import result_path
+from loopy_loop.sessions import state_path
 from loopy_loop.state_store import StateStore
 
 logger = logging.getLogger(__name__)
 
 
-def create_coordinator_app(*, repo_root: Path, resume: bool) -> FastAPI:
-    preflight = run_preflight(repo_root=repo_root)
+def create_coordinator_app(
+    *,
+    repo_root: Path,
+    resume: bool,
+    workflow_set: str | None = None,
+    goal_file: Path | None = None,
+) -> FastAPI:
+    preflight = run_preflight(
+        repo_root=repo_root, workflow_set=workflow_set, goal_file=goal_file
+    )
     store = StateStore(repo_root=repo_root)
     service = CoordinatorService(
         repo_root=repo_root, preflight=preflight, state_store=store, resume=resume
@@ -66,8 +82,9 @@ class CoordinatorService:
     ) -> None:
         self.repo_root = repo_root
         self.preflight = preflight
-        self.workflows = preflight.workflows
-        self.workflows_by_id = {workflow.id: workflow for workflow in self.workflows}
+        self.preflights: dict[str, PreflightResult] = {
+            preflight.workflow_set: preflight
+        }
         self.state_store = state_store
         self._prepare_state(resume=resume)
 
@@ -91,6 +108,7 @@ class CoordinatorService:
                     current.history.append(
                         HistoryEntry(
                             iteration=orphaned.iteration,
+                            workflow_set=orphaned.workflow_set,
                             workflow_id=orphaned.workflow_id,
                             session_id=orphaned.session_id,
                             success=False,
@@ -117,9 +135,14 @@ class CoordinatorService:
             if stop_response is not None:
                 return current, stop_response
 
+            child_response = self._dispatch_child_session_after_success(state=current)
+            if child_response is not None:
+                return current, child_response
+
             # Step 5: Choose next workflow.
+            workflows = self._workflows_for(workflow_set=current.workflow_set)
             workflow = choose_next_workflow(
-                workflows=self.workflows,
+                workflows=workflows,
                 history=current.history,
                 iteration_count=current.iteration_count,
             )
@@ -132,6 +155,7 @@ class CoordinatorService:
 
             # Step 6: Set current_task and return run response.
             current.current_task = CurrentTask(
+                workflow_set=current.workflow_set,
                 workflow_id=workflow.id,
                 session_id=current.active_session_id,
                 iteration=current.iteration_count + 1,
@@ -159,8 +183,14 @@ class CoordinatorService:
                 stop_response = self._stop_response_if_needed(state=current)
                 if stop_response is not None:
                     return current, stop_response
+                child_response = self._dispatch_child_session_after_success(
+                    state=current
+                )
+                if child_response is not None:
+                    return current, child_response
+                workflows = self._workflows_for(workflow_set=current.workflow_set)
                 workflow = choose_next_workflow(
-                    workflows=self.workflows,
+                    workflows=workflows,
                     history=current.history,
                     iteration_count=current.iteration_count,
                 )
@@ -171,6 +201,7 @@ class CoordinatorService:
                         action=STOP_ACTION, stop_reason="no_eligible_workflow"
                     )
                 current.current_task = CurrentTask(
+                    workflow_set=current.workflow_set,
                     workflow_id=workflow.id,
                     session_id=current.active_session_id,
                     iteration=current.iteration_count + 1,
@@ -213,8 +244,13 @@ class CoordinatorService:
                 return current, stop_response
 
             # Step 8: Dispatch next workflow.
+            child_response = self._dispatch_child_session_after_success(state=current)
+            if child_response is not None:
+                return current, child_response
+
+            workflows = self._workflows_for(workflow_set=current.workflow_set)
             workflow = choose_next_workflow(
-                workflows=self.workflows,
+                workflows=workflows,
                 history=current.history,
                 iteration_count=current.iteration_count,
             )
@@ -227,6 +263,7 @@ class CoordinatorService:
 
             # Step 9: Set new current_task and return run response.
             current.current_task = CurrentTask(
+                workflow_set=current.workflow_set,
                 workflow_id=workflow.id,
                 session_id=current.active_session_id,
                 iteration=current.iteration_count + 1,
@@ -237,7 +274,12 @@ class CoordinatorService:
                 config_snapshot=current.config_snapshot,
             )
 
-        return self.state_store.mutate(mutator)
+        response = self.state_store.mutate(mutator)
+        if response.action == STOP_ACTION:
+            parent_response = self._resume_parent_if_active_child_completed()
+            if parent_response is not None:
+                return parent_response
+        return response
 
     def _record_finished_task(
         self,
@@ -250,7 +292,9 @@ class CoordinatorService:
         success = request.success
         error = request.error
 
-        if self._workflow_expects_goal_check_signal(workflow_id=active.workflow_id):
+        if self._workflow_expects_goal_check_signal(
+            workflow_set=active.workflow_set, workflow_id=active.workflow_id
+        ):
             goal_signal = self._read_goal_check_signal(current_task=active)
             if goal_signal is None:
                 success = False
@@ -274,6 +318,7 @@ class CoordinatorService:
         state.history.append(
             HistoryEntry(
                 iteration=active.iteration,
+                workflow_set=active.workflow_set,
                 workflow_id=active.workflow_id,
                 session_id=active.session_id,
                 success=success,
@@ -341,6 +386,9 @@ class CoordinatorService:
             repo_root=self.repo_root,
             session_id=existing_state.active_session_id,
             goal_hash=existing_state.goal_hash,
+            goal=existing_state.config_snapshot.goal,
+            workflow_set=existing_state.workflow_set,
+            parent_session_id=existing_state.parent_session_id,
         )
 
     def _write_fresh_state(self) -> None:
@@ -349,6 +397,12 @@ class CoordinatorService:
             repo_root=self.repo_root,
             session_id=session_id,
             goal_hash=self.preflight.root_config.goal_hash,
+            goal=self.preflight.root_config.goal,
+            workflow_set=self.preflight.workflow_set,
+        )
+        self.state_store = StateStore(
+            repo_root=self.repo_root,
+            state_path=state_path(repo_root=self.repo_root, session_id=session_id),
         )
         snapshot = RootConfigSnapshot.model_validate(
             self.preflight.root_config.model_dump()
@@ -356,11 +410,168 @@ class CoordinatorService:
         state = LoopState(
             status="running",
             goal_hash=self.preflight.root_config.goal_hash,
+            workflow_set=self.preflight.workflow_set,
             max_turns=self.preflight.root_config.max_turns,
             active_session_id=session_id,
             config_snapshot=snapshot,
         )
         self.state_store.write_state(state=state)
+
+    def _preflight_for(
+        self, *, workflow_set: str, goal: str | None = None
+    ) -> PreflightResult:
+        preflight = self.preflights.get(workflow_set)
+        if preflight is None:
+            preflight = run_preflight(
+                repo_root=self.repo_root, workflow_set=workflow_set
+            )
+            self.preflights[workflow_set] = preflight
+        if goal is None:
+            return preflight
+        root_config = preflight.root_config.model_copy(
+            update={"goal": goal, "workflow_set": workflow_set}
+        )
+        return PreflightResult(
+            root_config=root_config,
+            workflow_set=workflow_set,
+            workflows=preflight.workflows,
+        )
+
+    def _workflows_for(self, *, workflow_set: str) -> list[WorkflowDefinition]:
+        return self._preflight_for(workflow_set=workflow_set).workflows
+
+    def _workflows_by_id_for(
+        self, *, workflow_set: str
+    ) -> dict[str, WorkflowDefinition]:
+        return {
+            workflow.id: workflow
+            for workflow in self._workflows_for(workflow_set=workflow_set)
+        }
+
+    def _dispatch_child_session_if_requested(
+        self, *, state: LoopState
+    ) -> TaskResponse | None:
+        if state.parent_session_id is not None:
+            return None
+        requests_dir = child_requests_dir_path(
+            repo_root=self.repo_root, session_id=state.active_session_id
+        )
+        if not requests_dir.exists():
+            return None
+        for request_path in sorted(requests_dir.glob("*.json")):
+            request = _read_signal(path=request_path, model=ChildSessionRequest)
+            if request is None:
+                continue
+            preflight = self._preflight_for(
+                workflow_set=request.workflow_set, goal=request.goal
+            )
+            workflows = preflight.workflows
+            workflow = choose_next_workflow(
+                workflows=workflows, history=[], iteration_count=0
+            )
+            if workflow is None:
+                continue
+            goal_hash = derive_goal_hash(goal=request.goal)
+            child_session_id = create_session_id(goal_hash=goal_hash)
+            create_session_dir(
+                repo_root=self.repo_root,
+                session_id=child_session_id,
+                goal_hash=goal_hash,
+                goal=request.goal,
+                workflow_set=request.workflow_set,
+                parent_session_id=state.active_session_id,
+            )
+            snapshot = RootConfigSnapshot.model_validate(
+                preflight.root_config.model_dump()
+            )
+            now = utc_now()
+            child_state = LoopState(
+                status="running",
+                goal_hash=goal_hash,
+                workflow_set=request.workflow_set,
+                parent_session_id=state.active_session_id,
+                max_turns=preflight.root_config.max_turns,
+                active_session_id=child_session_id,
+                config_snapshot=snapshot,
+                current_task=CurrentTask(
+                    workflow_set=request.workflow_set,
+                    workflow_id=workflow.id,
+                    session_id=child_session_id,
+                    iteration=1,
+                    started_at=now,
+                ),
+            )
+            child_store = StateStore(
+                repo_root=self.repo_root,
+                state_path=state_path(
+                    repo_root=self.repo_root, session_id=child_session_id
+                ),
+            )
+            child_store.write_state(state=child_state)
+            child_task = child_state.current_task
+            if child_task is None:
+                raise RuntimeError("Child session was created without a task")
+            self._append_child_record(
+                parent_session_id=state.active_session_id,
+                record=ChildSessionRecord(
+                    session_id=child_session_id,
+                    workflow_set=request.workflow_set,
+                    goal_hash=goal_hash,
+                    status="running",
+                    created_at=now,
+                ),
+            )
+            request_path.unlink(missing_ok=True)
+            self.state_store = child_store
+            return _build_run_response(
+                current_task=child_task, config_snapshot=child_state.config_snapshot
+            )
+        return None
+
+    def _dispatch_child_session_after_success(
+        self, *, state: LoopState
+    ) -> TaskResponse | None:
+        if not state.history or not state.history[-1].success:
+            return None
+        return self._dispatch_child_session_if_requested(state=state)
+
+    def _resume_parent_if_active_child_completed(self) -> TaskResponse | None:
+        child_state = self.state_store.read_state()
+        if child_state is None or child_state.parent_session_id is None:
+            return None
+        if not self.state_store.is_terminal_state(state=child_state):
+            return None
+        self._mark_child_record_complete(child_state=child_state)
+        parent_store = StateStore(
+            repo_root=self.repo_root,
+            state_path=state_path(
+                repo_root=self.repo_root, session_id=child_state.parent_session_id
+            ),
+        )
+        self.state_store = parent_store
+        return self.register_worker()
+
+    def _append_child_record(
+        self, *, parent_session_id: str, record: ChildSessionRecord
+    ) -> None:
+        path = children_path(repo_root=self.repo_root, session_id=parent_session_id)
+        payload = _read_children_payload(path=path)
+        payload["children"].append(json.loads(record.model_dump_json()))
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _mark_child_record_complete(self, *, child_state: LoopState) -> None:
+        assert child_state.parent_session_id is not None
+        path = children_path(
+            repo_root=self.repo_root, session_id=child_state.parent_session_id
+        )
+        payload = _read_children_payload(path=path)
+        for record in payload["children"]:
+            if record.get("session_id") == child_state.active_session_id:
+                record["status"] = child_state.status
+                record["completed_at"] = utc_now().isoformat().replace("+00:00", "Z")
+                record["stop_reason"] = child_state.stop_reason
+                break
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _apply_stop_precedence(self, *, state: LoopState) -> str | None:
         if state.goal_met:
@@ -401,8 +612,10 @@ class CoordinatorService:
         )
         return _read_signal(path=path, model=GoalCheckSignal)
 
-    def _workflow_expects_goal_check_signal(self, *, workflow_id: str) -> bool:
-        workflow = self.workflows_by_id.get(workflow_id)
+    def _workflow_expects_goal_check_signal(
+        self, *, workflow_set: str, workflow_id: str
+    ) -> bool:
+        workflow = self._workflows_by_id_for(workflow_set=workflow_set).get(workflow_id)
         return workflow_id == "goal_check" or (
             workflow is not None and workflow.emits_goal_check
         )
@@ -434,6 +647,7 @@ def _build_run_response(
 ) -> TaskResponse:
     return TaskResponse(
         action="run",
+        workflow_set=current_task.workflow_set,
         workflow_id=current_task.workflow_id,
         session_id=current_task.session_id,
         iteration=current_task.iteration,
@@ -455,6 +669,18 @@ def _matches_current_task(
         and request.workflow_id == current_task.workflow_id
         and request.iteration == current_task.iteration
     )
+
+
+def _read_children_payload(*, path: Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raw = {}
+    if isinstance(raw, dict) and isinstance(raw.get("children"), list):
+        return {"schema_version": 1, "children": raw["children"]}
+    if isinstance(raw, list):
+        return {"schema_version": 1, "children": raw}
+    return {"schema_version": 1, "children": []}
 
 
 SignalModel = TypeVar("SignalModel", bound=BaseModel)

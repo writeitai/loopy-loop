@@ -11,6 +11,8 @@ from loopy_loop.sessions import ensure_iteration_dir
 from loopy_loop.sessions import finished_path
 from loopy_loop.sessions import harness_outputs_dir_path
 from loopy_loop.sessions import iteration_harness_output_root
+from loopy_loop.sessions import parent_path
+from loopy_loop.sessions import session_goal_path
 from loopy_loop.sessions import updates_from_user_path
 
 
@@ -25,6 +27,8 @@ def test_create_session_and_iteration_dirs(repo_root: Any) -> None:
         repo_root=repo_root,
         session_id="20260419_143022_71393ee22450_ab12cd34",
         goal_hash="71393ee22450",
+        goal="Ship it",
+        workflow_set="main",
     )
     iteration_dir = ensure_iteration_dir(
         repo_root=repo_root,
@@ -37,10 +41,21 @@ def test_create_session_and_iteration_dirs(repo_root: Any) -> None:
 
     assert metadata["session_id"] == "20260419_143022_71393ee22450_ab12cd34"
     assert metadata["goal_hash"] == "71393ee22450"
+    assert metadata["workflow_set"] == "main"
+    assert json.loads((session_dir / "children.json").read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "children": [],
+    }
+    assert (
+        session_goal_path(
+            repo_root=repo_root, session_id="20260419_143022_71393ee22450_ab12cd34"
+        ).read_text(encoding="utf-8")
+        == "Ship it\n"
+    )
     assert (session_dir / "events.jsonl").exists()
     assert json.loads(
         control_path(
-            repo_root=repo_root, session_id="71393ee22450_20260419_143022_ab12cd34"
+            repo_root=repo_root, session_id="20260419_143022_71393ee22450_ab12cd34"
         ).read_text(encoding="utf-8")
     ) == {
         "state": "running",
@@ -68,7 +83,10 @@ def test_create_session_preserves_user_updates_and_finished_ledger(
 ) -> None:
     session_id = "20260419_143022_71393ee22450_ab12cd34"
     create_session_dir(
-        repo_root=repo_root, session_id=session_id, goal_hash="71393ee22450"
+        repo_root=repo_root,
+        session_id=session_id,
+        goal_hash="71393ee22450",
+        workflow_set="main",
     )
     updates_path = updates_from_user_path(repo_root=repo_root, session_id=session_id)
     ledger_path = finished_path(repo_root=repo_root, session_id=session_id)
@@ -76,7 +94,10 @@ def test_create_session_preserves_user_updates_and_finished_ledger(
     ledger_path.write_text("# Finished Work\n\nExisting entry\n", encoding="utf-8")
 
     create_session_dir(
-        repo_root=repo_root, session_id=session_id, goal_hash="71393ee22450"
+        repo_root=repo_root,
+        session_id=session_id,
+        goal_hash="71393ee22450",
+        workflow_set="main",
     )
 
     assert updates_path.read_text(encoding="utf-8") == "Please prioritize evals.\n"
@@ -95,3 +116,32 @@ def test_iteration_harness_output_root_uses_iteration_name(repo_root: Any) -> No
 
     assert output_root.name == "0012_outer"
     assert output_root.parent.name == "harness_outputs"
+
+
+def test_create_child_session_records_parent(repo_root: Any) -> None:
+    parent_session_id = "20260419_143022_71393ee22450_ab12cd34"
+    child_session_id = "20260419_143123_91aa0ab84591_cd34ef56"
+    create_session_dir(
+        repo_root=repo_root,
+        session_id=parent_session_id,
+        goal_hash="71393ee22450",
+        workflow_set="main",
+    )
+
+    child_dir = create_session_dir(
+        repo_root=repo_root,
+        session_id=child_session_id,
+        goal_hash="91aa0ab84591",
+        goal="Child goal",
+        workflow_set="inner_outer_eval",
+        parent_session_id=parent_session_id,
+    )
+
+    assert child_dir.parent.name == "children"
+    parent_payload = json.loads(
+        parent_path(repo_root=repo_root, session_id=child_session_id).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert parent_payload["schema_version"] == 1
+    assert parent_payload["parent_session_id"] == parent_session_id

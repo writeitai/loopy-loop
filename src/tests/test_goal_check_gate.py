@@ -33,7 +33,7 @@ def test_goal_check_requires_successful_non_goal_check_history(
             },
         }
     )
-    workflows = load_workflow_definitions(repo_root=repo_root)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
 
     no_unlock = choose_next_workflow(
         workflows=workflows,
