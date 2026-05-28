@@ -122,13 +122,17 @@ goal_file: "loopy_loop_goal.txt"
 workflow_set: "main"
 max_turns: 20
 goal_check_consecutive_failures_cap: 3
-team_harness_provider: "openai_compat"
+team_harness_provider: "codex"
 team_harness_model: "gpt-5.5"
-team_harness_agents: ["codex"]
+team_harness_agents:
+  - "codex"
+  - "claude"
+  - "gemini"
 team_harness_agent_models:
   codex: "gpt-5.5"
-team_harness_agent_reasoning_efforts:
-  codex: "high"
+  claude: "claude-opus-4-8"
+  gemini: "gemini-3.5-flash"
+team_harness_agent_reasoning_efforts: {}
 # Optional coordinator retry controls. Omit to use team-harness defaults.
 # team_harness_max_retries: 8
 # team_harness_retry_base_delay_s: 2.0
