@@ -48,10 +48,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/writeitai/orchestra"
-Repository = "https://github.com/writeitai/orchestra"
-Issues = "https://github.com/writeitai/orchestra/issues"
-Changelog = "https://github.com/writeitai/orchestra/releases"
+Homepage = "https://github.com/writeitai/loopy-loop"
+Repository = "https://github.com/writeitai/loopy-loop"
+Issues = "https://github.com/writeitai/loopy-loop/issues"
+Changelog = "https://github.com/writeitai/loopy-loop/releases"
 
 [project.scripts]
 loopy = "loopy_loop.cli:main"
