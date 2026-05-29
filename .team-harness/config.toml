@@ -8,7 +8,7 @@
 provider = "codex"
 
 # Model name passed to the coordinator API.
-model = "gpt-5.4"
+model = "gpt-5.5"
 
 # Base URL for the coordinator API.
 api_base = "https://openrouter.ai/api/v1"
@@ -79,7 +79,7 @@ shared_flags = [
 resume_prefix = ["resume"]
 resume_flags = ["{session_id}"]
 model_flag = "--model"
-default_model = "gpt-5.4"
+default_model = "gpt-5.5"
 reasoning_effort_flag = ["-c", "model_reasoning_effort={effort}"]
 # reasoning_effort = "high"   # uncomment to pin a level (low|medium|high|xhigh)
 
