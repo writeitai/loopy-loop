@@ -1,32 +1,53 @@
 # loopy-loop
 
-`loopy-loop` is a repo-local automation loop for AI agents.
+`loopy-loop` is a repo-local automation loop for long-running AI agent work.
+It turns a goal file in your repository into an inspectable sequence of agent
+iterations: plan, implement, evaluate, record evidence, and continue until the
+goal is met or the loop hits a terminal blocker.
 
-- A FastAPI coordinator owns session-local loop state in
-  `.loopy_loop/sessions/<session_id>/state.json`.
-- One or more blocking workers poll the coordinator over HTTP.
-- Each assignment loads workflow files from the active workflow set, runs
-  `team_harness.TeamHarness`, writes iteration artifacts under
-  `.loopy_loop/sessions/<session_id>/iterations/`, and reports completion back
-  to the coordinator.
+The value is control and durability. Instead of asking one agent to solve a
+large task in one fragile chat, loopy-loop gives the work a persistent session
+directory, repeatable workflow prompts, explicit stop conditions, and structured
+logs. You can pause, resume, audit what happened, adjust the goal, inspect every
+prompt/result pair, and keep the actual project changes in normal git branches
+and PRs.
+
+Under the hood, loopy-loop runs a small FastAPI coordinator and one or more
+workers. The coordinator owns the loop state and chooses the next workflow. The
+workers run assignments through
+[`team-harness`](https://github.com/writeitai/team-harness), which can delegate
+to agent CLIs such as Codex, Claude Code, and Gemini. The packaged
+`inner_outer_eval` template also uses
+[`eval-banana`](https://github.com/writeitai/eval-banana) conventions for
+session-scoped evaluation checks.
 
 ## Install
+
+Install the CLI from the official [PyPI package](https://pypi.org/project/loopy-loop/).
+
+With `uv`, install it as a command-line tool:
+
+```bash
+uv tool install loopy-loop
+```
+
+Or with `pip`:
+
+```bash
+pip install loopy-loop
+```
+
+For development inside this repository:
 
 ```bash
 uv sync --extra dev
 ```
 
-Or:
+## Install the Agent Skill
 
-```bash
-uv pip install .
-```
-
-## Skills
-
-This repo ships an [Agent Skill](https://support.claude.com/en/articles/12512176-what-are-skills)
-that teaches Claude Code, Codex, and other compatible agents how to set up and
-run loopy-loop in a target repo. Install it with:
+This repo also ships an [Agent Skill](https://support.claude.com/en/articles/12512176-what-are-skills)
+that teaches Claude Code, Codex, and compatible agents how to set up and run
+loopy-loop in another target repo.
 
 ```bash
 npx skills add https://github.com/writeitai/loopy-loop --skill loopy-loop
@@ -34,93 +55,150 @@ npx skills add https://github.com/writeitai/loopy-loop --skill loopy-loop
 
 The skill source lives under [`skills/loopy-loop/`](./skills/loopy-loop/SKILL.md).
 
-## Repo Layout
+## Initialize a Target Repo
 
-```text
-target repo/
-├── loopy_loop_config.yaml
-└── .loopy_loop/
-    ├── workflow_sets/<workflow_set>/workflows/<workflow_id>/{prompt.txt,config.yaml}
-    └── sessions/<session_id>/
-        ├── goal.md
-        ├── state.json
-        ├── child_requests/
-        ├── children/
-        └── iterations/
-```
-
-## Quick Start
+Run this from the repository you want agents to work on:
 
 ```bash
-loopy init
 loopy init --template inner_outer_eval
-loopy init --template pm_planner_dispatcher
+```
+
+This is the recommended starting template. It creates:
+
+- `loopy_loop_config.yaml`
+- `loopy_loop_goal.txt`
+- `.loopy_loop/workflow_sets/inner_outer_eval/workflows/outer/`
+- `.loopy_loop/workflow_sets/inner_outer_eval/workflows/inner/`
+- `.loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_reviewer/`
+- `.loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_runner/`
+- a `.gitignore` entry for `.loopy_loop/sessions/`
+
+`loopy init` is idempotent. It creates missing files and leaves existing files
+alone.
+
+## Write the Goal
+
+The loop goal lives in `loopy_loop_goal.txt`. Replace the scaffolded example
+with the real target, including constraints and observable completion criteria.
+
+Example:
+
+```text
+Implement passwordless email login.
+
+Completion criteria:
+- Users can request a one-time login link from the sign-in page.
+- The link expires after 15 minutes and cannot be reused.
+- Existing password login keeps working.
+- Tests cover token expiry, token reuse, and successful login.
+- README documents required environment variables.
+```
+
+Keep the goal specific enough that a reviewer or eval workflow can decide
+whether the loop is done. For one-off overrides, start the coordinator with
+`--goal-file PATH`; the file is copied into the session as `goal.md`.
+
+## Run the Loop
+
+Start the coordinator in one terminal:
+
+```bash
 loopy coordinator --host 127.0.0.1 --port 8080
+```
+
+Start a worker in another terminal:
+
+```bash
 loopy worker --coordinator http://127.0.0.1:8080
+```
+
+Useful control commands:
+
+```bash
 loopy status
 loopy stop
 ```
 
-`loopy init` is idempotent. It creates:
+If the coordinator stops while a session is still running, restart it with:
 
-- `loopy_loop_config.yaml`
-- `.loopy_loop/workflow_sets/main/workflows/goal_check/prompt.txt`
-- `.loopy_loop/workflow_sets/main/workflows/goal_check/config.yaml`
-- `.gitignore` entry for `.loopy_loop/sessions/`
+```bash
+loopy coordinator --host 127.0.0.1 --port 8080 --resume
+```
 
-Use `loopy init --template inner_outer_eval` to scaffold the packaged workflow
-set for outer planning, inner implementation, eval review, and eval running.
-Use `loopy init --template pm_planner_dispatcher` to scaffold the packaged PM
-workflow set for planner/dispatcher orchestration that starts child sessions.
+The default templates use `team_harness_provider: "codex"`, so the coordinator
+uses local Codex authentication. If you switch to an OpenAI-compatible provider,
+export the environment variable named in `team_harness_api_key_env`, usually
+`OPENROUTER_API_KEY`, in both the coordinator and worker shells.
 
-## CLI Reference
+## How It Works
 
-`loopy init [--template default|inner_outer_eval|pm_planner_dispatcher]`
+At a high level:
 
-- Scaffolds the root config and reserved `goal_check` workflow.
-- `--template inner_outer_eval` scaffolds the packaged inner/outer/eval workflow
-  set instead: `outer`, `inner`, `eval_reviewer`, and `eval_runner`.
-- `--template pm_planner_dispatcher` scaffolds the packaged PM orchestration
-  workflow set: `planner` and `dispatcher`.
-- Does not overwrite existing workflow files.
+1. `loopy init` writes a root config, a goal file, and workflow files into the
+   target repo.
+2. `loopy coordinator` loads `loopy_loop_config.yaml`, resolves the goal text,
+   creates a session under `.loopy_loop/sessions/`, and exposes two HTTP
+   endpoints: `/register` and `/finished`.
+3. A worker calls `/register`, receives the next workflow assignment, renders
+   the workflow prompt with session paths, and runs it through `team-harness`.
+4. `team-harness` runs a coordinator model and can spawn external worker CLIs
+   such as Codex, Claude Code, or Gemini.
+5. The worker writes the rendered prompt, normalized result, result text,
+   harness run id, and harness output path into the iteration directory.
+6. The coordinator records the result, checks session control/eval artifacts,
+   and either dispatches the next workflow or stops.
 
-`loopy coordinator --host 0.0.0.0 --port 8080 [--resume] [--workflow-set NAME] [--goal-file PATH]`
+The `inner_outer_eval` template is organized around four workflows:
 
-- Runs the FastAPI coordinator with exactly two endpoints: `/register` and `/finished`.
-- On a fresh start, creates a new session directory with `goal.md` and
-  session-local `state.json`.
-- If the latest session `state.json` is terminal, archives it next to that
-  session state file and starts fresh.
-- If the latest session `state.json` is already `running`, startup fails unless
-  `--resume` is passed.
-- `--workflow-set` overrides `workflow_set` for the new session.
-- `--goal-file` overrides the configured goal file for the new session.
+- `outer`: plans, tracks durable project state, reviews evidence, and decides
+  what should happen next.
+- `inner`: implements the selected work in the target repo.
+- `eval_reviewer`: creates or refreshes session-scoped eval-banana checks.
+- `eval_runner`: runs the eval checks and writes `goal_check.json`.
 
-`loopy worker --coordinator http://127.0.0.1:8080`
+The loop does not hide state inside a chat transcript. Continuity comes from
+git state plus files in `.loopy_loop/sessions/<session_id>/`.
 
-- Calls `/register` once to receive the first task.
-- Loops calling `/finished` after each completed task until it receives a `stop` response.
-- Loads `loopy_loop_config.yaml`,
-  `.loopy_loop/workflow_sets/<workflow_set>/workflows/<workflow_id>/config.yaml`,
-  and the matching `prompt.txt` from disk on each task.
-- Uses the coordinator `config_snapshot` as the execution snapshot for the session.
+## Repo Layout
 
-`loopy status`
+After initialization, the target repo has this shape:
 
-- Prints current session id, iteration count, current task, and stop reason.
+```text
+target repo/
+├── loopy_loop_config.yaml
+├── loopy_loop_goal.txt
+└── .loopy_loop/
+    ├── workflow_sets/
+    │   └── <workflow_set>/workflows/<workflow_id>/
+    │       ├── config.yaml
+    │       └── prompt.txt
+    └── sessions/
+        └── <session_id>/
+            ├── goal.md
+            ├── session.json
+            ├── state.json
+            ├── control.json
+            ├── updates_from_user.md
+            ├── project_state/
+            ├── eval_checks/
+            ├── eval_results/
+            ├── harness_outputs/
+            ├── child_requests/
+            ├── children/
+            └── iterations/
+```
 
-`loopy stop`
+Workflow definitions are part of the repo and should usually be committed.
+Session directories are runtime output and are ignored by default.
 
-- Sets `stop_requested=true` in the latest session-local `state.json`.
+## Configuration
 
-## Config Reference
-
-Root config (`loopy_loop_config.yaml` at the repo root):
+Root config lives at `loopy_loop_config.yaml`:
 
 ```yaml
-goal_file: "loopy_loop_goal.txt"
-workflow_set: "main"
-max_turns: 20
+goal_file: loopy_loop_goal.txt
+workflow_set: inner_outer_eval
+max_turns: 160
 goal_check_consecutive_failures_cap: 3
 team_harness_provider: "codex"
 team_harness_model: "gpt-5.5"
@@ -132,37 +210,27 @@ team_harness_agent_models:
   codex: "gpt-5.5"
   claude: "claude-opus-4-8"
   gemini: "gemini-3.5-flash"
-team_harness_agent_reasoning_efforts: {}
-# Optional coordinator retry controls. Omit to use team-harness defaults.
-# team_harness_max_retries: 8
-# team_harness_retry_base_delay_s: 2.0
-# team_harness_retry_max_delay_s: 60.0
+team_harness_agent_reasoning_efforts:
+  codex: "high"
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
 ```
 
-Rules:
+Important rules:
 
-- Session ids start with a UTC timestamp for filesystem sorting and include a
-  deterministic `goal_hash` derived from the text loaded from `goal_file`
-- `workflow_set` names the workflow set used when `loopy coordinator`
-  is started without `--workflow-set`
-- `goal_file` is resolved relative to `loopy_loop_config.yaml`; inline `goal`
-  values in YAML are rejected
-- `completion_criteria`, `stop_criteria`, and
-  `team_harness_system_prompt_extension` are optional; omitted criteria default
-  to empty lists and the prompt extension defaults to an empty string
-- `team_harness_model` controls the team-harness coordinator model; worker
-  subprocess defaults are controlled by `team_harness_agent_models`
-- `team_harness_api_base` is normalized by loopy-loop: trailing slash stripped, `/v1` appended when missing
-- `team_harness_api_key_env` must be set during coordinator preflight and again in the worker before `TeamHarness(...)`
-- `team_harness_agent_reasoning_efforts` is optional and only affects workers
-  whose team-harness template supports a reasoning-effort flag
+- `workflow_set` selects the default workflow set for new sessions.
+- `goal_file` is resolved relative to `loopy_loop_config.yaml`.
+- Inline `goal` values in YAML are rejected; the goal should live in a file.
+- `max_turns` is the maximum number of completed workflow iterations.
+- `team_harness_model` controls the team-harness coordinator model.
+- `team_harness_agent_models` controls default models for worker subprocesses.
+- `team_harness_api_base` is normalized by loopy-loop: trailing slash stripped,
+  `/v1` appended when missing.
 - `team_harness_max_retries`, `team_harness_retry_base_delay_s`, and
-  `team_harness_retry_max_delay_s` are optional coordinator retry controls for
-  transient team-harness API/network errors
+  `team_harness_retry_max_delay_s` are optional retry controls for transient
+  team-harness API/network errors.
 
-Workflow config:
+Workflow config lives beside each workflow prompt:
 
 ```yaml
 enabled: true
@@ -176,15 +244,18 @@ emits_goal_check: false
 description: ""
 ```
 
-Rules:
+Workflow rules:
 
-- Workflow id is the folder name under
-  `.loopy_loop/workflow_sets/<workflow_set>/workflows/`
-- `must_follow` must resolve during coordinator preflight
-- `run_every` is based on completed iteration count, not wall clock
-- `priority` breaks ties among eligible workflows; higher values run first
-- `run_on_start=true` makes a workflow eligible before any successful workflow has run
-- `run_after_successes` can run a workflow after every N successful runs of another workflow:
+- The workflow id is the folder name under
+  `.loopy_loop/workflow_sets/<workflow_set>/workflows/`.
+- `priority` breaks ties among eligible workflows; higher values run first.
+- `run_every` is based on completed iteration count, not wall clock.
+- `run_on_start=true` makes a workflow eligible before any successful workflow
+  has run.
+- `must_follow` and `run_after_successes.workflow_id` must reference existing
+  workflow ids.
+- `run_after_successes` can schedule a workflow after every N successful runs
+  of another workflow:
 
 ```yaml
 run_after_successes:
@@ -192,133 +263,71 @@ run_after_successes:
   every: 10
 ```
 
-- `emits_goal_check=true` lets a non-`goal_check` workflow write `goal_check.json`
-  as a required eval artifact. To stop the loop, the workflow must update the
-  session-scoped `control.json`.
-- `goal_check` is reserved and scaffolded with `not_before_iteration: 1`
+- `emits_goal_check=true` lets a non-`goal_check` workflow write
+  `goal_check.json` as an eval artifact. Stopping still requires updating
+  session `control.json`.
 
-## Workflow Sets and Child Sessions
+## Output and Logging
 
-Workflow sets are mandatory. Even a single-loop repo uses
-`.loopy_loop/workflow_sets/main/workflows/...`; the old
-`.loopy_loop/workflows/...` layout is not loaded.
+Each fresh coordinator run creates one session directory:
 
-A workflow can request one sequential child session by writing a JSON file under
-the active session's `child_requests/` directory:
-
-```json
-{
-  "workflow_set": "pm_planner_dispatcher",
-  "goal": "Implement the selected planner item.",
-  "schema_version": 1
-}
+```text
+.loopy_loop/sessions/<session_id>/
 ```
 
-The coordinator creates the child session under the parent session's
-`children/` directory, copies the request goal into the child `goal.md`, runs
-the requested workflow set, and resumes the parent session after the child
-reaches a terminal state. v1 is depth-first and single-child-at-a-time.
+Session ids start with a UTC timestamp and include a deterministic goal hash, so
+session directories sort chronologically and similar goals are easy to compare.
 
-The packaged `pm_planner_dispatcher` workflow set uses this contract as a
-generic parent loop:
+Important session files:
 
-- `planner` maintains PM state, selects one work item, and reviews terminal
-  child-session evidence.
-- `dispatcher` writes one child request for the selected work item or imports
-  terminal child evidence back into PM state.
+- `goal.md`: the exact goal text copied into the session.
+- `session.json`: session metadata.
+- `state.json`: coordinator-owned dispatch state.
+- `events.jsonl`: reserved append-only diagnostics log.
+- `control.json`: workflow-owned stop switch.
+- `updates_from_user.md`: human-writable inbox for changes after the session
+  starts.
+- `project_state/`: workflow-owned durable markdown state.
+- `eval_checks/`: session-scoped eval-banana checks.
+- `eval_results/`: raw eval-banana reports.
+- `harness_outputs/`: team-harness coordinator and worker artifacts.
+- `iterations/`: one directory per loopy-loop assignment.
 
-Cadence example:
+Each iteration directory contains:
 
-```yaml
-# Run eval_reviewer at the beginning and then after every 10 successful inner runs.
-enabled: true
-priority: 100
-run_on_start: true
-run_after_successes:
-  workflow_id: inner
-  every: 10
+```text
+.loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>/
+├── prompt.txt
+├── result.json
+├── result_text.txt
+├── harness_run_id.txt
+├── pending_finished_request.json
+└── goal_check.json            # only for eval-emitting workflows
 ```
 
-## HTTP Contract Summary
+`prompt.txt` is the rendered prompt sent to `TeamHarness.run(...)`.
+`result.json` is loopy-loop's normalized result. `result_text.txt` is the
+plain-text final response. `harness_run_id.txt` links the iteration to the
+corresponding team-harness output under `harness_outputs/`.
 
-Endpoints:
+Team-harness outputs are routed here:
 
-- `POST /register`
-- `POST /finished`
+```text
+.loopy_loop/sessions/<session_id>/harness_outputs/<NNNN>_<workflow_id>/<team_harness_run_id>/
+```
 
-Both endpoints return a `TaskResponse` with `action` of either `"run"` or `"stop"`.
+Eval-banana outputs should be routed here:
 
-A `run` response carries `workflow_id`, `session_id`, `iteration`, and `config_snapshot`.
-A `stop` response carries `stop_reason`.
+```text
+.loopy_loop/sessions/<session_id>/eval_results/<eval_banana_run_id>/
+```
 
-Stale `/finished` calls (mismatched `session_id`, `workflow_id`, or
-`iteration`) do not mutate state and return the current running task's response.
-If there is no active task, `/finished` acts like `/register` and dispatches the
-next available task. If a worker exits after writing `result.json` but before
-`/finished` is acknowledged, the next `/register` recovers the completed result
-from the iteration directory instead of marking it `abandoned`.
+See [docs/session-layout.md](docs/session-layout.md) for the full session file
+contract.
 
-See [docs/http-contract.md](docs/http-contract.md) for the exact JSON payloads.
+## Control and Completion
 
-## Session Continuity
-
-Every `TeamHarness.run()` call is fresh. Continuity comes from:
-
-- git state in the target repo
-- `.loopy_loop/sessions/<session_id>/...` artifacts
-- the coordinator state in `.loopy_loop/sessions/<session_id>/state.json`
-
-`team-harness` outputs are routed into the active loopy-loop session under
-`.loopy_loop/sessions/<session_id>/harness_outputs/<NNNN>_<workflow_id>/<team_harness_run_id>/`.
-
-Workflow prompts receive session-scoped paths for reusable project state and
-eval definitions:
-
-- `.loopy_loop/sessions/<session_id>/project_state/`
-- `.loopy_loop/sessions/<session_id>/eval_checks/`
-- `.loopy_loop/sessions/<session_id>/goal.md`
-- `.loopy_loop/sessions/<session_id>/updates_from_user.md`
-- `.loopy_loop/sessions/<session_id>/child_requests/`
-- `.loopy_loop/sessions/<session_id>/control.json`
-- `.loopy_loop/sessions/<session_id>/project_state/finished.md`
-- `.loopy_loop/sessions/<session_id>/harness_outputs/`
-
-These directories are workflow-owned. The coordinator only owns
-`.loopy_loop/sessions/<session_id>/state.json` and iteration dispatch state.
-
-Each session's `goal.md` is the source of truth for the target, constraints,
-and completion intent. For top-level sessions it is copied from `goal_file` or
-the `--goal-file` CLI override. Workflow state should not copy or restate that
-goal.
-`project_state/README.md` should explain state ownership: `memory.md` is
-essential durable facts only, `finished.md` is outer-owned accepted completions
-only, `eval_results.md` owns eval detail, and `current_state.md` carries live
-status, the latest eval headline, and the next action.
-
-Write runtime requests for the outer loop into `updates_from_user.md`. The outer
-workflow should treat non-empty content as highest-priority planning input,
-reflect it into `project_state/`, and then clear the file. Verified completed
-work belongs in `project_state/finished.md`; `what_we_have.md` should remain the
-concise current capability summary.
-
-Eval workflows should run session checks with `--output-dir` pointing at
-`.loopy_loop/sessions/<session_id>/eval_results/`. Raw eval-banana reports stay
-there; `project_state/eval_results.md` should summarize and link the latest
-reports instead of copying them. `project_state/current_state.md` should only
-carry the latest eval headline and the next action.
-
-For implementation work that changes repo files, the default delivery path is a
-branch, PR, passing checks, and merge. Multi-repo work should create and merge
-one PR per changed repo when possible. Tasks should opt out only when they are
-session-state-only, eval-only, research-only, planning-only, or the repo has no
-usable remote or auth. `project_state/finished.md` should record delivery
-evidence for each changed repo: repo, branch, PR URL, merge status, merge
-commit, and checks/CI status. If PR creation or merge is blocked, record the
-exact blocker and remaining action in `project_state/current_state.md`.
-
-## Control Files
-
-`control.json` is the session-scoped workflow stop switch:
+`control.json` is the session-scoped stop switch. It starts as:
 
 ```json
 {
@@ -329,7 +338,7 @@ exact blocker and remaining action in `project_state/current_state.md`.
 }
 ```
 
-Workflows leave it alone while the loop should continue. To stop successfully:
+To stop successfully, a workflow writes:
 
 ```json
 {
@@ -351,18 +360,106 @@ To stop because the loop cannot continue:
 }
 ```
 
-`goal_check.json` is a per-iteration eval artifact for the reserved
-`goal_check` workflow or any workflow with `emits_goal_check=true`:
-
-```text
-.loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>/goal_check.json
-```
+`goal_check.json` is a per-iteration eval artifact:
 
 ```json
 {"goal_met": false, "reason": "docs still missing", "schema_version": 1}
 ```
 
-If `goal_check.json` is missing or invalid repeatedly, the coordinator stops
-with `stop_reason="goal_check_broken"` after the configured failure cap. A
-valid `goal_check.json` does not stop the loop by itself; stopping is controlled
-by session `control.json`.
+A valid `goal_check.json` does not stop the loop by itself. It is evidence.
+Stopping is controlled by session `control.json`. If goal-check output is
+missing or invalid repeatedly, the coordinator stops with
+`stop_reason="goal_check_broken"` after the configured failure cap.
+
+## Workflow Sets and Child Sessions
+
+Workflow sets are mandatory. Even a single-loop repo uses:
+
+```text
+.loopy_loop/workflow_sets/main/workflows/...
+```
+
+The older `.loopy_loop/workflows/...` layout is not loaded.
+
+A workflow can request one sequential child session by writing a JSON file under
+the active session's `child_requests/` directory:
+
+```json
+{
+  "workflow_set": "pm_planner_dispatcher",
+  "goal": "Implement the selected planner item.",
+  "schema_version": 1
+}
+```
+
+The coordinator creates the child session under the parent session's
+`children/` directory, copies the request goal into the child `goal.md`, runs
+the requested workflow set, and resumes the parent after the child reaches a
+terminal state. v1 is depth-first and single-child-at-a-time.
+
+The packaged `pm_planner_dispatcher` workflow set uses this contract for PM
+orchestration:
+
+- `planner` maintains PM state, selects one work item, and reviews terminal
+  child-session evidence.
+- `dispatcher` writes one child request for the selected work item or imports
+  terminal child evidence back into PM state.
+
+## HTTP Contract
+
+The coordinator exposes exactly two endpoints:
+
+- `POST /register`
+- `POST /finished`
+
+Both return a `TaskResponse` with `action` equal to `"run"` or `"stop"`.
+
+A `run` response carries `workflow_set`, `workflow_id`, `session_id`,
+`iteration`, and a config snapshot. A `stop` response carries `stop_reason`.
+
+If `/finished` receives a stale response for a task that is no longer current,
+the coordinator does not mutate state. If a worker exits after writing
+`result.json` but before `/finished` is acknowledged, the next `/register`
+recovers the completed result from the iteration directory instead of marking
+the task abandoned.
+
+See [docs/http-contract.md](docs/http-contract.md) for exact JSON payloads.
+
+## CLI Reference
+
+```bash
+loopy init [--template default|inner_outer_eval|pm_planner_dispatcher]
+```
+
+Scaffolds loopy-loop files. The default template creates only the reserved
+`goal_check` workflow. `inner_outer_eval` creates the recommended outer/inner/eval
+workflow set. `pm_planner_dispatcher` creates planner/dispatcher workflows for
+child-session orchestration.
+
+```bash
+loopy coordinator --host 0.0.0.0 --port 8080 [--resume] [--workflow-set NAME] [--goal-file PATH]
+```
+
+Runs the coordinator. `--workflow-set` and `--goal-file` override the root
+config for the new session. `--resume` reuses a non-terminal latest session.
+
+```bash
+loopy worker --coordinator http://127.0.0.1:8080
+```
+
+Runs a blocking worker until the coordinator returns `action: "stop"`.
+
+```bash
+loopy status
+loopy stop
+```
+
+`status` prints the latest session state. `stop` sets `stop_requested=true` in
+the latest session-local state.
+
+## Related Projects
+
+- [`team-harness`](https://github.com/writeitai/team-harness): the model and
+  agent-CLI orchestration layer used by loopy-loop workers.
+- [`eval-banana`](https://github.com/writeitai/eval-banana): a lightweight YAML
+  evaluation framework used by the packaged eval workflows.
