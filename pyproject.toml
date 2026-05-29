@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "loopy-loop"
-version = "0.1.0"
+version = "0.2.0"
 description = "A repo-local automation loop for AI agents built on team-harness."
 readme = "README.md"
 requires-python = ">=3.12"
