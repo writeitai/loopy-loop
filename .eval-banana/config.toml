@@ -27,7 +27,7 @@ agent = "codex"
 
 # Override the agent's default model. Format is agent-specific.
 # Env: EVAL_BANANA_HARNESS_MODEL
-model = "gpt-5.4"
+model = "gpt-5.5"
 
 # Agent-specific reasoning-effort level. Common values: "low", "medium", "high".
 # Not all agents honor this. Env: EVAL_BANANA_HARNESS_REASONING_EFFORT
