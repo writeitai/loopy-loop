@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Improve README onboarding, install, initialization, configuration, and logging docs.
+- Update package and skill descriptions to avoid unclear repository-scope jargon.
+
 ## 0.2.0 (breaking)
 
 **Breaking API change — drop leases, polling, and worker identity.**
