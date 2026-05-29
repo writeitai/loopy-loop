@@ -1,9 +1,0 @@
-enabled: true
-run_every: 1
-must_follow: null
-not_before_iteration: 0
-description: |
-  Update PLAN.md with the next 3-5 small, testable tasks toward the game goal.
-  This workflow never writes code; it only produces/updates the plan. It should
-  always be the first workflow in a fresh rotation so execution has something
-  concrete to pick up.
