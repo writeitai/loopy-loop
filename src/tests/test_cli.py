@@ -20,6 +20,23 @@ def test_init_scaffolds_expected_files(repo_root: Any, monkeypatch: Any) -> None
     assert repo_root.joinpath(
         ".loopy_loop/workflow_sets/main/workflows/goal_check/prompt.txt"
     ).exists()
+    root_config = repo_root.joinpath("loopy_loop_config.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        """team_harness_provider: "codex"
+team_harness_model: "gpt-5.5"
+team_harness_agents:
+  - "codex"
+  - "claude"
+  - "gemini"
+team_harness_agent_models:
+  codex: "gpt-5.5"
+  claude: "claude-opus-4-8"
+  gemini: "gemini-3.5-flash"
+"""
+        in root_config
+    )
 
 
 def test_init_is_idempotent(repo_root: Any, monkeypatch: Any) -> None:
@@ -99,6 +116,9 @@ def test_init_inner_outer_eval_template_scaffolds_expected_files(
     ).exists()
     assert "You are the outer loop for this loopy-loop session." in repo_root.joinpath(
         ".loopy_loop/workflow_sets/inner_outer_eval/workflows/outer/prompt.txt"
+    ).read_text(encoding="utf-8")
+    assert 'gemini: "gemini-3.5-flash"' in repo_root.joinpath(
+        "loopy_loop_config.yaml"
     ).read_text(encoding="utf-8")
 
 

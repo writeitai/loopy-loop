@@ -10,8 +10,8 @@ team_harness_agents:
   - "gemini"
 team_harness_agent_models:
   codex: "gpt-5.5"
-  claude: "claude-opus-4-7"
-  gemini: "gemini-3-flash"
+  claude: "claude-opus-4-8"
+  gemini: "gemini-3.5-flash"
 team_harness_agent_reasoning_efforts:
   codex: "high"
 # Optional coordinator retry controls. Omit to use team-harness defaults.
