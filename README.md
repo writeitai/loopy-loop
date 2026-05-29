@@ -1,6 +1,6 @@
 # loopy-loop
 
-`loopy-loop` is a repo-local automation loop for long-running AI agent work.
+`loopy-loop` runs long-running AI agent workflows inside your repository.
 It turns a goal file in your repository into an inspectable sequence of agent
 iterations: plan, implement, evaluate, record evidence, and continue until the
 goal is met or the loop hits a terminal blocker.

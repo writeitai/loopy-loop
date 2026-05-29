@@ -1,6 +1,6 @@
 ---
 name: loopy-loop
-description: Set up and run loopy-loop, a repo-local automation loop that drives AI agents toward a goal across many iterations via a FastAPI coordinator and one or more workers. Use this skill when the user wants to install loopy-loop in a target repo, scaffold its config, define workflows, configure workflow scheduling/cadence, use session-scoped project_state or eval checks, or operate the coordinator/worker pair (start, monitor, stop, resume).
+description: Set up and run loopy-loop, an automation loop inside a repository that drives AI agents toward a goal across many iterations via a FastAPI coordinator and one or more workers. Use this skill when the user wants to install loopy-loop in a target repo, scaffold its config, define workflows, configure workflow scheduling/cadence, use session-scoped project_state or eval checks, or operate the coordinator/worker pair (start, monitor, stop, resume).
 ---
 
 # loopy-loop
@@ -22,7 +22,7 @@ Use this skill when the user asks to:
 
 ## Install
 
-For end-user / repo-local use, install as a tool:
+For end-user use in a target repository, install as a tool:
 
 ```bash
 uv tool install loopy-loop
