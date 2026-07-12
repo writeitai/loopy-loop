@@ -58,42 +58,46 @@ is active."** For a double loop used from day one, this is the first thing to fi
 **Effort.** M–L. **Status.** Proposed — **highest priority** given the double-loop
 decision.
 
-### P0.2 — First-class human-in-the-loop pause state
+### P0.2 — Keep the last-resort human escape hatch; do NOT build a preferred human-gate
 
-**What.** A non-terminal `paused` / `waiting_for_human` status, plus typed
-`gate_request.json` and `external_action_request.json` artifacts the coordinator
-surfaces and a human answers before `--resume`.
+**Design stance.** The goal is **full autonomy**. Human involvement is a *last
+resort*, not a step in the normal flow. An earlier draft of this doc proposed a
+first-class, resumable "pause and wait for a human to answer a gate" state; that is
+**rejected** — it promotes human involvement from last-resort to a preferred path,
+which is the opposite of the goal.
 
-**Why.** A long-horizon loop repeatedly hits decisions it must not make: architecture
-choices, model selection, provisioning billable infra, anything destructive. Today
-the loop can only *fail* (`control.json` → `unresolvable_error`) or *guess*. Encoding
-a normal governance checkpoint as an error is wrong — it makes a healthy pause look
-like a failed session, and it is not cleanly resumable. A large multi-phase target
-typically has an explicit register of decision gates; without this state the planner
-will stall or hallucinate a decision.
+**What already exists (and is enough).** The escape hatch the autonomy model needs is
+already wired end to end:
+- `ControlSignal.stop_reason` is `Literal["goal_met", "unresolvable_error"]`
+  (`models.py`).
+- A workflow writes `control.json` with `stop_reason: "unresolvable_error"` →
+  `_apply_session_control` sets the flag (`coordinator_app.py`) →
+  `_apply_stop_precedence` stops the loop as terminal.
+- The stock planner prompt already instructs it: *"If no useful work remains and the
+  blocker is genuinely terminal, update the Session control path with stop_reason
+  `unresolvable_error` and record the exact blocker in current_state.md."*
 
-**Sketch.**
-- `LoopState.status` gains `paused`; `stop_reason`/control semantics gain
-  `awaiting_human` as a **non-terminal** halt (resumable, not archived).
-- A workflow writes `gate_request.json`:
-  ```json
-  {
-    "schema_version": 1,
-    "gate_id": "example-decision",
-    "blocks": ["WP-1.3"],
-    "question": "Which option is approved for the pilot?",
-    "options": ["..."],
-    "recommendation": "...",
-    "evidence_paths": ["..."],
-    "requested_at": "..."
-  }
-  ```
-- `external_action_request.json` gates billable/destructive operations (provision a
-  DB, spend money, modify IAM) behind explicit human approval.
-- `loopy status` shows open gates; the human answers into `updates_from_user.md` /
-  a decisions record, then `--resume` continues.
+So the loop can already run unattended and, only when genuinely stuck, stop and say
+"I can't finish this without a human." No new state, no `gate_request.json`, no
+resume-after-human flow, no external-action approval gate.
 
-**Effort.** M. **Status.** Proposed — pairs with P0.1 as the double-loop enabler.
+**The only work worth doing here (small, prompt-level, low priority):**
+- **Make it a genuine last resort in prompt guidance.** Ensure workflow prompts try
+  hard before giving up — exhaust re-scoping, retrying with a better child goal, and
+  routing around the blocker — so `unresolvable_error` fires rarely and only when
+  truly unavoidable. This is prompt tuning, not code.
+- **Make the give-up legible.** When it does stop, the blocker report a human reads
+  should be clear and specific (the exact decision or capability that was missing, and
+  what was tried). Today that lives in `current_state.md` / the control `reason`; keep
+  it high-quality. A structured blocker summary is a nice-to-have, not required.
+- **Optional, probably unnecessary:** distinguish a clean "gave up, a human decision
+  is required" from a crash-style `failed`. Both are terminal; the single
+  `unresolvable_error` reason with a good message is likely sufficient. Only split it
+  if operational reports actually need to tell the two apart.
+
+**Effort.** S (prompt guidance only) — or none. **Status.** Reframed: **do not build
+the pause/resume gate.** The autonomy escape hatch already exists; only optional
+prompt/report polish remains.
 
 ### P0.3 — Per-child budgets
 
@@ -300,8 +304,9 @@ double-loop runs this is a real safety and ergonomics gap.
 
 ## Suggested sequencing
 
-1. **P0.1 + P0.2 + P2.2 together** — the session-stack/state-machine hardening,
-   the pause state, and the `_advance()` refactor are one coherent piece of work.
+1. **P0.1 + P2.2 together** — the session-stack/state-machine hardening and the
+   `_advance()` refactor are one coherent piece of work. (P0.2 needs no code — the
+   autonomy escape hatch already exists; at most it's prompt polish.)
 2. **P0.3 + P0.4** — child budgets and a runnable PM template; the double loop is now
    safe and executable end to end.
 3. **P1.1** — events/cost ledger + `status --watch`, so double-loop runs are legible.
@@ -309,5 +314,7 @@ double-loop runs this is a real safety and ergonomics gap.
 5. **P2.1, P2.3, P2.4** — profiles/pins, failure taxonomy, operator UX (rolling).
 
 After (1)–(3), the double loop is ready to drive a large, multi-phase target as a
-sequence of narrow, human-gated, deterministically-backstopped work packages — which
-is the subject of a separate target-execution design, not this doc.
+sequence of narrow, deterministically-backstopped work packages that runs
+unattended — falling back to the `unresolvable_error` escape hatch only when a
+blocker is genuinely unresolvable without a human. That target-execution design is
+the subject of a separate doc, not this one.
