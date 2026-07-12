@@ -1,0 +1,191 @@
+export const metadata = {
+  title: "Session Layout",
+  description: "A reference for the loopy-loop session directory: the session id format, the session-level files, and the per-iteration files the loop writes.",
+};
+
+# Session Layout
+
+loopy-loop keeps its state on disk, not inside a chat transcript. One session
+directory is created per fresh coordinator run and reused for every iteration in
+that session. Everything you need to audit, pause, or resume a run lives under that
+directory. This page is the reference for its shape: the session id format, the
+session-level files, and the per-iteration files.
+
+## The session id
+
+New session ids follow this format:
+
+```text
+<YYYYMMDD>_<HHMMSS>_<goal_hash>_<random>
+```
+
+For example, `20260419_143022_71393ee22450_ab12cd34`. The leading UTC timestamp
+means session directories sort chronologically by name. The `goal_hash` is derived
+deterministically from the goal text, so runs against the same goal are easy to
+spot and compare, and the trailing random suffix keeps ids unique.
+
+## Directory tree
+
+A session directory looks like this:
+
+```text
+.loopy_loop/
+└── sessions/
+    └── <session_id>/
+        ├── session.json
+        ├── events.jsonl
+        ├── control.json
+        ├── updates_from_user.md
+        ├── project_state/
+        │   └── finished.md
+        ├── eval_checks/
+        ├── eval_results/
+        │   └── <eval_banana_run_id>/
+        │       ├── report.json
+        │       ├── report.md
+        │       └── checks/
+        ├── harness_outputs/
+        │   └── 0001_planner/
+        │       └── <team_harness_run_id>/
+        └── iterations/
+            ├── 0001_planner/
+            │   ├── prompt.txt
+            │   ├── result.json
+            │   ├── result_text.txt
+            │   ├── harness_run_id.txt
+            │   └── pending_finished_request.json
+            └── 0002_goal_check/
+                ├── prompt.txt
+                ├── result.json
+                ├── result_text.txt
+                ├── harness_run_id.txt
+                └── goal_check.json
+```
+
+Sessions that spawn child work also grow a `child_requests/` inbox and a
+`children/` directory; those are covered on [Child Sessions](/docs/child-sessions).
+
+## Session files
+
+**`session.json`** — Session metadata, written once when the directory is created.
+It contains `session_id`, `goal_hash`, and `created_at`.
+
+**`events.jsonl`** — A reserved append-only event log for diagnostics, created at
+session start in v1.
+
+**`control.json`** — The session-scoped workflow stop switch, created with
+`state: "running"` when the session starts. Workflows update it only when they want
+the loop to stop, and the coordinator reads it only from the session directory. It
+is the single gate that ends a run — see [Success & Control](/docs/success-and-control)
+for the full contract and stop reasons.
+
+**`updates_from_user.md`** — A human-writable inbox for requests that arrive after
+the session starts. The outer workflow treats non-empty content as highest-priority
+planning input, and clears the file only after reflecting the request into
+`project_state/`.
+
+**`project_state/`** — Optional workflow-owned durable markdown state for reusable
+workflows. `loopy_loop_goal.txt` remains the source of truth for the target,
+constraints, and completion intent; do not copy or restate the goal into
+`project_state/`. Common files include `README.md`, `memory.md`,
+`current_state.md`, `what_we_have.md`, `decisions.md`, `eval_results.md`,
+`finished.md`, and `what_we_should_do/plan.md`. The `README.md` should document
+ownership rules — `memory.md` for essential durable facts only, `finished.md` for
+outer-owned accepted completions only, `eval_results.md` for eval detail, and
+`current_state.md` for live status, the latest eval headline, and the next action.
+The coordinator does not parse any of these files; it only provides the paths.
+
+**`project_state/finished.md`** — An append-only ledger for outer-verified
+completed work. Each entry should summarize the completed task and link to the
+relevant iteration and harness output files. For implementation work, entries
+should include delivery evidence for each changed repo: repo path or remote,
+branch, PR URL, merge status, merge commit when merged, and checks/CI status. The
+default implementation delivery is branch + PR + passing checks + merge, unless the
+task is session-state-only, eval-only, research-only, planning-only, or has no
+usable remote/auth.
+
+**`eval_checks/`** — Optional workflow-owned eval-banana checks for this session. A
+workflow can run just these checks and write the results into the session:
+
+```bash
+eval-banana run \
+  --cwd . \
+  --check-dir .loopy_loop/sessions/<session_id>/eval_checks \
+  --output-dir .loopy_loop/sessions/<session_id>/eval_results
+```
+
+**`eval_results/`** — Optional workflow-owned eval-banana run output. Each
+`eval-banana run --output-dir .../eval_results` creates a child
+`<eval_banana_run_id>/` directory containing `report.json`, `report.md`, and
+per-check artifacts. `project_state/eval_results.md` should summarize and link
+these reports rather than copy the raw output, and `project_state/current_state.md`
+should carry only the latest eval headline and the next action.
+
+**`harness_outputs/`** — The root for team-harness coordinator and worker
+artifacts. Each iteration gets its own output root, keyed by iteration number and
+workflow id:
+
+```text
+.loopy_loop/sessions/<session_id>/harness_outputs/<NNNN>_<workflow_id>/
+```
+
+team-harness then creates a child directory named with its own run id:
+
+```text
+.loopy_loop/sessions/<session_id>/harness_outputs/<NNNN>_<workflow_id>/<team_harness_run_id>/
+```
+
+## Iteration files
+
+Each iteration gets its own directory under `iterations/`, named
+`<NNNN>_<workflow_id>` (for example, `0001_planner`). It holds the record of that
+single assignment.
+
+**`prompt.txt`** — The rendered assignment prompt sent to
+`TeamHarness.run(task=...)`. This is exactly what the workflow was asked to do,
+with all session paths already substituted in.
+
+**`result.json`** — loopy-loop's normalized result payload for the iteration:
+
+```json
+{
+  "success": true,
+  "text": "final response",
+  "error": null,
+  "harness_run_id": "run-123",
+  "harness_output_dir": ".loopy_loop/sessions/<session_id>/harness_outputs/0001_planner/run-123"
+}
+```
+
+Remember that `success` here means the harness ran, not that the work is good — see
+[Success & Control](/docs/success-and-control).
+
+**`result_text.txt`** — A plain-text copy of the result text, or an empty string on
+failure.
+
+**`harness_run_id.txt`** — The team-harness run id, which links this iteration to
+its output under `harness_outputs/`. Empty when a failure occurred before a run id
+existed.
+
+**`pending_finished_request.json`** — A durable handoff record written after
+`result.json` and before the worker calls `/finished`. It is removed once
+`/finished` is acknowledged or once `/register` recovers it. If a worker exits in
+that handoff window, the next `/register` uses this file to record the completed
+task instead of marking it `abandoned`; if it is missing but `result.json` exists
+for the active task, the coordinator reconstructs the finished request from
+`result.json`. See [HTTP Contract](/docs/http-contract) for the recovery rules.
+
+**`goal_check.json`** — A per-iteration eval artifact, present only for the
+reserved `goal_check` workflow or a workflow configured with
+`emits_goal_check: true`. Its schema in v1:
+
+```json
+{
+  "goal_met": false,
+  "reason": "CTA exists, but deployment docs are still missing.",
+  "schema_version": 1
+}
+```
+
+A valid `goal_check.json` is evidence, not a stop switch. A workflow that wants to
+stop the loop must update the session `control.json`.

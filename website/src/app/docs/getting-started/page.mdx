@@ -1,0 +1,122 @@
+export const metadata = {
+  title: "Getting Started",
+  description:
+    "Install loopy-loop, scaffold a target repository, write a goal, and run your first coordinator and worker.",
+};
+
+# Getting Started
+
+This page takes you from an empty terminal to a running loop: install the CLI, scaffold a target repository, write the goal, and start the coordinator and worker. It assumes you already have a git repository you want agents to work on.
+
+## Install the CLI
+
+Install from the official [PyPI package](https://pypi.org/project/loopy-loop/). With [`uv`](https://docs.astral.sh/uv/), install it as a command-line tool:
+
+```bash
+uv tool install loopy-loop
+```
+
+Or with `pip`:
+
+```bash
+pip install loopy-loop
+```
+
+The CLI exposes two equivalent commands, `loopy` and `loopy-loop`. This documentation uses `loopy` throughout.
+
+If you are working inside a checkout of the loopy-loop repository itself, install the development dependencies instead:
+
+```bash
+uv sync --extra dev
+```
+
+## Install the Agent Skill
+
+loopy-loop also ships an [Agent Skill](https://support.claude.com/en/articles/12512176-what-are-skills) that teaches Claude Code, Codex, and compatible agents how to set up and run loopy-loop in a target repo. Install it with:
+
+```bash
+npx skills add https://github.com/writeitai/loopy-loop --skill loopy-loop
+```
+
+This is optional — it helps an agent operate loopy-loop for you, but you can run every command below by hand.
+
+## Scaffold a target repo
+
+Run `loopy init` from the root of the repository you want agents to work on. The `inner_outer_eval` template is the recommended starting point:
+
+```bash
+loopy init --template inner_outer_eval
+```
+
+This creates a small set of files and leaves anything that already exists untouched (`loopy init` is idempotent):
+
+- `loopy_loop_config.yaml` — the root config.
+- `loopy_loop_goal.txt` — the goal file.
+- `.loopy_loop/workflow_sets/inner_outer_eval/workflows/` — the `outer`, `inner`, `eval_reviewer`, and `eval_runner` workflows.
+- a `.gitignore` entry for `.loopy_loop/sessions/`.
+
+Workflow definitions are part of your repo and should usually be committed. Session directories are runtime output and are ignored by default. See [Workflows](/docs/workflows) for the other templates (`default` and `pm_planner_dispatcher`) and when to pick each.
+
+## Write the goal
+
+The loop goal lives in `loopy_loop_goal.txt`. Replace the scaffolded example with the real target, including constraints and observable completion criteria. Keep it specific enough that a reviewer or eval workflow can decide whether the loop is done.
+
+```text
+Implement passwordless email login.
+
+Completion criteria:
+- Users can request a one-time login link from the sign-in page.
+- The link expires after 15 minutes and cannot be reused.
+- Existing password login keeps working.
+- Tests cover token expiry, token reuse, and successful login.
+- README documents required environment variables.
+```
+
+The goal must live in a file — inline `goal:` values in `loopy_loop_config.yaml` are rejected. For a one-off override, start the coordinator with `--goal-file PATH`; that file is copied into the session as `goal.md`.
+
+## Run the loop
+
+loopy-loop runs as two processes: a coordinator that owns the loop state and one or more workers that execute assignments. Start them in separate terminals.
+
+The default templates use `team_harness_provider: "codex"`, which relies on your local Codex authentication. If you switch to an OpenAI-compatible provider, export the environment variable named in `team_harness_api_key_env` (usually `OPENROUTER_API_KEY`) in **both** the coordinator and worker shells.
+
+Start the coordinator:
+
+```bash
+loopy coordinator --host 127.0.0.1 --port 8080
+```
+
+Start a worker in another terminal, pointing it at the coordinator:
+
+```bash
+loopy worker --coordinator http://127.0.0.1:8080
+```
+
+The worker asks the coordinator for a task, runs it through `team-harness`, reports the result, and repeats until the coordinator tells it to stop. Multiple workers can share one coordinator.
+
+## Monitor, stop, and resume
+
+From the repo root, check on the run or ask it to wind down:
+
+```bash
+loopy status
+loopy stop
+```
+
+`loopy status` prints the latest session id, iteration count, current task, and stop reason. `loopy stop` requests a graceful stop; workers exit after their next check-in.
+
+If the coordinator process dies while a session is still running, the state file stays marked `running`. Reattach to it with `--resume`:
+
+```bash
+loopy coordinator --host 127.0.0.1 --port 8080 --resume
+```
+
+Without `--resume`, starting a coordinator against a still-running session is intentionally fatal, so you never accidentally run two coordinators over the same state.
+
+## Next steps
+
+- [Concepts](/docs/concepts) — understand the coordinator/worker split and the iteration loop before you customize anything.
+- [Configuration](/docs/configuration) — tune models, providers, and turn limits in `loopy_loop_config.yaml`.
+- [Workflows](/docs/workflows) — edit workflow prompts and scheduling to shape how the loop behaves.
+- [Success & Control](/docs/success-and-control) — learn exactly how the loop decides it is finished.
+- [CLI Reference](/docs/cli-reference) and [Troubleshooting](/docs/troubleshooting) — the full command surface and common failure modes.

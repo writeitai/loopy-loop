@@ -1,0 +1,104 @@
+export const metadata = {
+  title: "CLI Reference",
+  description:
+    "Every loopy-loop command: init, coordinator, worker, status, and stop, with their flags and usage examples.",
+};
+
+# CLI Reference
+
+loopy-loop is driven by a single command-line tool with five subcommands: `init` scaffolds a repo, `coordinator` and `worker` run the loop, and `status` and `stop` control it. Every command operates on the current working directory, so run them from the root of your target repository.
+
+## Command aliases
+
+The package installs two entry points that behave identically: `loopy` and `loopy-loop`. This reference uses `loopy`; use whichever reads better in your shell.
+
+```bash
+loopy status
+loopy-loop status   # exactly the same command
+```
+
+## loopy init
+
+Scaffolds loopy-loop's files into the current repository. It is idempotent: it creates any missing files, leaves existing files untouched, and always ensures `.loopy_loop/sessions/` is in `.gitignore`. When it finishes, it prints the list of files it created (or reports that the repo is already initialized).
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--template` | `default` | Which workflow template to scaffold. One of `default`, `inner_outer_eval`, or `pm_planner_dispatcher`. |
+
+The `default` template creates only the reserved `goal_check` workflow in a set named `main`. `inner_outer_eval` creates the recommended `outer`/`inner`/`eval_reviewer`/`eval_runner` set. `pm_planner_dispatcher` creates `planner`/`dispatcher` workflows for child-session orchestration. See [Workflows](/docs/workflows) for how to choose.
+
+```bash
+loopy init --template inner_outer_eval
+```
+
+## loopy coordinator
+
+Runs the coordinator server — the process that owns loop state and dispatches work. It loads `loopy_loop_config.yaml`, runs a startup preflight, resolves the goal, creates (or resumes) a session, and serves exactly two endpoints, `/register` and `/finished`. Leave it running while the loop is active.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--host` | `0.0.0.0` | Interface to bind. Use `127.0.0.1` to keep it local. |
+| `--port` | `8080` | Port to listen on. |
+| `--resume` | off | Reattach to a non-terminal existing session instead of starting fresh. Required when a previous coordinator was killed without reaching a terminal state. |
+| `--workflow-set` | from config | Run this workflow set for the new session instead of the `workflow_set` in `loopy_loop_config.yaml`. |
+| `--goal-file` | from config | Copy this goal file into the new session as `goal.md`, overriding the configured `goal_file`. |
+
+```bash
+loopy coordinator --host 127.0.0.1 --port 8080
+```
+
+Reattach to a session whose coordinator was killed:
+
+```bash
+loopy coordinator --host 127.0.0.1 --port 8080 --resume
+```
+
+Starting a coordinator against a still-running session without `--resume` is intentionally fatal, so two coordinators never share one state file. See the [HTTP Contract](/docs/http-contract) for the endpoint payloads.
+
+## loopy worker
+
+Runs a blocking worker that executes assignments through `team-harness`. It calls `/register` once for its first task, then loops — running each workflow and reporting via `/finished` — until the coordinator returns a stop response. You can run several workers against one coordinator.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--coordinator` | required | Base URL of the coordinator, for example `http://127.0.0.1:8080`. |
+
+```bash
+loopy worker --coordinator http://127.0.0.1:8080
+```
+
+The worker reaches the model layer too, so if your provider needs an API key, export the variable named by `team_harness_api_key_env` in the worker's shell as well as the coordinator's. See [Configuration](/docs/configuration).
+
+## loopy status
+
+Prints the state of the latest session: overall status, session id, completed iteration count, the current task (workflow id, iteration, session, and start time), and the stop reason if any. If there is no state yet, it says so.
+
+```bash
+loopy status
+```
+
+```text
+status: running
+session: 20260712T193000Z-a1b2c3d4e5f6
+iteration_count: 12
+current_task: inner (iteration 12, session 20260712T193000Z-a1b2c3d4e5f6, started 2026-07-12T19:41:07Z)
+stop_reason: none
+```
+
+`status` takes no options.
+
+## loopy stop
+
+Requests a graceful stop by setting `stop_requested=true` in the latest session-local state. Running workers exit after their next check-in with the coordinator; the coordinator brings the session to a terminal state. It prints `stop requested` on success, and errors if there is no state to stop.
+
+```bash
+loopy stop
+```
+
+`stop` takes no options. For how a *workflow* stops the loop on its own — versus this operator-initiated stop — see [Success & Control](/docs/success-and-control).
+
+## Where to go next
+
+- [Getting Started](/docs/getting-started) — these commands in a full first-run walkthrough.
+- [Configuration](/docs/configuration) — what `coordinator` reads at startup.
+- [Troubleshooting](/docs/troubleshooting) — resolving preflight, resume, and API-key errors.

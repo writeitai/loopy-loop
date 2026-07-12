@@ -1,0 +1,172 @@
+export const metadata = {
+  title: "Success & Control",
+  description: "Why iteration success means the harness ran, not that the work is good, and why control.json is the only switch that stops the loop.",
+};
+
+# Success & Control
+
+This is the most important mental model in loopy-loop, and the one most likely to
+trip you up if you skim the code. An iteration's `success` flag does **not** mean
+"the work is good." It means "the assignment ran." Whether the work is actually
+good is decided somewhere else entirely, by artifacts the workflow writes into the
+session. This page explains that split, enumerates the ways a loop can stop, and
+explains why the design deliberately keeps these two ideas apart.
+
+## Success means "the assignment ran"
+
+Every iteration ends with a normalized `result.json` that carries a boolean
+`success`. It is tempting to read that field as a verdict on the task. It is not.
+
+`success` is `true` whenever the underlying [`team-harness`](https://github.com/writeitai/team-harness)
+run returns normally. It is `false` only when the harness itself raises — a
+configuration error, a `TeamHarnessError`, or an unexpected exception. Per-worker
+exit codes and statuses are intentionally **not** consulted when deciding iteration
+success.
+
+```json
+{
+  "success": true,
+  "text": "final response",
+  "error": null,
+  "harness_run_id": "run-123",
+  "harness_output_dir": ".loopy_loop/sessions/<session_id>/harness_outputs/0001_planner/run-123"
+}
+```
+
+A `success: true` here tells you the assignment completed a full harness run. It
+tells you nothing about whether the login page works, the tests pass, or the docs
+got written.
+
+### Why not trust worker exit codes?
+
+team-harness's coordinator is an orchestrator, not a build system. It can
+legitimately return a normal result *after* a worker has failed: it might
+synthesize a final answer, decide it already has enough information, or route
+around a dead worker. So worker exit codes are a noisy proxy for "did the
+assignment succeed":
+
+- A non-zero worker can accompany a perfectly good outcome.
+- An all-green set of workers can accompany a useless one.
+
+Mapping those signals to a single boolean would manufacture false precision.
+loopy-loop instead draws the line at the only thing it can observe reliably — *did
+the assignment run to completion without the harness itself erroring* — and pushes
+the "was it any good" question to an explicit evaluation layer. See
+[Evaluation](/docs/evaluation) for how that layer works.
+
+One consequence worth knowing: the scheduler keys workflow cadence
+(`run_every`, `must_follow`, `run_after_successes`) off this mechanical success.
+An iteration where a worker actually failed but the harness returned normally still
+advances those counters. This is an accepted, bounded inaccuracy — the worst case
+is a slightly-off cadence, never a false "goal met," because completion is gated by
+`control.json`, not by `success`.
+
+## control.json is the only stop switch
+
+There is exactly one thing that stops the loop: the session-scoped `control.json`
+file. It starts in the `running` state when the session is created:
+
+```json
+{
+  "state": "running",
+  "reason": "session active",
+  "stop_reason": null,
+  "schema_version": 1
+}
+```
+
+A workflow stops the loop by writing `state: "stopped"` with a `stop_reason`. To
+stop because the goal is genuinely met:
+
+```json
+{
+  "state": "stopped",
+  "reason": "Accepted evidence satisfies the goal.",
+  "stop_reason": "goal_met",
+  "schema_version": 1
+}
+```
+
+To stop because the loop hit a terminal blocker it cannot work around:
+
+```json
+{
+  "state": "stopped",
+  "reason": "No usable remote and the task requires a merged PR.",
+  "stop_reason": "unresolvable_error",
+  "schema_version": 1
+}
+```
+
+The coordinator reads `control.json` **only** from the session directory, and only
+after an iteration finishes. When a workflow writes those two values, it is making
+an explicit, auditable, reversible stop decision. That is the point: a human or an
+agent chose to stop, and you can see exactly why.
+
+## goal_check.json is evidence, not control
+
+The other file people expect to stop the loop is `goal_check.json`. It does not.
+
+`goal_check.json` is a per-iteration eval artifact written by the reserved
+`goal_check` workflow (or any workflow configured with `emits_goal_check: true`).
+It records whether the goal looks met, with a reason:
+
+```json
+{"goal_met": false, "reason": "CTA exists, but deployment docs are still missing.", "schema_version": 1}
+```
+
+A valid `goal_check.json` is **evidence only**. Even a `goal_met: true` does not
+stop the loop by itself. Something still has to make the explicit stop decision by
+updating `control.json`. In the packaged `inner_outer_eval` set, that is the job of
+the workflow that reviews the evidence. Keeping evidence (`goal_check.json`) and
+control (`control.json`) separate means the two can never be silently conflated:
+producing evidence is not the same as deciding to stop.
+
+## The full set of stop reasons
+
+When the loop stops, the coordinator records a `stop_reason`. Two of these are
+written by a workflow into `control.json`; the rest are derived by the coordinator
+itself.
+
+| `stop_reason` | Source | Meaning |
+|---|---|---|
+| `goal_met` | `control.json` | A workflow accepted the evidence and stopped the loop successfully. |
+| `unresolvable_error` | `control.json` | A workflow hit a terminal blocker and stopped the loop deliberately. |
+| `goal_check_broken` | Coordinator | `goal_check.json` was missing or invalid for too many iterations in a row (see below). |
+| `max_turns` | Coordinator | The completed-iteration count reached `max_turns`. |
+| `stop_requested` | Coordinator | A human ran `loopy stop`. |
+| `no_eligible_workflow` | Coordinator | No workflow was eligible to run next. |
+| `invalid_control_output` | Coordinator | `control.json` existed but could not be parsed as a valid control signal. |
+
+Only `goal_met` and `unresolvable_error` are valid values for a workflow to write
+into `control.json`. The coordinator handles the rest.
+
+### goal_check_broken
+
+Because completion ultimately rests on the eval layer, that layer has to actually
+run and produce valid output. If a `goal_check`-emitting workflow repeatedly fails
+to write a valid `goal_check.json`, the coordinator counts the consecutive
+failures. Once they reach `goal_check_consecutive_failures_cap` (default `3`), it
+stops the loop with `stop_reason: "goal_check_broken"` rather than looping
+forever on a broken evaluator. A single valid `goal_check.json` resets the counter.
+
+## Why this split exists
+
+Both halves of this page follow one principle: **do not infer semantic success
+from noisy mechanical signals; push the success and stop decisions to an explicit,
+purpose-built layer.**
+
+- Mechanical `success` is honest about what it can observe — the harness ran — and
+  nothing more.
+- `goal_check.json` records a judgment about the outcome, as evidence.
+- `control.json` is the single, explicit, auditable gate that actually stops the
+  loop.
+
+This is original design intent, not an accident to be "fixed." If you find yourself
+wanting worker exit codes to decide success, or `goal_check.json` to stop the loop,
+re-read this page first — those shortcuts reintroduce exactly the false precision
+the design avoids.
+
+For how the evidence itself is produced and judged, see
+[Evaluation](/docs/evaluation). For where every one of these files lives on disk,
+see [Session Layout](/docs/session-layout).

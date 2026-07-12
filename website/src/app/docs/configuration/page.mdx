@@ -1,0 +1,116 @@
+export const metadata = {
+  title: "Configuration",
+  description:
+    "The root loopy_loop_config.yaml: goal file, workflow set, turn limits, and every team_harness_* provider, model, agent, and retry setting.",
+};
+
+# Configuration
+
+Every loop is configured by a single root file, `loopy_loop_config.yaml`, at the top of your target repository. It names the goal file, selects a workflow set, caps how long the loop may run, and tells `team-harness` which provider, model, and agents to use. This page documents every field the coordinator reads at startup.
+
+Per-workflow scheduling lives in a separate `config.yaml` beside each workflow prompt — that is covered in [Workflows](/docs/workflows).
+
+## The root config file
+
+A typical `loopy_loop_config.yaml` looks like this:
+
+```yaml
+goal_file: loopy_loop_goal.txt
+workflow_set: inner_outer_eval
+max_turns: 160
+goal_check_consecutive_failures_cap: 3
+team_harness_provider: "codex"
+team_harness_model: "gpt-5.5"
+team_harness_agents:
+  - "codex"
+  - "claude"
+  - "gemini"
+team_harness_agent_models:
+  codex: "gpt-5.5"
+  claude: "claude-opus-4-8"
+  gemini: "gemini-3.5-flash"
+team_harness_agent_reasoning_efforts:
+  codex: "high"
+team_harness_api_base: "https://openrouter.ai/api/v1"
+team_harness_api_key_env: "OPENROUTER_API_KEY"
+```
+
+## Core fields
+
+These fields control the goal, the workflow set, and how long the loop runs.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `goal_file` | string | required | Path to the goal file, resolved relative to `loopy_loop_config.yaml`. Its contents are copied into each session as `goal.md`. |
+| `workflow_set` | string | required | The workflow set used for new sessions when the coordinator is started without an override. |
+| `max_turns` | integer | required | Maximum number of completed workflow iterations before the loop stops. |
+| `goal_check_consecutive_failures_cap` | integer | `3` | How many consecutive invalid or missing goal-check outputs are tolerated before the loop stops with `goal_check_broken`. Must be at least `1`. |
+
+The goal must live in a file. See the [Success & Control](/docs/success-and-control) page for how `max_turns` and the failure cap participate in stopping the loop.
+
+## team-harness settings
+
+Everything about *how* work is executed — which provider, coordinator model, and agent CLIs `team-harness` uses — comes from the `team_harness_*` fields. Field names are exact; a typo becomes an "unknown field" error rather than a silently ignored setting.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `team_harness_provider` | string | `"openai_compat"` | The team-harness provider name workers use. `codex` uses local Codex authentication; the shipped templates set this to `"codex"`. |
+| `team_harness_model` | string | `"gpt-5.5"` | The model name passed to team-harness for its **coordinator** model. |
+| `team_harness_agents` | list of strings | `["codex"]` | Agent names team-harness should make available as worker subprocesses, such as `codex`, `claude`, and `gemini`. |
+| `team_harness_agent_models` | map | `{}` | Per-agent default worker model overrides, keyed by agent name. |
+| `team_harness_agent_reasoning_efforts` | map | `{}` | Per-agent reasoning-effort overrides, keyed by agent name. Only agents whose templates support a reasoning-effort flag use this value. |
+| `team_harness_api_base` | string | `"https://openrouter.ai/api/v1"` | The OpenAI-compatible API base URL passed to team-harness. Normalized on load (see below). |
+| `team_harness_api_key_env` | string | `"OPENROUTER_API_KEY"` | Name of the environment variable that holds the API key. |
+| `team_harness_system_prompt_extension` | string | `""` | Extra system-prompt text appended for every harness run. The templates use this to state session-state and PR/merge policy. |
+
+### Retry controls
+
+These optional fields tune how team-harness retries transient API and network errors on its coordinator model. Leave them unset to use the installed team-harness defaults.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `team_harness_max_retries` | integer | unset | Coordinator retry budget. Must be `0` or greater. |
+| `team_harness_retry_base_delay_s` | number | unset | Base delay in seconds for retry backoff. Must be greater than `0`. |
+| `team_harness_retry_max_delay_s` | number | unset | Maximum delay in seconds for retry backoff. Must be greater than `0`, and no less than `team_harness_retry_base_delay_s`. |
+
+The `inner_outer_eval` template ships these as commented-out examples so you can see the shape before enabling them.
+
+### Optional criteria fields
+
+The config also accepts two optional list fields, `completion_criteria` and `stop_criteria`, both defaulting to an empty list. They record observable criteria for reference by your workflows; the loop's actual stop decision is driven by `control.json`, not by these lists. Most projects keep completion criteria in the goal file instead.
+
+## API base normalization
+
+loopy-loop normalizes `team_harness_api_base` on load so you can write whichever form you prefer: any trailing slash is stripped, and `/v1` is appended when it is missing. Both of these resolve to `https://openrouter.ai/api/v1`:
+
+```yaml
+team_harness_api_base: "https://openrouter.ai/api/"
+team_harness_api_base: "https://openrouter.ai/api/v1"
+```
+
+## API keys and providers
+
+Whether an API key is required depends on the provider. The `codex` provider skips the API-key check entirely and relies on local Codex authentication. For any other provider, the environment variable named by `team_harness_api_key_env` must be exported — and it must be exported in **both** the coordinator shell and every worker shell, because both processes reach the model layer.
+
+```bash
+export OPENROUTER_API_KEY=sk-...
+```
+
+If that variable is missing for a provider that needs it, the coordinator's startup preflight fails with a clear error before any session is created.
+
+## Validation rules
+
+The root config is parsed strictly, which turns silent mistakes into loud, early errors:
+
+- **Unknown keys are rejected.** Every field name above is exact — misspellings fail preflight rather than being ignored.
+- **Inline `goal` is rejected.** The goal must live in a file referenced by `goal_file`. A top-level `goal:` key is an explicit error that points you at `goal_file`.
+- **`goal_file` must resolve to a non-empty file.** It is read relative to the config file, and an empty goal is rejected.
+- **`workflow_set` must not be empty.**
+- **Agent maps require non-empty keys and values.** Empty strings in `team_harness_agent_models` or `team_harness_agent_reasoning_efforts` are rejected.
+- **Retry bounds are checked.** `team_harness_retry_max_delay_s` must be at least `team_harness_retry_base_delay_s`.
+
+## Where to go next
+
+- [Workflows](/docs/workflows) — define workflow sets and per-workflow scheduling.
+- [Getting Started](/docs/getting-started) — scaffold a config with `loopy init`.
+- [Troubleshooting](/docs/troubleshooting) — resolve preflight and API-key errors.

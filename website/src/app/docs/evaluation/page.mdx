@@ -1,0 +1,110 @@
+export const metadata = {
+  title: "Evaluation",
+  description: "How loopy-loop judges whether work is good: LLM-as-judge checks, why agents may not author deterministic checks, and where repo-owned tests fit in.",
+};
+
+# Evaluation
+
+[Success & Control](/docs/success-and-control) established that an iteration's
+`success` flag only means the harness ran — it says nothing about whether the work
+is good. This page is about the layer that answers that second question. In
+loopy-loop's packaged workflow set, evaluation is **LLM-as-judge**: a model
+evaluates the output against a described outcome, and records its verdict as
+evidence. This page explains how that works, one rule that surprises people (agents
+are forbidden from authoring deterministic checks), and exactly where the boundary
+of that rule sits.
+
+## LLM-as-judge with eval-banana
+
+The packaged `inner_outer_eval` template evaluates work using
+[`eval-banana`](https://github.com/writeitai/eval-banana) conventions. The eval
+workflows create session-scoped `harness_judge` checks — natural-language
+descriptions of what a good outcome looks like — and a later workflow runs those
+checks and writes the per-iteration `goal_check.json` artifact.
+
+Two workflows split the job:
+
+- `eval_reviewer` creates or refreshes the session-scoped eval-banana checks under
+  the session `eval_checks/` directory.
+- `eval_runner` runs those checks and writes `goal_check.json`. It is the workflow
+  configured with `emits_goal_check: true`.
+
+Checks and results live inside the session so they travel with the run:
+
+```bash
+eval-banana run \
+  --cwd . \
+  --check-dir .loopy_loop/sessions/<session_id>/eval_checks \
+  --output-dir .loopy_loop/sessions/<session_id>/eval_results
+```
+
+Remember from [Success & Control](/docs/success-and-control): a passing eval is
+evidence, not a stop switch. `goal_check.json` records the verdict; a workflow
+still has to update `control.json` to actually stop the loop.
+
+## Agents do not author deterministic checks
+
+In the stock `inner_outer_eval` template, the eval workflows may create **only**
+`harness_judge` checks that describe desired outcomes. Authoring deterministic
+checks is explicitly forbidden. The `eval_reviewer` prompt says it plainly: "Only
+create harness_judge checks"; "Do not create deterministic checks. Deterministic
+checks are forbidden."
+
+This rule comes from direct experience, not theory. When agents were allowed to
+**author** their own deterministic checks, they wrote bad ones:
+
+- Brittle string-matching that tested the surface, not the behavior.
+- Checks that tested the wrong thing entirely.
+- Checks that passed for the wrong reason.
+- Checks an agent could trivially satisfy without doing the real work.
+
+In short, letting the implementer invent its own pass/fail criteria let it game
+itself — it could quietly redefine "done" into something it had already produced.
+An LLM judge evaluating a described *outcome* removes that failure mode: the check
+states what good looks like in natural language, and the implementer cannot
+silently rewrite the target.
+
+## The boundary: invented checks vs. the repo's own tests
+
+This rule is narrower than it first sounds, and getting the boundary right matters
+when you apply loopy-loop to a real repository. Two very different things often get
+lumped together under "deterministic check":
+
+- **An agent invents a check** — the failure mode above. Correctly forbidden.
+- **Running a check the repo already owns** — `uv run pytest`, `import-linter`,
+  `alembic upgrade`, `make test`, evaluated on exit code. The agent did not invent
+  these; they are the project's own contract. Running them is deterministic, but it
+  is **not** the failure mode the rule targets.
+
+So the "deterministic forbidden" rule is correct for generic target repos, where
+the only deterministic checks available would be agent-invented ones. But for a
+repo that already owns a trustworthy contract-test suite, the right configuration
+is *both*: LLM-as-judge for the qualitative "did this achieve the outcome," **and**
+a deterministic gate that shells out to the repo's own suite as a backstop under
+the judge. That backstop does not reintroduce the agent-authoring problem, and it
+removes the single-judgment point of failure.
+
+When you want that, override the stock rule in a dedicated child workflow set
+rather than loosening the packaged template. See [Workflows](/docs/workflows) for
+how workflow sets are structured.
+
+## Choosing and trusting the judge
+
+LLM-as-judge buys resistance to self-gaming at the cost of the usual LLM
+properties: non-determinism, per-check inference cost, and the judge itself as a
+point of trust. A few guidelines follow from that:
+
+- **Judge with a different model family than the implementer.** The judge should
+  not share failure modes with the model that wrote the change. If the same family
+  implements and grades, a blind spot in one is a blind spot in both.
+- **Treat a single judge pass as evidence, not a hard gate for high-stakes stops.**
+  Keep `control.json` as the stop switch. For high-stakes goals, require repeated
+  or independent judgments, or add the repo-owned deterministic backstop described
+  above, before a terminal `goal_met`.
+- **Configure this per target repo, not globally.** When a target owns a
+  trustworthy contract suite, add the deterministic backstop; do not remove the
+  judge. When judge cost or flakiness becomes material, add repetition and
+  cross-family judging rather than abandoning the approach.
+
+For how the verdict is recorded and how the loop actually stops on it, return to
+[Success & Control](/docs/success-and-control).

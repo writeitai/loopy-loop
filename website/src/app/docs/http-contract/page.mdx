@@ -1,0 +1,172 @@
+export const metadata = {
+  title: "HTTP Contract",
+  description: "The two coordinator endpoints — POST /register and POST /finished — with exact request and response payloads, stale-response handling, and crash recovery.",
+};
+
+# HTTP Contract
+
+The coordinator exposes exactly two HTTP endpoints, and a worker only ever talks to
+these two. `POST /register` asks for the next assignment; `POST /finished` reports a
+completed one and receives the next. Both return the same `TaskResponse` shape, and
+both carry the whole loop's decision-making in a small, precise contract. This page
+documents that contract exactly — the payloads, the config snapshot, and the rules
+that make it safe across worker crashes and stale retries.
+
+## The response shape
+
+Every response from either endpoint is a `TaskResponse` whose `action` is either
+`"run"` or `"stop"`.
+
+- A **run** response carries `workflow_set`, `workflow_id`, `session_id`,
+  `iteration`, and a `config_snapshot`. The worker loads the named workflow, renders
+  its prompt, and executes it.
+- A **stop** response carries only a `stop_reason`; the other fields are `null`.
+  The worker exits.
+
+## POST /register
+
+A worker calls `/register` to receive its first assignment. The request body is
+empty.
+
+Request: `{}`
+
+Run response:
+
+```json
+{
+  "action": "run",
+  "workflow_set": "main",
+  "workflow_id": "planner",
+  "session_id": "20260419_143022_71393ee22450_ab12cd34",
+  "iteration": 3,
+  "config_snapshot": {
+    "goal": "Ship a minimal working landing page",
+    "goal_hash": "71393ee22450",
+    "workflow_set": "main",
+    "completion_criteria": ["Homepage renders without errors"],
+    "stop_criteria": ["A workflow updates session control.json to stopped"],
+    "max_turns": 20,
+    "goal_check_consecutive_failures_cap": 3,
+    "team_harness_provider": "openai_compat",
+    "team_harness_model": "gpt-5.5",
+    "team_harness_agents": ["codex"],
+    "team_harness_agent_models": {"codex": "gpt-5.5"},
+    "team_harness_agent_reasoning_efforts": {"codex": "high"},
+    "team_harness_max_retries": null,
+    "team_harness_retry_base_delay_s": null,
+    "team_harness_retry_max_delay_s": null,
+    "team_harness_api_base": "https://openrouter.ai/api/v1",
+    "team_harness_api_key_env": "OPENROUTER_API_KEY",
+    "team_harness_system_prompt_extension": ""
+  },
+  "stop_reason": null
+}
+```
+
+Stop response:
+
+```json
+{
+  "action": "stop",
+  "stop_reason": "goal_met",
+  "workflow_set": null,
+  "workflow_id": null,
+  "session_id": null,
+  "iteration": null,
+  "config_snapshot": null
+}
+```
+
+Rules for `/register`:
+
+- `config_snapshot.goal` is the resolved goal **text**, loaded from the `goal_file`
+  named in `loopy_loop_config.yaml`. Workers and team-harness never receive the goal
+  file path as the goal.
+- `workflow_set` tells the worker which
+  `.loopy_loop/workflow_sets/<workflow_set>/workflows/<workflow_id>/` directory to
+  load.
+- If a task is already current — meaning the previous worker crashed without calling
+  `/finished` — `/register` first checks that iteration directory for
+  `pending_finished_request.json` or `result.json`. If either proves the task
+  completed, the coordinator records the completed task in history before checking
+  stop conditions. Only a task with no recoverable local completion is recorded as
+  failed with `error="abandoned"`. See [Crash recovery](#crash-recovery-and-stale-retries).
+- If the loop is already in a terminal state, `/register` immediately returns
+  `action: "stop"`.
+
+## The config snapshot
+
+The `config_snapshot` is the coordinator's resolved, immutable view of the run's
+configuration, sent with every run response so the worker never has to re-read the
+repo config. Its most notable fields:
+
+- `goal` — the resolved goal text (never a file path).
+- `goal_hash` — the deterministic hash of the goal, also embedded in the session id.
+- `max_turns` and `goal_check_consecutive_failures_cap` — the loop's stop limits.
+- The `team_harness_*` fields — provider, model, agents, per-agent model and
+  reasoning overrides, retry controls, API base, the name of the API key env var,
+  and any system prompt extension.
+
+For where these come from and how they are validated, see
+[Concepts](/docs/concepts) and [Configuration](/docs/configuration).
+
+## POST /finished
+
+A worker calls `/finished` to report a completed assignment. The response is the
+same `TaskResponse` shape as `/register`, so the worker learns its next task (or to
+stop) in the same round trip.
+
+Request:
+
+```json
+{
+  "workflow_id": "planner",
+  "session_id": "20260419_143022_71393ee22450_ab12cd34",
+  "iteration": 3,
+  "success": true,
+  "text": "done",
+  "error": null
+}
+```
+
+Response: same shape as the `/register` response (`action` is `"run"` or `"stop"`).
+
+Rules for `/finished`:
+
+- **Match required.** The report must match the current task on `session_id`,
+  `workflow_id`, and `iteration`. Only then does the coordinator record the result,
+  read the session artifacts, and dispatch the next task.
+- **`control.json` and `goal_check.json`.** After a matched finish, the coordinator
+  reads `control.json` only from the session directory, and reads `goal_check.json`
+  only from the current iteration directory when the workflow is `goal_check` or has
+  `emits_goal_check: true`. A valid `goal_check.json` is an eval artifact, not a stop
+  switch — workflows stop the loop by updating `control.json`. See
+  [Success & Control](/docs/success-and-control).
+- **Child sessions.** A parent workflow can request a depth-first child loop by
+  writing a `schema_version: 1` JSON request with `workflow_set` and `goal` under
+  the session's `child_requests/` directory. The next response dispatches the child
+  workflow set; after the child stops, the coordinator resumes the parent. See
+  [Child Sessions](/docs/child-sessions).
+
+## Crash recovery and stale retries
+
+The contract is designed so that a killed worker, a duplicate retry, or a lost
+acknowledgment never corrupts loop state.
+
+**Stale finish (mismatch).** If a `/finished` call's `session_id` +
+`workflow_id` + `iteration` does not match the current task, the call is stale. The
+coordinator does **not** mutate state and does **not** change the current task; it
+returns the current task's run response so the caller sees what is actually running.
+
+**Finish with no active task.** If `/finished` arrives when no task is current, the
+coordinator dispatches the next available task as if `/register` had been called —
+or returns `action: "stop"` if the state is terminal. This makes a post-crash retry
+safe.
+
+**Worker crash mid-handoff.** A worker writes `result.json`, then
+`pending_finished_request.json`, then calls `/finished`. If it dies inside that
+window, the next `/register` recovers the completed result from
+`pending_finished_request.json` (or reconstructs it from `result.json` if the
+pending file is missing) and records the task as completed — rather than marking it
+`abandoned`. A locally written result is treated as authoritative. The per-iteration
+files behind this are described in [Session Layout](/docs/session-layout).
