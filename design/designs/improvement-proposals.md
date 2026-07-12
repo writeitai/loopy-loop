@@ -57,8 +57,19 @@ is active."** For a double loop used from day one, this is the first thing to fi
   while a `current_task` exists can *verify* whether the worker is actually dead before
   reclaiming — closing the duplicate-work window — instead of assuming abandonment. On a
   confirmed-dead worker, apply the recovery policy to its orphaned agent processes — by
-  default **bounded drain** (let them finish + harvest), reap as the escape — before fresh
-  work starts (see P2.5; cross-repo split in D7).
+  default **bounded drain**, reap as the escape — before fresh work starts (see P2.5;
+  cross-repo split in D7).
+- **Salvage record for drained iterations.** A drained iteration is still re-run — its
+  `result.json` never existed (the dead worker would have written it), and we deliberately do
+  **not** synthesize one from the drained agents' outputs: that would fabricate an iteration
+  result the coordinator never produced, exactly the false-closure trap D3 exists to prevent.
+  Instead, make the salvage explicit: write `salvage.json` into the interrupted iteration's
+  directory (drained agent ids, exit codes, pointers to their harness output dirs, a diffstat
+  of what they changed in the working tree) and record the iteration in history as
+  `abandoned_after_drain` (distinct from plain `abandoned`). The working tree preserves the
+  drained agents' edits (D1 — the next iteration builds on git state); the salvage record
+  preserves the *provenance*, so an auditor never meets a mystery diff, and the failure
+  taxonomy (P2.3) can treat "crashed but salvaged" differently from "crashed, lost everything."
 - Tests: restart mid-child; restart after child terminal but before parent resume;
   double `/register` while a task is live; late `/finished` from an old attempt.
 
@@ -324,13 +335,15 @@ the ownership split. Summary of the split:
   so a recycled id is never killed.
 - **loopy-loop side (small):** on crash recovery, pick a policy per orphan for the interrupted
   run before starting fresh. Default to **bounded drain** — let an in-flight agent finish within
-  a timeout and harvest its output, then continue from that completed state; this fits loopy's
-  cost-conscious, git-is-truth profile (D1), avoids wasting near-complete API spend and
-  half-applied edits, and the "two writers" objection is moot because draining happens during
-  recovery before any new work is dispatched. **Reap** (kill, then re-run) is the escape: for
-  `stop --force` (P2.4), a hung orphan past the drain timeout, or a crash cause that makes
-  finishing unsafe. team-harness provides the liveness check + policy ops + timeout (TH-D5);
-  the logical-session resume path is a separate, larger option and is **not** proposed here.
+  a timeout, write the salvage record (P0.1), then re-run the iteration from that completed
+  state; this fits loopy's cost-conscious, git-is-truth profile (D1), avoids wasting
+  near-complete API spend and half-applied edits, and the "two writers" objection is moot
+  because draining happens during recovery before any new work is dispatched. Drain yields a
+  finalized worker record + preserved repo edits — never a synthesized `result.json` (see the
+  P0.1 salvage bullet). **Reap** (kill, then re-run) is the escape: for `stop --force` (P2.4),
+  a hung orphan past the drain timeout, or a crash cause that makes finishing unsafe.
+  team-harness provides the liveness check + policy ops + timeout (TH-D5); the logical-session
+  resume path is a separate, larger option and is **not** proposed here.
 
 **Effort.** M (team-harness, tracked there) + S (loopy surfacing). **Status.** Proposed —
 separate from P0.1, which recovers state only. Pairs with the P0.1 worker-liveness bullet.
