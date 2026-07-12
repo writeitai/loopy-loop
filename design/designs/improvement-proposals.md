@@ -56,8 +56,9 @@ is active."** For a double loop used from day one, this is the first thing to fi
   record its pid + a periodic heartbeat in the session dir. Then a second `/register`
   while a `current_task` exists can *verify* whether the worker is actually dead before
   reclaiming — closing the duplicate-work window — instead of assuming abandonment. On a
-  confirmed-dead worker, also trigger team-harness reap for that run (P2.5) so its orphaned
-  agent processes are killed before fresh work starts. (Cross-repo split recorded in D7.)
+  confirmed-dead worker, apply the recovery policy to its orphaned agent processes — by
+  default **bounded drain** (let them finish + harvest), reap as the escape — before fresh
+  work starts (see P2.5; cross-repo split in D7).
 - Tests: restart mid-child; restart after child terminal but before parent resume;
   double `/register` while a task is live; late `/finished` from an old attempt.
 
@@ -318,8 +319,9 @@ here.** The full design is written up in team-harness
 the ownership split. Summary of the split:
 - **team-harness side (the bulk):** spawn each worker with `start_new_session=True` (own
   process group), persist `pid`/`pgid`/`starttime` into its existing per-run worker-session
-  manifest, and expose a `reap(manifest)` / `th reap` that kills still-alive groups —
-  verifying `starttime` so a recycled id is never killed.
+  manifest, and expose a durable liveness check plus **drain / reap / ignore** policy ops
+  (`reap_run(manifest, policy=..., drain_timeout_s=...)` / `th reap`) — verifying `starttime`
+  so a recycled id is never killed.
 - **loopy-loop side (small):** on crash recovery, pick a policy per orphan for the interrupted
   run before starting fresh. Default to **bounded drain** — let an in-flight agent finish within
   a timeout and harvest its output, then continue from that completed state; this fits loopy's
