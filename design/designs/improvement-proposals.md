@@ -320,10 +320,13 @@ the ownership split. Summary of the split:
   process group), persist `pid`/`pgid`/`starttime` into its existing per-run worker-session
   manifest, and expose a `reap(manifest)` / `th reap` that kills still-alive groups —
   verifying `starttime` so a recycled id is never killed.
-- **loopy-loop side (small):** on crash recovery, call team-harness reap for the interrupted
-  run before starting fresh; surface it via `loopy doctor` (warn about a leftover group) and
-  `stop --force` in P2.4 (reap it). The logical-session resume path (team-harness captures
-  agent session ids) is a separate, larger option and is **not** proposed here.
+- **loopy-loop side (small):** on crash recovery, pick a policy per orphan for the interrupted
+  run before starting fresh — **reap** by default (kill leftovers, re-run the iteration), or
+  **drain** (let an expensive/nearly-done agent finish and harvest its output, pausing fresh
+  work until it exits); surface it via `loopy doctor` (warn about a leftover group) and
+  `stop --force` in P2.4 (reap it). team-harness provides the liveness check + policy ops
+  (TH-D5); the logical-session resume path is a separate, larger option and is **not** proposed
+  here.
 
 **Effort.** M (team-harness, tracked there) + S (loopy surfacing). **Status.** Proposed —
 separate from P0.1, which recovers state only. Pairs with the P0.1 worker-liveness bullet.
