@@ -178,10 +178,15 @@ own:
   heartbeat in the session directory, and on crash recovery it (a) uses worker liveness to tell
   "still running" from "dead" before reclaiming a task — closing the duplicate-work window on a
   second `/register` — and (b) applies a policy per orphaned agent for the interrupted run.
-  **Default: bounded drain** — let an in-flight agent finish within a timeout and harvest its
-  output (fits loopy's git-is-truth, cost-conscious profile; no concurrent-writer problem
-  because it runs during recovery), with **reap** as the escape for force-stop / hung-past-timeout
-  / unsafe-to-finish.
+  **Default: bounded drain** — let an in-flight agent finish within a timeout (fits loopy's
+  git-is-truth, cost-conscious profile; no concurrent-writer problem because it runs during
+  recovery), with **reap** as the escape for force-stop / hung-past-timeout / unsafe-to-finish.
+  A drained iteration is **still re-run**: its `result.json` never existed and is never
+  synthesized from drained outputs (that would fabricate a result the dead coordinator never
+  produced — the false-closure trap D3 prevents). The drain's yield is the agents' completed
+  repo edits (preserved by git, D1) plus an explicit **salvage record** — `salvage.json` in the
+  interrupted iteration's directory and an `abandoned_after_drain` history code — so the
+  provenance of the surviving edits is auditable rather than a mystery diff.
 
 **Context.** loopy-loop runs the harness synchronously inside its worker; the agent CLIs are
 children of that worker, not of loopy-loop's coordinator, and loopy-loop tracks no process
