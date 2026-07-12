@@ -191,8 +191,10 @@ worker from a dead one. Neither problem is solvable by re-adopting processes (im
 D6 and team-harness TH-D2); both are solvable by *tracking identity, then draining or reaping*,
 and the natural split is "each layer owns the processes it spawns."
 
-**Consequences.** The agent-reaping mechanism is a team-harness feature (we own it — it is not a
-`/proc`-scraping hack bolted onto loopy-loop); loopy-loop consumes it. loopy-loop's own new work
-is small: persist the worker pid + heartbeat, and call reap on recovery. This makes D6's
+**Consequences.** The process-lifecycle mechanism (liveness + drain/reap/ignore) is a
+team-harness feature (we own it — it is not a `/proc`-scraping hack bolted onto loopy-loop);
+loopy-loop consumes it. loopy-loop's own new work is small: persist the worker pid + heartbeat,
+and apply a recovery policy per orphan (default bounded drain, reap as escape). This makes D6's
 state-recovery *safe* (verify-dead-before-reclaim) rather than optimistic. See
-`improvement-proposals.md` P0.1 (worker liveness) and P2.5 (reaping), and team-harness TH-D5.
+`improvement-proposals.md` P0.1 (worker liveness) and P2.5 (recovery policy), and team-harness
+TH-D5.
