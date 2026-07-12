@@ -11,6 +11,12 @@ export type PagefindResult = {
   excerpt: string;
 };
 
+/** Outcome of a search, so the UI can distinguish "no hits" from "unavailable". */
+export type SearchOutcome = {
+  status: "empty" | "ok" | "unavailable" | "error";
+  results: PagefindResult[];
+};
+
 type PagefindDocument = {
   url: string;
   meta?: { title?: string };
@@ -26,22 +32,30 @@ type PagefindApi = {
 
 // `new Function` keeps webpack/Turbopack from statically analysing the import.
 const dynamicImport = new Function(
-  "path",
-  "return import(path)"
-) as (path: string) => Promise<PagefindApi>;
+  "url",
+  "return import(url)"
+) as (url: string) => Promise<PagefindApi>;
 
 let pagefindPromise: Promise<PagefindApi | null> | null = null;
 
 function importPagefind(): Promise<PagefindApi | null> {
-  return dynamicImport("/pagefind/pagefind.js")
+  // Build a fully-qualified URL from the current origin so the dynamic import
+  // never resolves against an ambiguous base URL.
+  const url = new URL("/pagefind/pagefind.js", window.location.href).href;
+  return dynamicImport(url)
     .then(async (mod) => {
       if (mod.init) await mod.init();
       return mod;
     })
-    .catch(() => null);
+    .catch(() => {
+      // Don't cache the failure permanently — allow a later retry (e.g. the
+      // index finished deploying, or a transient network error).
+      pagefindPromise = null;
+      return null;
+    });
 }
 
-/** Load (once) the Pagefind API, or null if the index is unavailable. */
+/** Load (once) the Pagefind API, or null if the index is currently unavailable. */
 export function loadPagefind(): Promise<PagefindApi | null> {
   if (!pagefindPromise) {
     pagefindPromise = importPagefind();
@@ -49,16 +63,24 @@ export function loadPagefind(): Promise<PagefindApi | null> {
   return pagefindPromise;
 }
 
-/** Run a search and return up to 8 shaped results. Empty query -> []. */
-export async function searchDocs(query: string): Promise<PagefindResult[]> {
+/** Run a search. Never rejects — failures are reported via `status`. */
+export async function searchDocs(query: string): Promise<SearchOutcome> {
+  if (!query.trim()) return { status: "empty", results: [] };
+
   const pagefind = await loadPagefind();
-  if (!pagefind || !query.trim()) return [];
-  const search = await pagefind.search(query);
-  const top = search.results.slice(0, 8);
-  const docs = await Promise.all(top.map((r) => r.data()));
-  return docs.map((d) => ({
-    url: d.url,
-    title: d.meta?.title ?? d.url,
-    excerpt: d.excerpt,
-  }));
+  if (!pagefind) return { status: "unavailable", results: [] };
+
+  try {
+    const search = await pagefind.search(query);
+    const top = search.results.slice(0, 8);
+    const docs = await Promise.all(top.map((r) => r.data()));
+    const results = docs.map((d) => ({
+      url: d.url,
+      title: d.meta?.title ?? d.url,
+      excerpt: d.excerpt,
+    }));
+    return { status: "ok", results };
+  } catch {
+    return { status: "error", results: [] };
+  }
 }

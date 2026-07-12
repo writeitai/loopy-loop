@@ -9,7 +9,7 @@ export function SiteHeader() {
         <Link href="/" className="flex items-center gap-2 font-semibold">
           <span
             aria-hidden
-            className="inline-block h-5 w-5 rounded-full border-2 border-primary"
+            className="inline-block h-5 w-5 rounded-full border-2 border-brand"
           />
           <span>loopy-loop</span>
         </Link>

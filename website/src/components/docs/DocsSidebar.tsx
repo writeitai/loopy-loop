@@ -31,13 +31,6 @@ function NavLink({ item }: { item: NavItem }) {
 }
 
 function NavSection({ item }: { item: NavItem }) {
-  const pathname = usePathname();
-  const norm = (p: string) => (p.length > 1 ? p.replace(/\/$/, "") : p);
-  const parentActive =
-    isActive(pathname, item.href) ||
-    norm(pathname).startsWith(norm(item.href) + "/") ||
-    (item.children?.some((c) => isActive(pathname, c.href)) ?? false);
-
   return (
     <div>
       <p className="px-3 py-1.5 text-sm font-semibold text-foreground">
@@ -50,7 +43,6 @@ function NavSection({ item }: { item: NavItem }) {
           ))}
         </div>
       )}
-      {!parentActive && null}
     </div>
   );
 }

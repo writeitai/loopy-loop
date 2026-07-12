@@ -27,7 +27,7 @@ export default function DocsLayout({
           {/* data-pagefind-body scopes the search index to page content only. */}
           <article
             data-pagefind-body
-            className="prose max-w-none prose-headings:scroll-mt-24 prose-a:font-medium prose-a:no-underline hover:prose-a:underline"
+            className="prose max-w-none prose-headings:scroll-mt-24 prose-a:font-medium prose-a:underline prose-a:underline-offset-2"
           >
             {children}
           </article>

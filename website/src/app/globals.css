@@ -24,6 +24,7 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-brand: var(--brand);
   --color-gold: var(--gold);
   --color-gold-foreground: var(--gold-foreground);
   --radius-sm: calc(var(--radius) - 4px);
@@ -44,7 +45,9 @@
   --card-foreground: #222433;
   --popover: #fdf8e6;
   --popover-foreground: #222433;
-  --primary: #5ca493; /* green */
+  /* Text-bearing green, darkened from the brand green to meet WCAG AA on sand
+     (4.57:1) and with white (5.46:1). Used for links and primary buttons. */
+  --primary: #2f7563;
   --primary-foreground: #ffffff;
   --secondary: #efe1a8;
   --secondary-foreground: #222433;
@@ -52,11 +55,13 @@
   --muted-foreground: #59583f;
   --accent: #ecdf9c;
   --accent-foreground: #222433;
-  --destructive: #f34832; /* red */
+  --destructive: #d63a25; /* red, darkened for AA with white text */
   --destructive-foreground: #ffffff;
   --border: #e0d29a;
   --input: #e0d29a;
   --ring: #5ca493;
+  /* Vivid writeit brand green — decorative only (logo/focus accents), never text. */
+  --brand: #5ca493;
   --gold: #ebaa1a; /* gold */
   --gold-foreground: #222433;
   --radius: 0.5rem;
@@ -83,6 +88,7 @@
   --border: #34353f;
   --input: #34353f;
   --ring: #6cb7a4;
+  --brand: #6cb7a4;
   --gold: #ebaa1a;
   --gold-foreground: #14231f;
 }

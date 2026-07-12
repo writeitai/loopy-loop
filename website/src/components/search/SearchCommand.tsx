@@ -4,20 +4,33 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Command } from "cmdk";
 import { FileText, Search } from "lucide-react";
-import { searchDocs, type PagefindResult } from "@/lib/search/pagefind";
+import { searchDocs, type SearchOutcome } from "@/lib/search/pagefind";
+
+const EMPTY: SearchOutcome = { status: "empty", results: [] };
 
 export function SearchCommand() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<PagefindResult[]>([]);
+  const [outcome, setOutcome] = useState<SearchOutcome>(EMPTY);
   const [loading, setLoading] = useState(false);
+  const [shortcut, setShortcut] = useState("⌘K");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Monotonic id so an older, slower search can't overwrite a newer one.
+  const requestIdRef = useRef(0);
+
+  // Show the platform-correct shortcut hint after mount (avoids hydration drift).
+  useEffect(() => {
+    const isMac =
+      typeof navigator !== "undefined" &&
+      /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent);
+    if (!isMac) setShortcut("Ctrl K");
+  }, []);
 
   // Cmd/Ctrl+K toggles the palette from anywhere on the site.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+      if (e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         setOpen((o) => !o);
       }
@@ -26,31 +39,37 @@ export function SearchCommand() {
     return () => document.removeEventListener("keydown", onKey);
   }, []);
 
-  // Debounced Pagefind query.
+  // Debounced Pagefind query, race-safe against out-of-order resolutions.
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const q = query.trim();
     if (!q) {
-      setResults([]);
+      setOutcome(EMPTY);
       setLoading(false);
       return;
     }
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     debounceRef.current = setTimeout(() => {
-      searchDocs(q)
-        .then(setResults)
-        .finally(() => setLoading(false));
+      searchDocs(q).then((res) => {
+        // Ignore if a newer query superseded this one.
+        if (requestId !== requestIdRef.current) return;
+        setOutcome(res);
+        setLoading(false);
+      });
     }, 150);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, [query]);
 
-  // Reset transient state whenever the dialog closes.
+  // Reset transient state whenever the dialog closes; invalidate in-flight work.
   useEffect(() => {
     if (!open) {
+      requestIdRef.current++;
       setQuery("");
-      setResults([]);
+      setOutcome(EMPTY);
+      setLoading(false);
     }
   }, [open]);
 
@@ -61,6 +80,8 @@ export function SearchCommand() {
     },
     [router]
   );
+
+  const { status, results } = outcome;
 
   return (
     <>
@@ -73,7 +94,7 @@ export function SearchCommand() {
         <Search className="h-4 w-4" />
         <span className="hidden sm:inline">Search docs</span>
         <kbd className="ml-1 hidden rounded border border-border bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground sm:inline">
-          ⌘K
+          {shortcut}
         </kbd>
       </button>
 
@@ -102,14 +123,24 @@ export function SearchCommand() {
               Searching...
             </div>
           )}
-          {!loading && query.trim() !== "" && results.length === 0 && (
+          {!loading && status === "empty" && (
+            <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+              Type to search the documentation.
+            </div>
+          )}
+          {!loading && status === "ok" && results.length === 0 && (
             <Command.Empty className="px-3 py-6 text-center text-sm text-muted-foreground">
               No results found.
             </Command.Empty>
           )}
-          {!loading && query.trim() === "" && (
+          {!loading && status === "unavailable" && (
             <div className="px-3 py-6 text-center text-sm text-muted-foreground">
-              Type to search the documentation.
+              Search isn&apos;t available yet. It works on the deployed site.
+            </div>
+          )}
+          {!loading && status === "error" && (
+            <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+              Something went wrong. Try a different search.
             </div>
           )}
           {results.map((result) => (

@@ -36,7 +36,9 @@ npm run dev        # http://localhost:3000
 npm run build      # next build (-> out/) then pagefind indexes out/
 ```
 
-The static site is written to `website/out/`. `npm run typecheck` runs `tsc --noEmit`.
+The static site is written to `website/out/`. Preview that production build (with
+a working search index) via `npm run preview`. `npm run typecheck` runs `tsc
+--noEmit` — run it after a build, since it depends on Next's generated types.
 
 ## Add or edit a page
 
@@ -49,6 +51,21 @@ The static site is written to `website/out/`. `npm run typecheck` runs `tsc --no
 ## Deploy
 
 `.github/workflows/docs-deploy.yml` builds and deploys to GitHub Pages on every push
-to `main` that touches `website/**`. The custom domain (`loopy.writeit.ai`) is set by
-`public/CNAME`; `public/.nojekyll` keeps GitHub Pages from stripping Next's `_next/`
-assets.
+to `main` that touches `website/**` (pull requests run the build as a check only).
+`public/.nojekyll` keeps GitHub Pages from stripping Next's `_next/` assets.
+
+### One-time setup (required before the first deploy)
+
+The workflow publishes the artifact, but the Pages site and its custom domain must be
+provisioned once in the repository — the `public/CNAME` file does **not** configure the
+domain on its own for an Actions-based deployment:
+
+1. **Settings → Pages → Build and deployment → Source:** select **GitHub Actions**.
+2. **Settings → Pages → Custom domain:** enter `loopy.writeit.ai` and save (this is
+   what actually binds the domain; the committed `CNAME` file just records the intent).
+3. **DNS** (in the `writeit.ai` zone): add `loopy.writeit.ai CNAME writeitai.github.io.`
+4. Once DNS resolves, enable **Enforce HTTPS** in Settings → Pages.
+
+Until the custom domain is bound, the site would be served under
+`https://writeitai.github.io/loopy-loop/`, where the root-relative `/_next/` and
+`/pagefind/` URLs do not resolve — so complete the steps above before sharing the link.

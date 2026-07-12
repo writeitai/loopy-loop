@@ -139,9 +139,16 @@ product-branded subdomain (`loopy.writeit.ai`) was chosen over a generic
 - **Next.js config:** `output: 'export'` plus `trailingSlash: true` so directory-style
   URLs resolve to `index.html` on Pages. Because the site is served at the subdomain
   **root**, no `basePath` is needed.
-- **Custom domain:** a `CNAME` file (`loopy.writeit.ai`) committed to the published
-  output, plus a DNS record in the `writeit.ai` zone:
-  `loopy.writeit.ai  CNAME  writeitai.github.io`.
+- **Custom domain:** a one-time provisioning step, since an Actions-based Pages
+  deploy does not read a `CNAME` file from the artifact. In the repository's
+  **Settings → Pages**, set the source to **GitHub Actions** and the custom domain to
+  `loopy.writeit.ai`; add a DNS record in the `writeit.ai` zone
+  (`loopy.writeit.ai  CNAME  writeitai.github.io`); then enable Enforce HTTPS. The
+  committed `public/CNAME` records the intended domain but does not bind it on its own.
+  Until the domain is bound, the site is served under
+  `writeitai.github.io/loopy-loop/`, where root-relative `/_next/` and `/pagefind/`
+  URLs would not resolve — so this step precedes sharing the link. See
+  `website/README.md` for the exact checklist.
 
 ### Alternatives considered and rejected
 
