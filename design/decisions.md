@@ -171,21 +171,25 @@ not invent a parallel backlog.
 own:
 - **team-harness owns the agent-CLI processes** it spawns. It launches each in its own process
   group, persists their identity (pid/pgid/starttime) in its worker-session manifest, and
-  provides a **reap** operation to kill leftover groups. (team-harness `design/decisions.md`
-  TH-D5; `design/designs/process-lifecycle-and-reaping.md`.)
+  provides a durable liveness check plus **drain / reap / ignore** policy operations over those
+  groups. (team-harness `design/decisions.md` TH-D5;
+  `design/designs/process-lifecycle-and-reaping.md`.)
 - **loopy-loop owns its own `loopy worker` process.** It records the worker's pid and a
   heartbeat in the session directory, and on crash recovery it (a) uses worker liveness to tell
   "still running" from "dead" before reclaiming a task — closing the duplicate-work window on a
-  second `/register` — and (b) calls team-harness **reap** for the interrupted run to kill any
-  orphaned agent processes before starting fresh.
+  second `/register` — and (b) applies a policy per orphaned agent for the interrupted run.
+  **Default: bounded drain** — let an in-flight agent finish within a timeout and harvest its
+  output (fits loopy's git-is-truth, cost-conscious profile; no concurrent-writer problem
+  because it runs during recovery), with **reap** as the escape for force-stop / hung-past-timeout
+  / unsafe-to-finish.
 
 **Context.** loopy-loop runs the harness synchronously inside its worker; the agent CLIs are
 children of that worker, not of loopy-loop's coordinator, and loopy-loop tracks no process
 identity of its own today. A hard worker crash therefore orphans agent processes that keep
 spending money and writing to the checkout, and loopy-loop cannot currently distinguish a live
 worker from a dead one. Neither problem is solvable by re-adopting processes (impossible — see
-D6 and team-harness TH-D2); both are solvable by *tracking identity + reaping*, and the natural
-split is "each layer owns the processes it spawns."
+D6 and team-harness TH-D2); both are solvable by *tracking identity, then draining or reaping*,
+and the natural split is "each layer owns the processes it spawns."
 
 **Consequences.** The agent-reaping mechanism is a team-harness feature (we own it — it is not a
 `/proc`-scraping hack bolted onto loopy-loop); loopy-loop consumes it. loopy-loop's own new work
