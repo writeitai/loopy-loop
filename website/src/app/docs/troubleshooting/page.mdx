@@ -1,0 +1,186 @@
+export const metadata = {
+  title: "Troubleshooting",
+  description: "Symptom, cause, and fix for the common loopy-loop problems: loops that won't stop, goal_check failures, crash recovery and resume, and connectivity.",
+};
+
+# Troubleshooting
+
+Most loopy-loop problems fall into a handful of categories: a loop that will not
+stop, a broken evaluator, a coordinator that refuses to start, or a worker that
+cannot reach it. This page is organized as symptom, cause, and fix so you can jump
+to the one you are hitting. When a fix depends on a deeper contract, it links to the
+page that explains it.
+
+## The loop will not stop
+
+**Symptom.** Evals look like they pass, or the goal clearly looks met, but the loop
+keeps assigning new iterations.
+
+**Cause.** `goal_check.json` does not stop the loop. It is per-iteration evidence
+only. The single switch that stops a run is the session-scoped `control.json`.
+
+**Fix.** Make sure a workflow actually writes `state: "stopped"` with a valid
+`stop_reason` (`goal_met` or `unresolvable_error`) to `control.json`:
+
+```json
+{
+  "state": "stopped",
+  "reason": "Accepted evidence satisfies the goal.",
+  "stop_reason": "goal_met",
+  "schema_version": 1
+}
+```
+
+If you expected an eval workflow to stop the loop, confirm three things: it has
+`emits_goal_check: true`, it writes valid JSON to the exact `goal_check.json`
+output path, **and** it updates `control.json` when the goal is met. The eval verdict
+is evidence; the stop is a separate, explicit decision. See
+[Success & Control](/docs/success-and-control) for the full model.
+
+You can always force a stop by hand with `loopy stop`, which the loop records as
+`stop_reason: "stop_requested"`.
+
+## The loop stopped with goal_check_broken
+
+**Symptom.** The run ended early with `stop_reason: "goal_check_broken"`.
+
+**Cause.** A `goal_check`-emitting workflow repeatedly failed to write a valid
+`goal_check.json`. The coordinator counts consecutive failures and, once they reach
+`goal_check_consecutive_failures_cap` (default `3`), stops rather than looping on a
+broken evaluator.
+
+**Fix.** Open the recent `iterations/<NNNN>_<workflow_id>/` directories and check
+whether `goal_check.json` is missing or malformed. The required v1 schema is:
+
+```json
+{
+  "goal_met": false,
+  "reason": "CTA exists, but deployment docs are still missing.",
+  "schema_version": 1
+}
+```
+
+Fix the workflow prompt so it writes valid JSON to the correct path every run. A
+single valid `goal_check.json` resets the failure counter. See
+[Evaluation](/docs/evaluation) for how the eval workflows should produce it.
+
+## The loop stopped with invalid_control_output
+
+**Symptom.** The run ended with `stop_reason: "invalid_control_output"`.
+
+**Cause.** `control.json` existed but could not be parsed as a valid control signal
+— malformed JSON, a wrong `schema_version`, or missing fields.
+
+**Fix.** Restore `control.json` to a valid shape. While the loop is meant to keep
+running it should read:
+
+```json
+{
+  "state": "running",
+  "reason": "session active",
+  "stop_reason": null,
+  "schema_version": 1
+}
+```
+
+Make sure the workflow that writes `control.json` emits exactly this schema and only
+ever sets `stop_reason` to `goal_met` or `unresolvable_error`.
+
+## Coordinator refuses to start (preflight fails)
+
+The coordinator runs a preflight check before it will start. Several distinct errors
+surface here:
+
+- **API key not exported.** Export the environment variable named in
+  `team_harness_api_key_env` (often `OPENROUTER_API_KEY`) in **both** the coordinator
+  shell and every worker shell. Some providers, such as `codex`, skip the API-key
+  check and use local auth instead.
+- **Unknown config field.** The config parser rejects unknown keys. Every
+  `team_harness_*` field name is exact — check spelling against
+  [Configuration](/docs/configuration).
+- **Workflow id collides with `goal_check`.** `goal_check` is reserved. Pick a
+  different id for your own workflow.
+- **`must_follow` references a missing workflow.** The referenced id must match a
+  folder under `.loopy_loop/workflow_sets/<workflow_set>/workflows/`.
+- **`run_after_successes.workflow_id` references a missing workflow.** Same rule —
+  the id must match an existing workflow folder.
+
+## Re-running the coordinator against a running session
+
+**Symptom.** Starting the coordinator fails with a message about existing running
+state.
+
+**Cause.** This is intentional. If the previous coordinator left the loop in a
+non-terminal (`running`) state — for example because it was killed without reaching
+a stop — starting fresh over it could corrupt the run.
+
+**Fix.** Reattach to the live session instead of starting over:
+
+```bash
+loopy coordinator --host 127.0.0.1 --port 8080 --resume
+```
+
+If you would rather end that session cleanly first, run `loopy stop` to drive it to
+a terminal state, then start a fresh coordinator without `--resume`. On startup, a
+coordinator archives an already-terminal state and starts fresh; a non-terminal
+state requires `--resume`. See [CLI Reference](/docs/cli-reference) for the flags.
+
+## Killing only the coordinator leaves state "running"
+
+**Symptom.** You stopped the coordinator process, and now `loopy status` still shows
+the session as running.
+
+**Cause.** Killing the coordinator does not write a terminal state; the session
+stays `running` on disk.
+
+**Fix.** Either pass `--resume` the next time you start the coordinator to reattach,
+or run `loopy stop` first to reach a terminal state before a fresh start.
+
+## A worker crashed mid-iteration
+
+**Symptom.** A worker process died in the middle of an assignment, and you are not
+sure whether that iteration's work was lost or will be double-counted.
+
+**Cause.** The worker crashed inside the handoff window — after writing its result
+but before the coordinator acknowledged `/finished`.
+
+**Fix.** Usually nothing. The loop is built to recover: when the next `/register`
+arrives, the coordinator looks in the current iteration directory for
+`pending_finished_request.json` (or, failing that, `result.json`). If either proves
+the task completed, it records the completed result instead of marking the task
+`abandoned`. Only a task with no recoverable local result is recorded as failed with
+`error="abandoned"`. Just start a worker again and let it re-register. The
+[HTTP Contract](/docs/http-contract) documents the recovery rules in full.
+
+## The worker cannot reach the coordinator
+
+**Symptom.** The worker errors on connect, or nothing happens after you start it.
+
+**Cause.** The worker's `--coordinator` URL is wrong, the coordinator is not
+listening on that host/port, or the two processes do not share the environment they
+need.
+
+**Fix.** Confirm the coordinator is up on the host and port you started it with, and
+point the worker at the same address:
+
+```bash
+loopy worker --coordinator http://127.0.0.1:8080
+```
+
+Also export the `team_harness_api_key_env` variable in the worker shell, not just
+the coordinator shell — each process resolves the key independently. The worker
+calls `/register` once for its first task, then loops on `/finished` until it
+receives `action: "stop"`; multiple workers may share one coordinator.
+
+## A workflow ignores project_state
+
+**Symptom.** A workflow does not read or update the `project_state/` files you
+expected it to.
+
+**Cause.** The runtime only injects the session paths into the rendered prompt; it
+does not parse markdown state or enforce any ownership rules.
+
+**Fix.** State the contract explicitly in the workflow prompt — which
+`project_state/` files to read, which to update, and who owns each. See
+[Session Layout](/docs/session-layout) for the conventional file set and ownership
+rules that reusable workflows follow.

@@ -1,0 +1,135 @@
+export const metadata = {
+  title: "Child Sessions",
+  description: "How a workflow spawns a sequential child session via child_requests, how depth-first single-child execution works, and the pm_planner_dispatcher example.",
+};
+
+# Child Sessions
+
+Sometimes a session needs to hand a self-contained piece of work to its own
+dedicated loop — with its own goal, its own workflow set, and its own session
+directory — and then pick up where it left off once that work is done. That is what
+a child session is. A workflow requests one by dropping a JSON file into the
+session's `child_requests/` directory; the coordinator runs the child loop to a
+terminal state and then resumes the parent. This page describes that contract and
+walks through the packaged `pm_planner_dispatcher` set that uses it.
+
+## The child_requests contract
+
+A workflow requests a child session by writing a JSON file into the active
+session's `child_requests/` directory. The request names a workflow set and a goal:
+
+```json
+{
+  "workflow_set": "inner_outer_eval",
+  "goal": "A complete, self-contained implementation goal for the selected item.",
+  "schema_version": 1
+}
+```
+
+When the coordinator sees a valid request (after a successful iteration), it:
+
+1. Derives a goal hash and creates a new child `session_id`.
+2. Creates the child session directory **under the parent's `children/`
+   directory**, and copies the request `goal` into the child's `goal.md`.
+3. Records the child in the parent's `children.json` ledger with status
+   `running`.
+4. Removes the request file and dispatches the child's first workflow.
+5. When the child reaches a terminal state, marks the child record complete (with
+   its final status and `stop_reason`) and resumes the parent session.
+
+The `goal` in the request becomes the child's source-of-truth goal, exactly as if
+that child had been started on its own. The child runs its named `workflow_set`
+independently — different workflows, different state, different eval checks.
+
+## Depth-first, one child at a time
+
+v1 child execution is deliberately simple: **depth-first, single-child-at-a-time.**
+
+- A request is only picked up **after a successful iteration** in the parent. The
+  coordinator does not interrupt an in-flight task to start a child.
+- Requests are processed one at a time, in sorted filename order. Exactly one child
+  is dispatched per opportunity.
+- While a child runs, the parent is suspended. The parent resumes only after the
+  child reaches a terminal state (`goal_met`, `unresolvable_error`, `max_turns`,
+  and so on — see [Success & Control](/docs/success-and-control) for the full set).
+- **Only a top-level session can spawn children.** A child session cannot itself
+  request a grandchild in v1; child requests are ignored inside a session that
+  already has a parent. This keeps the tree one level deep and the execution order
+  easy to reason about.
+
+The parent tracks its children in a `children.json` ledger at the session root, and
+the child directories themselves live under `children/`:
+
+```text
+.loopy_loop/sessions/<parent_session_id>/
+├── children.json                       # ledger: one record per child
+├── child_requests/                     # inbox for pending child requests
+└── children/
+    └── <child_session_id>/             # a full session directory of its own
+        ├── goal.md
+        ├── project_state/
+        ├── iterations/
+        └── ...
+```
+
+Each `children.json` record captures the child `session_id`, `workflow_set`,
+`goal_hash`, and `status`, plus a `completed_at` and `stop_reason` once the child
+finishes. That gives the parent a durable, inspectable index of every child it
+started and how each one ended.
+
+## Worked example: pm_planner_dispatcher
+
+The packaged `pm_planner_dispatcher` workflow set is built entirely around this
+contract. Scaffold it with:
+
+```bash
+loopy init --template pm_planner_dispatcher
+```
+
+It turns the parent session into a project-management loop that never implements
+product code directly. Instead it plans work and delegates each concrete item to a
+child implementation session (typically running the `inner_outer_eval` set). Two
+workflows split the job:
+
+### planner
+
+`planner` runs on start and owns the PM state and the stop decision. Each run it:
+
+- Treats the session goal as the source of truth and maintains PM state under
+  `project_state/` (`work_items.md`, `current_state.md`, `decisions.md`,
+  `child_sessions.md`, and the outer-owned `finished.md`).
+- Reflects any `updates_from_user.md` content into that state, then clears the
+  file.
+- Selects exactly **one** available work item for the dispatcher to hand off.
+- Reviews terminal child-session evidence and marks the item `accepted` or
+  `needs_rework`.
+- Stops the loop only when the **full** session goal is satisfied — not merely
+  because one item was accepted — by writing `goal_met` (or `unresolvable_error`)
+  to `control.json`.
+
+The planner never writes child request files, and never implements child work
+itself.
+
+### dispatcher
+
+`dispatcher` must follow the planner and owns the `child_requests/` directory. Each
+run it does exactly one of:
+
+- Writes **one** child request JSON file for the selected item, with a complete,
+  self-contained implementation goal (item id/title, acceptance criteria,
+  constraints, expected delivery evidence), then marks the item
+  `waiting_for_child`.
+- Imports terminal child-session evidence — links to the child session path,
+  `finished.md`, eval or `goal_check` results, PR/merge status — back into PM state
+  and marks the item `ready_for_review`.
+
+The dispatcher never makes the acceptance decision (planner owns that), never stops
+the loop, and creates at most one child request per iteration.
+
+Together, `planner → dispatcher` forms the parent loop, and each dispatched child
+is a full `inner_outer_eval` session that implements and evaluates one item before
+control returns to the planner.
+
+For the directory contract these sessions share, see
+[Session Layout](/docs/session-layout). For how workflow sets, scheduling, and
+`must_follow` ordering work, see [Workflows](/docs/workflows).

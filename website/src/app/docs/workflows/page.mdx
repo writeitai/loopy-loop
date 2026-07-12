@@ -1,0 +1,126 @@
+export const metadata = {
+  title: "Workflows",
+  description:
+    "Workflow sets and their folder layout, per-workflow scheduling fields, the reserved goal_check workflow, and the three shipped templates.",
+};
+
+# Workflows
+
+A workflow is a single named unit of work the loop can run: a prompt plus a small scheduling config. Workflows are grouped into **workflow sets**, and the coordinator picks one eligible workflow to run each iteration. This page covers how workflows are laid out on disk, how their scheduling fields decide what runs next, and the three templates that ship with loopy-loop.
+
+## Workflow sets and folder layout
+
+Workflow sets are mandatory — even a single-loop repo uses one. A set is a directory of workflows under `.loopy_loop/workflow_sets/`, and each workflow is a folder holding exactly two files:
+
+```text
+.loopy_loop/workflow_sets/<workflow_set>/workflows/<workflow_id>/
+├── config.yaml
+└── prompt.txt
+```
+
+The workflow id is the folder name. `prompt.txt` is the prompt the workflow runs — the coordinator renders it with the concrete session paths before handing it to a worker. `config.yaml` holds the scheduling fields described below. For example, the recommended template lays out four workflows like this:
+
+```text
+.loopy_loop/workflow_sets/inner_outer_eval/workflows/
+├── outer/
+├── inner/
+├── eval_reviewer/
+└── eval_runner/
+```
+
+Your `loopy_loop_config.yaml` selects the default set with `workflow_set`, and `loopy coordinator --workflow-set NAME` can override it for a single session. Workflow definitions are part of your repo and should be committed.
+
+The older flat `.loopy_loop/workflows/...` layout is **not** loaded at runtime; the coordinator will point you at the `workflow_sets/` location if it finds workflows in the legacy spot.
+
+## Scheduling fields
+
+Each `config.yaml` describes when its workflow is eligible to run. A full config looks like this:
+
+```yaml
+enabled: true
+priority: 0
+run_every: 1
+must_follow: null
+not_before_iteration: 0
+run_on_start: false
+run_after_successes: null
+emits_goal_check: false
+description: ""
+```
+
+Each turn, the coordinator collects every eligible workflow and picks a winner. Eligibility and ordering come from these fields:
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true` | Whether this workflow can be scheduled at all. |
+| `priority` | integer | `0` | Tie-breaker among eligible workflows; the **higher** value runs first. |
+| `run_every` | integer | `1` | Minimum number of completed iterations between runs of this workflow. Counts completed iterations, not wall-clock time. |
+| `must_follow` | string or null | `null` | The workflow only becomes eligible immediately after a successful run of the named workflow. |
+| `not_before_iteration` | integer | `0` | Earliest completed-iteration count at which the workflow is eligible. |
+| `run_on_start` | boolean | `false` | Makes the workflow eligible before any workflow has succeeded — useful for a first-turn setup step. |
+| `run_after_successes` | mapping or null | `null` | Unlocks the workflow after every N successful runs of another workflow (see below). |
+| `emits_goal_check` | boolean | `false` | Declares that this workflow writes `goal_check.json`; the worker then includes that output path in the prompt. |
+| `description` | string | `""` | Human-readable note about the workflow's purpose. |
+
+A few rules are worth calling out:
+
+- `must_follow` and `run_after_successes.workflow_id` must reference workflow ids that exist in the same set. A dangling reference fails the coordinator's startup preflight.
+- `run_every` is based on completed iteration count, so `run_every: 3` means "at most once every three completed iterations," not "every three minutes."
+- `priority` only decides ties among workflows that are *already* eligible — it never makes an ineligible workflow run.
+
+### run_after_successes
+
+`run_after_successes` schedules a workflow on the cadence of another workflow's successes. This is how the eval workflows fire periodically rather than every turn:
+
+```yaml
+run_after_successes:
+  workflow_id: inner
+  every: 10
+```
+
+Here the workflow becomes eligible again after every 10 successful `inner` runs. Combined with `run_on_start: true`, it can also run once at the very beginning before any `inner` success exists yet.
+
+## The reserved goal_check workflow
+
+`goal_check` is a reserved workflow id. The `default` template scaffolds exactly this one workflow, and it plays a specific role: it evaluates whether the repo already satisfies the goal and writes the per-iteration `goal_check.json` eval artifact. Don't rename or delete it in a set that relies on it.
+
+Two behaviors are special:
+
+- **It waits for real work.** `goal_check` is not eligible until at least one non-`goal_check` workflow has succeeded, so it never runs against an untouched repo.
+- **Other workflows can emit goal checks too.** Setting `emits_goal_check: true` on any workflow tells the worker to include a `goal_check.json` output path in that workflow's prompt, letting it write the same eval artifact. In the `inner_outer_eval` template, `eval_runner` uses this instead of a standalone `goal_check` workflow.
+
+Writing `goal_check.json` is evidence, not a stop signal. Stopping the loop always requires updating the session's `control.json`. See [Success & Control](/docs/success-and-control) for the stop contract and [Evaluation](/docs/evaluation) for how eval checks are produced and consumed.
+
+## The shipped templates
+
+`loopy init --template NAME` scaffolds one of three workflow sets. Pick based on how much structure your goal needs.
+
+### default
+
+The minimal starting point. It creates only the reserved `goal_check` workflow in a set named `main`. Choose this when you want to design your own workflows from a clean slate and only need the built-in goal check to begin with.
+
+### inner_outer_eval
+
+The recommended template for most real work. It creates four workflows that form a plan → implement → evaluate rhythm:
+
+- `outer` — reviews durable project state, updates the high-level plan, and prepares the next available leaf task.
+- `inner` — implements the selected leaf task in the target repo and marks it waiting for review (`must_follow: outer`).
+- `eval_reviewer` — creates or refreshes session-scoped [eval-banana](/docs/evaluation) checks (`run_on_start: true`, then after every 10 `inner` successes).
+- `eval_runner` — runs those checks and writes `goal_check.json` (`must_follow: eval_reviewer`, `emits_goal_check: true`).
+
+Choose this when you have a substantial goal with observable completion criteria and want planning, implementation, and evaluation cleanly separated.
+
+### pm_planner_dispatcher
+
+A PM-orchestration set for breaking a large effort into child sessions. Its two workflows coordinate work rather than implementing it directly:
+
+- `planner` — maintains PM state, selects one work item, and reviews terminal child-session evidence (`run_on_start: true`).
+- `dispatcher` — writes one child-session request for the selected item, or imports finished child evidence back into PM state (`must_follow: planner`).
+
+Choose this when the goal is really a portfolio of separable sub-goals, each of which deserves its own focused session. See [Child Sessions](/docs/child-sessions) for how the parent spawns and resumes children.
+
+## Where to go next
+
+- [Success & Control](/docs/success-and-control) — how workflows stop the loop.
+- [Evaluation](/docs/evaluation) — writing and running session-scoped eval checks.
+- [Configuration](/docs/configuration) — the root config that selects a workflow set.

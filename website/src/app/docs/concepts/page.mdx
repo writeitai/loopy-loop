@@ -1,0 +1,63 @@
+export const metadata = {
+  title: "Concepts",
+  description:
+    "The mental model behind loopy-loop: the coordinator and worker split, delegation to team-harness, the iteration loop, and the session directory as durable state.",
+};
+
+# Concepts
+
+This page explains how loopy-loop is put together and why. Once you have the mental model — a coordinator that decides, workers that execute, and a session directory that remembers — the configuration and workflow pages read as details rather than surprises.
+
+## Coordinator and worker
+
+loopy-loop separates *deciding what to do next* from *doing it*. Those are two long-running processes with sharply different jobs.
+
+The **coordinator** is a small FastAPI server. It owns the loop state, loads your `loopy_loop_config.yaml`, resolves the goal, and creates a session. On each request it chooses the next workflow to run based on scheduling rules and the history so far, records results, checks the session's control and eval artifacts, and decides whether to continue or stop. The coordinator never runs agents itself.
+
+A **worker** is a blocking executor. It asks the coordinator for a task, renders that workflow's prompt with the concrete session paths, runs it, writes the outputs into the iteration directory, and reports back. Then it asks for the next task. A worker holds no loop state of its own — if it crashes, the coordinator notices the orphaned task on the next check-in and dispatches fresh work. You can run several workers against one coordinator.
+
+This split is what makes the loop durable and inspectable: the coordinator's decisions live in files, and the worker's work products live in files, so nothing important is trapped inside a process.
+
+## Delegation to team-harness
+
+Workers do not talk to model providers directly. They run each assignment through [`team-harness`](https://github.com/writeitai/team-harness), the orchestration layer that manages a coordinator model and can spawn external agent CLIs such as Codex, Claude Code, and Gemini as worker subprocesses.
+
+Concretely, the worker calls `TeamHarness.run(...)` with the rendered workflow prompt. team-harness runs its own coordinator model, optionally delegates to one or more agent CLIs, and returns a result. loopy-loop then normalizes and stores that result. Everything about *which* provider, model, and agents team-harness uses comes from the `team_harness_*` fields in your config — see [Configuration](/docs/configuration).
+
+## The iteration loop
+
+Each iteration runs exactly one workflow. Across many iterations, a well-designed workflow set forms a repeating cycle:
+
+1. **Plan** — a planning workflow reviews durable state and decides the next unit of work.
+2. **Implement** — an implementation workflow makes the change in the target repo.
+3. **Evaluate** — an eval workflow checks progress against the goal and writes evidence.
+4. **Record** — every iteration writes its prompt, result, and artifacts to disk.
+5. **Continue** — the coordinator picks the next eligible workflow, or stops.
+
+The coordinator decides *which* workflow is eligible each turn using per-workflow scheduling fields such as `priority`, `run_every`, `must_follow`, and `run_after_successes`. The recommended `inner_outer_eval` template implements this exact rhythm: `outer` plans, `inner` implements, and `eval_reviewer`/`eval_runner` evaluate. The full scheduling model lives in [Workflows](/docs/workflows), and the stop logic lives in [Success & Control](/docs/success-and-control).
+
+## The session directory as durable state
+
+loopy-loop deliberately does not hide state inside a chat transcript. Continuity comes from two places: your git history, and files under `.loopy_loop/sessions/<session_id>/`.
+
+Each fresh coordinator run creates one session directory. Its id starts with a UTC timestamp and includes a deterministic hash of the goal, so sessions sort chronologically and similar goals are easy to compare. Inside, the coordinator and workflows keep their state in named files:
+
+- `goal.md` — the exact goal text copied into the session.
+- `state.json` — coordinator-owned dispatch state.
+- `control.json` — the workflow-owned stop switch.
+- `project_state/` — workflow-owned durable markdown state that survives across iterations.
+- `iterations/<NNNN>_<workflow_id>/` — one directory per assignment, holding the rendered prompt, the normalized result, and a link to the underlying harness output.
+
+Because state is files, you can read it, diff it, resume from it, and audit it. The [Session Layout](/docs/session-layout) reference documents every file and its owner.
+
+## The two-endpoint model
+
+At a conceptual level, the coordinator and worker communicate with a simple ping-pong: the worker asks once for a task, then reports each completed task and receives the next one, until it is told to stop. There is no polling, no leases, and no worker identity to track — every response tells the worker either to run a specific workflow or to stop.
+
+That is all you need to hold in mind here. The exact JSON payloads, the two endpoints, and crash-recovery behavior are documented in the [HTTP Contract](/docs/http-contract).
+
+## Where to go next
+
+- [Configuration](/docs/configuration) — the root config and every provider/model setting.
+- [Workflows](/docs/workflows) — how workflows are defined, scheduled, and grouped into sets.
+- [Success & Control](/docs/success-and-control) — how the loop decides it is done.
