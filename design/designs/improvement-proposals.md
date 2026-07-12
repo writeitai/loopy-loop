@@ -52,6 +52,12 @@ is active."** For a double loop used from day one, this is the first thing to fi
   cannot tell them apart).
 - Write `children.json`, `result.json`, `pending_finished_request.json`, and control/
   eval artifacts atomically (temp-file + `os.replace`), as `state.json` already is.
+- **Worker liveness (makes reclaim *safe*, not optimistic).** Have the `loopy worker`
+  record its pid + a periodic heartbeat in the session dir. Then a second `/register`
+  while a `current_task` exists can *verify* whether the worker is actually dead before
+  reclaiming — closing the duplicate-work window — instead of assuming abandonment. On a
+  confirmed-dead worker, also trigger team-harness reap for that run (P2.5) so its orphaned
+  agent processes are killed before fresh work starts. (Cross-repo split recorded in D7.)
 - Tests: restart mid-child; restart after child terminal but before parent resume;
   double `/register` while a task is live; late `/finished` from an old attempt.
 
@@ -306,18 +312,21 @@ orphan is not portably possible** — process control is tied to the dead parent
 transport; a new process cannot reattach and re-drive it. So the achievable fix is
 *prevent + clean up*, not adopt.
 
-**Sketch (mostly in team-harness — loopy doesn't control spawning).**
-- Spawn agents with `start_new_session=True` (own process group) and persist the PGID
-  (and the run/session it belongs to) to disk.
-- On worker/coordinator startup, kill any leftover process group recorded by a
-  predecessor run before starting fresh.
-- loopy-loop's side is just to surface this (e.g. `loopy doctor` warns about a leftover
-  group; `stop --force` in P2.4 kills it). The logical-session resume path
-  (team-harness already captures agent session ids) is a separate, larger option and is
-  **not** proposed here.
+**We own team-harness, so this is a designed feature there, not a `/proc`-scraping hack
+here.** The full design is written up in team-harness
+`design/designs/process-lifecycle-and-reaping.md` (decision TH-D5); loopy-loop's D7 records
+the ownership split. Summary of the split:
+- **team-harness side (the bulk):** spawn each worker with `start_new_session=True` (own
+  process group), persist `pid`/`pgid`/`starttime` into its existing per-run worker-session
+  manifest, and expose a `reap(manifest)` / `th reap` that kills still-alive groups —
+  verifying `starttime` so a recycled id is never killed.
+- **loopy-loop side (small):** on crash recovery, call team-harness reap for the interrupted
+  run before starting fresh; surface it via `loopy doctor` (warn about a leftover group) and
+  `stop --force` in P2.4 (reap it). The logical-session resume path (team-harness captures
+  agent session ids) is a separate, larger option and is **not** proposed here.
 
-**Effort.** M (team-harness) + S (loopy surfacing). **Status.** Proposed — separate from
-P0.1, which recovers state only.
+**Effort.** M (team-harness, tracked there) + S (loopy surfacing). **Status.** Proposed —
+separate from P0.1, which recovers state only. Pairs with the P0.1 worker-liveness bullet.
 
 ---
 
