@@ -55,6 +55,19 @@ is active."** For a double loop used from day one, this is the first thing to fi
 - Tests: restart mid-child; restart after child terminal but before parent resume;
   double `/register` while a task is live; late `/finished` from an old attempt.
 
+**Scope — this recovers *state*, not *processes*.** P0.1 makes a restarted coordinator
+reconstruct the session/child *state machine* from files. It deliberately does **not**
+try to re-adopt any running agent processes, because that is a different problem with a
+hard OS ceiling (see P2.5). This is the right split, because the two crash cases differ:
+- **Coordinator crash** (what P0.1 covers): the agent CLIs are children of the *worker*,
+  not the coordinator, so they are unaffected. The worker either finishes and writes its
+  artifacts (recovered from files), or — if the coordinator is down at `/finished` time —
+  exits *after* its agents already completed. No orphaned processes arise here; file-based
+  state recovery is sufficient and correct.
+- **Worker crash mid-run** (NOT covered by P0.1): the agent CLIs can orphan and keep
+  running. That is a process-cleanup problem, handled separately in P2.5 — do not fold it
+  into P0.1.
+
 **Effort.** M–L. **Status.** Proposed — **highest priority** given the double-loop
 decision.
 
@@ -99,26 +112,19 @@ resume-after-human flow, no external-action approval gate.
 the pause/resume gate.** The autonomy escape hatch already exists; only optional
 prompt/report polish remains.
 
-### P0.3 — Per-child budgets
+### P0.3 — Per-child budgets *(withdrawn)*
 
-**What.** Let a `ChildSessionRequest` carry its own `max_turns`, wall-clock, cost,
-model profile, and retry policy, instead of inheriting the parent's root config.
-
-**Why.** Today a child inherits root config through `_preflight_for()`, so a PM
-parent cannot give a child a small budget — a child spawned under the
-`pm_planner_dispatcher` template inherits `max_turns: 120`. The request schema only
-carries `workflow_set`, `goal`, `schema_version`. For a double loop that dispatches
-many small units of work, unbounded child budgets are an uncapped spend and make
-"one PR-sized slice per child" impossible to enforce. This is a direct blocker for
-the flagship use case.
-
-**Sketch.** Extend `ChildSessionRequest` with an optional `budgets` block and an
-optional `execution_profile` (see P2.1); the coordinator applies them to the child's
-`config_snapshot` at creation instead of copying root. Enforce at most one
-outstanding child request. Give invalid child-request files a terminal rejection
-record rather than leaving them silently in the directory.
-
-**Effort.** M. **Status.** Proposed.
+**Withdrawn.** Considered and dropped. The idea was to let a `ChildSessionRequest`
+carry its own `max_turns`/cost/model-profile/retry policy instead of inheriting the
+parent's root config. Rejected as not important enough to justify the trouble it
+brings: it expands the child-request schema and the config-resolution surface, adds
+more ways for a misconfigured child to behave surprisingly, and the simpler default —
+a child inherits root config, bounded by the root `max_turns` — is adequate. If a
+concrete need for a smaller/different child budget actually shows up, revisit then;
+until it does, keeping child config simple is the better default. (The one small,
+unrelated piece of hygiene worth keeping in mind separately: give an invalid
+child-request file a terminal rejection record rather than leaving it silently in the
+directory — fold that into P0.1's atomic-artifact work if convenient.)
 
 ### P0.4 — Make the PM template runnable from a clean init
 
@@ -284,6 +290,35 @@ double-loop runs this is a real safety and ergonomics gap.
 
 **Effort.** M. **Status.** Proposed.
 
+### P2.5 — Orphan agent-process cleanup on restart (team-harness level)
+
+**What.** On a hard *worker* crash mid-run (Ctrl-C, OOM, SIGKILL, panic), the agent CLI
+subprocesses (codex/claude/gemini) it spawned can orphan and keep running — still
+spending money, still writing to the target checkout — with nothing tracking them.
+Prevent and clean up those orphans.
+
+**Why.** Neither loopy-loop nor team-harness persists agent PIDs. loopy-loop runs the
+harness synchronously and tracks zero processes; team-harness holds the subprocess
+handle only **in memory** (`AgentManager._agents`), and spawns with no
+`start_new_session`/process-group, so a crashed worker's children are reparented to init
+and run on unsupervised. There is no startup reaping anywhere. **Re-adopting a running
+orphan is not portably possible** — process control is tied to the dead parent's asyncio
+transport; a new process cannot reattach and re-drive it. So the achievable fix is
+*prevent + clean up*, not adopt.
+
+**Sketch (mostly in team-harness — loopy doesn't control spawning).**
+- Spawn agents with `start_new_session=True` (own process group) and persist the PGID
+  (and the run/session it belongs to) to disk.
+- On worker/coordinator startup, kill any leftover process group recorded by a
+  predecessor run before starting fresh.
+- loopy-loop's side is just to surface this (e.g. `loopy doctor` warns about a leftover
+  group; `stop --force` in P2.4 kills it). The logical-session resume path
+  (team-harness already captures agent session ids) is a separate, larger option and is
+  **not** proposed here.
+
+**Effort.** M (team-harness) + S (loopy surfacing). **Status.** Proposed — separate from
+P0.1, which recovers state only.
+
 ---
 
 ## Explicitly deferred (not now)
@@ -297,7 +332,7 @@ double-loop runs this is a real safety and ergonomics gap.
 - **Web dashboard.** A local TUI over `events.jsonl` (P1.1) covers the solo-maintainer
   deployment without another service + auth surface.
 - **Breadth-first / arbitrary-depth child sessions.** Depth-first, one-child-at-a-time
-  is the right v1 and matches a shared checkout. Enrich the child *contract* (P0.3)
+  is the right v1 and matches a shared checkout. Harden the single-child path (P0.1)
   before adding breadth.
 
 ---
@@ -307,11 +342,12 @@ double-loop runs this is a real safety and ergonomics gap.
 1. **P0.1 + P2.2 together** — the session-stack/state-machine hardening and the
    `_advance()` refactor are one coherent piece of work. (P0.2 needs no code — the
    autonomy escape hatch already exists; at most it's prompt polish.)
-2. **P0.3 + P0.4** — child budgets and a runnable PM template; the double loop is now
-   safe and executable end to end.
+2. **P0.4** — a PM template runnable from a clean init; the double loop is now
+   executable end to end.
 3. **P1.1** — events/cost ledger + `status --watch`, so double-loop runs are legible.
 4. **P1.2 + P1.3** — deterministic backstop for high-stakes targets; fix the skill.
-5. **P2.1, P2.3, P2.4** — profiles/pins, failure taxonomy, operator UX (rolling).
+5. **P2.1, P2.3, P2.4, P2.5** — profiles/pins, failure taxonomy, operator UX, and
+   orphan-process cleanup (rolling).
 
 After (1)–(3), the double loop is ready to drive a large, multi-phase target as a
 sequence of narrow, deterministically-backstopped work packages that runs
