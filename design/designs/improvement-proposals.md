@@ -321,12 +321,14 @@ the ownership split. Summary of the split:
   manifest, and expose a `reap(manifest)` / `th reap` that kills still-alive groups —
   verifying `starttime` so a recycled id is never killed.
 - **loopy-loop side (small):** on crash recovery, pick a policy per orphan for the interrupted
-  run before starting fresh — **reap** by default (kill leftovers, re-run the iteration), or
-  **drain** (let an expensive/nearly-done agent finish and harvest its output, pausing fresh
-  work until it exits); surface it via `loopy doctor` (warn about a leftover group) and
-  `stop --force` in P2.4 (reap it). team-harness provides the liveness check + policy ops
-  (TH-D5); the logical-session resume path is a separate, larger option and is **not** proposed
-  here.
+  run before starting fresh. Default to **bounded drain** — let an in-flight agent finish within
+  a timeout and harvest its output, then continue from that completed state; this fits loopy's
+  cost-conscious, git-is-truth profile (D1), avoids wasting near-complete API spend and
+  half-applied edits, and the "two writers" objection is moot because draining happens during
+  recovery before any new work is dispatched. **Reap** (kill, then re-run) is the escape: for
+  `stop --force` (P2.4), a hung orphan past the drain timeout, or a crash cause that makes
+  finishing unsafe. team-harness provides the liveness check + policy ops + timeout (TH-D5);
+  the logical-session resume path is a separate, larger option and is **not** proposed here.
 
 **Effort.** M (team-harness, tracked there) + S (loopy surfacing). **Status.** Proposed —
 separate from P0.1, which recovers state only. Pairs with the P0.1 worker-liveness bullet.
