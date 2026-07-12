@@ -6,11 +6,9 @@
 `inner_outer_eval` workflow set.
 
 This document records two design decisions that are **deliberate and load-bearing**,
-but were until now implicit in the code rather than written down. Both were
-re-examined during the July 2026 review (see
-[`../analysis/synthesis.md`](../analysis/synthesis.md)); an outside reading of the
-code mistook each for a defect. They are not defects. This document exists so the
-next reader — human or agent — does not "fix" them by accident.
+but were until now implicit in the code rather than written down. A reader skimming
+the code can easily mistake each for a defect. They are not defects. This document
+exists so the next reader — human or agent — does not "fix" them by accident.
 
 Both decisions share one principle:
 
@@ -78,8 +76,8 @@ Because acceptance for an entire iteration ultimately rests on the evaluation la
 and that layer is LLM-as-judge by design (Decision 2), a whole iteration's
 "success" can rest on a single model judgment with no deterministic backstop. For
 low-stakes goals this is an acceptable, conscious trade. For high-stakes work it
-should be **backstopped**, not reverted — see the proposals doc and the note in
-Decision 2 about repo-owned deterministic checks.
+should be **backstopped**, not reverted — see the note in Decision 2 about
+repo-owned deterministic checks, and the separate improvement-proposals doc.
 
 ### Alternatives considered and rejected
 
@@ -140,8 +138,9 @@ already owns a trustworthy contract-test suite, the right configuration is *both
 LLM-as-judge for the qualitative "did this achieve the outcome," **and** a
 deterministic gate that shells out to the repo's own suite as a backstop under the
 judge. That backstop does not reintroduce the agent-authoring problem, and it removes
-the single-judgment point of failure noted in Decision 1. Workflow sets targeting
-such repos (e.g. a future `ugm_wp`) should override the stock rule accordingly.
+the single-judgment point of failure noted in Decision 1. A workflow set targeting
+such a repo should override the stock rule accordingly, in a dedicated child workflow
+set rather than by loosening the stock template.
 
 ### Consequences
 
@@ -149,8 +148,7 @@ such repos (e.g. a future `ugm_wp`) should override the stock rule accordingly.
   usual LLM-as-judge properties: non-determinism, per-check inference cost, and the
   judge as a point of trust.
 - **The judge should not share failure modes with the implementer.** Prefer judging
-  with a different model family than the one that implemented (cf. `ugm`'s D53
-  cross-family principle).
+  with a different model family than the one that implemented the change.
 - **A single judge pass is evidence, not a hard gate for high-stakes stops.** Keep
   `control.json` as the stop switch (Decision 1); for high-stakes goals, require
   repeated/independent judgments or a deterministic backstop before a terminal
@@ -188,4 +186,4 @@ Both decisions are sound. Neither should be reverted. The one thing worth adding
 for high-stakes targets only — is a deterministic backstop built from the target
 repo's **own** contract tests, which strengthens both decisions without undoing
 either. That, and other forward-looking proposals, are covered separately in the
-proposals design doc.
+improvement-proposals design doc.
