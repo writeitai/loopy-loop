@@ -156,8 +156,11 @@ work package) while the parent carries durable cross-cutting state. Committing t
 the start avoids re-architecting mid-project.
 
 **Consequences.** The parent/child machinery is on the critical path from day one, so it
-must be hardened *first* — durable active-child crash recovery, per-child budgets, and a
-PM template that is runnable from a clean init are prerequisites, not later polish (see
-`improvement-proposals.md` P0). Child sessions remain depth-first and one-at-a-time
+must be hardened *first* — durable active-child crash recovery and a PM template that is
+runnable from a clean init are prerequisites, not later polish (see
+`improvement-proposals.md` P0). Note that this recovery is of session/child *state* from
+files, not of running agent processes: re-adopting a crashed worker's agent subprocesses
+is not feasible, so a hard worker crash is handled by cleanup, not adoption
+(`improvement-proposals.md` P2.5). Child sessions remain depth-first and one-at-a-time
 (consistent with D2). The planner drives the target's *own* authoritative plan; it does
 not invent a parallel backlog.
