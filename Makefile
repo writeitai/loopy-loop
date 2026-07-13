@@ -17,7 +17,7 @@ claudecontinue:
 ## Codex
 codex:
 	# do /fast
-	codex --yolo --model gpt-5.5
+	codex --yolo --model gpt-5.6-sol
 
 install_globally:
 	uv tool install --editable "$(CURDIR)"
