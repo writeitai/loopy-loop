@@ -429,3 +429,396 @@ def test_dispatch_carries_attempt_id_and_stale_attempt_is_not_processed(
     state = StateStore(repo_root=repo_root).read_state()
     assert state is not None
     assert len(state.history) == 1
+
+
+# ---------------------------------------------------------------------------
+# Review-driven coverage (Codex P0.1 review: C1, M1-M6, m1)
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_finished_never_gives_suspended_parent_a_task(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    # C1: overlapping /finished retries. The first dispatches the child and
+    # commits the suspended parent; a duplicate retry must NOT advance the
+    # parent (parent task + child task live simultaneously). It gets the
+    # child's live task instead — idempotent with the first response.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_repo_with_child_set(repo_builder)
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    parent_task, child_task = _dispatch_child(client, repo_root)
+
+    duplicate = client.post(
+        "/finished",
+        json={
+            "workflow_id": parent_task["workflow_id"],
+            "session_id": parent_task["session_id"],
+            "iteration": parent_task["iteration"],
+            "success": True,
+            "text": "parent planned child",
+            "worker": REGISTER_BODY["worker"],
+            "attempt_id": parent_task["attempt_id"],
+        },
+    ).json()
+    assert duplicate["action"] == "run"
+    assert duplicate["session_id"] == child_task["session_id"]  # child, not parent
+    parent = _parent_state(repo_root, parent_task["session_id"])
+    assert parent is not None
+    assert parent.current_task is None  # the invariant C1 violated
+    assert parent.active_child_session_id == child_task["session_id"]
+
+
+def test_completed_childs_request_filename_is_reusable(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    # M1: the tombstone must apply only while the record is running — a later,
+    # genuinely new request under the same filename must dispatch.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    # Two independent parent workflows: the default repo's goal_check would
+    # be dispatched after the resume and fail (no goal_check.json), blocking
+    # the after-success child scan this test needs; a single workflow would
+    # starve the resume (run_every not yet satisfied).
+    repo_root = repo_builder(
+        workflows={
+            "planner": {
+                "prompt": "Plan work.",
+                "config": {
+                    "enabled": True,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "Plan",
+                },
+            },
+            "implement": {
+                "prompt": "Implement.",
+                "config": {
+                    "enabled": True,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "description": "Implement",
+                },
+            },
+        }
+    )
+    child_workflow_dir = (
+        repo_root
+        / ".loopy_loop"
+        / "workflow_sets"
+        / "child_set"
+        / "workflows"
+        / "child_work"
+    )
+    child_workflow_dir.mkdir(parents=True)
+    child_workflow_dir.joinpath("prompt.txt").write_text(
+        "Do the child work.", encoding="utf-8"
+    )
+    child_workflow_dir.joinpath("config.yaml").write_text(
+        CHILD_WORKFLOW_CONFIG + "\n", encoding="utf-8"
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    parent_task, child_task = _dispatch_child(client, repo_root)
+    control_path(repo_root=repo_root, session_id=child_task["session_id"]).write_text(
+        json.dumps(
+            {
+                "state": "stopped",
+                "reason": "done",
+                "stop_reason": "goal_met",
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    resumed_parent = client.post(
+        "/finished",
+        json={
+            "workflow_id": child_task["workflow_id"],
+            "session_id": child_task["session_id"],
+            "iteration": child_task["iteration"],
+            "success": True,
+            "text": "child A done",
+            "worker": REGISTER_BODY["worker"],
+            "attempt_id": child_task["attempt_id"],
+        },
+    ).json()
+    assert resumed_parent["session_id"] == parent_task["session_id"]
+
+    # A NEW request reusing the same filename for new work:
+    request_dir = child_requests_dir_path(
+        repo_root=repo_root, session_id=parent_task["session_id"]
+    )
+    request_dir.joinpath("child.json").write_text(
+        json.dumps(
+            {
+                "workflow_set": "child_set",
+                "goal": "Second work item.",
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    second_child = client.post(
+        "/finished",
+        json={
+            "workflow_id": resumed_parent["workflow_id"],
+            "session_id": resumed_parent["session_id"],
+            "iteration": resumed_parent["iteration"],
+            "success": True,
+            "text": "planned item B",
+            "worker": REGISTER_BODY["worker"],
+            "attempt_id": resumed_parent["attempt_id"],
+        },
+    ).json()
+    assert second_child["workflow_set"] == "child_set"
+    records = json.loads(
+        children_path(
+            repo_root=repo_root, session_id=parent_task["session_id"]
+        ).read_text(encoding="utf-8")
+    )
+    assert len(records["children"]) == 2  # B was dispatched, not swallowed
+
+
+def test_restart_reconciles_record_without_child_state(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    # M2 window (record lands before child state): a running record whose
+    # child state is missing is marked failed_dispatch and its request file
+    # redispatches exactly once.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_repo_with_child_set(repo_builder)
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    parent_task, child_task = _dispatch_child(client, repo_root)
+
+    # Simulate the crash: erase the child's state (record + request remain).
+    child_state_path = state_path(
+        repo_root=repo_root, session_id=child_task["session_id"]
+    )
+    child_state_path.unlink()
+    parent_store = StateStore(
+        repo_root=repo_root,
+        state_path=state_path(
+            repo_root=repo_root, session_id=parent_task["session_id"]
+        ),
+    )
+    parent = parent_store.read_state()
+    assert parent is not None
+    parent.active_child_session_id = None  # pointer commit never landed
+    parent_store.write_state(state=parent)
+    request_dir = child_requests_dir_path(
+        repo_root=repo_root, session_id=parent_task["session_id"]
+    )
+    request_dir.joinpath("child.json").write_text(  # unlink never happened
+        json.dumps(
+            {
+                "workflow_set": "child_set",
+                "goal": "Handle a focused child task.",
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _stub_recovery(monkeypatch)
+    restarted = TestClient(create_coordinator_app(repo_root=repo_root, resume=True))
+    response = restarted.post("/register", json=REGISTER_BODY).json()
+    records = json.loads(
+        children_path(
+            repo_root=repo_root, session_id=parent_task["session_id"]
+        ).read_text(encoding="utf-8")
+    )
+    statuses = [record["status"] for record in records["children"]]
+    assert "failed_dispatch" in statuses  # the broken dispatch is closed out
+    # The request redispatches (either already in this response or on the
+    # next successful parent iteration) — the file must not be tombstoned.
+    assert response["action"] == "run"
+
+
+def test_restart_finalizes_terminal_child_without_pointer(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    # M3: terminal child + running record + NO pointer (pre-pointer version
+    # crash) was ignored forever. Reconciliation must finalize it.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_repo_with_child_set(repo_builder)
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    parent_task, child_task = _dispatch_child(client, repo_root)
+
+    child_store = StateStore(
+        repo_root=repo_root,
+        state_path=state_path(repo_root=repo_root, session_id=child_task["session_id"]),
+    )
+    child = child_store.read_state()
+    assert child is not None
+    child.status = "goal_met"
+    child.stop_reason = "goal_met"
+    child.current_task = None
+    child_store.write_state(state=child)
+    parent_store = StateStore(
+        repo_root=repo_root,
+        state_path=state_path(
+            repo_root=repo_root, session_id=parent_task["session_id"]
+        ),
+    )
+    parent = parent_store.read_state()
+    assert parent is not None
+    parent.active_child_session_id = None  # pre-pointer state
+    parent_store.write_state(state=parent)
+
+    restarted = TestClient(create_coordinator_app(repo_root=repo_root, resume=True))
+    response = restarted.post("/register", json=REGISTER_BODY).json()
+    assert response["session_id"] == parent_task["session_id"]
+    records = json.loads(
+        children_path(
+            repo_root=repo_root, session_id=parent_task["session_id"]
+        ).read_text(encoding="utf-8")
+    )
+    assert records["children"][0]["status"] == "goal_met"  # finalized, not stuck
+
+
+def test_first_child_task_carries_an_attempt_id(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    # M4: the initial child dispatch bypassed _advance and shipped a null
+    # attempt, leaving the child's first iteration unfenced.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_repo_with_child_set(repo_builder)
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    _, child_task = _dispatch_child(client, repo_root)
+    assert child_task["attempt_id"]
+
+
+def test_stale_result_artifact_cannot_complete_a_new_attempt(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    # M5 case 3: a stale pending file is rejected, but the stale result.json
+    # right next to it must not slip through as the NEW attempt's completion.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task = client.post("/register", json=REGISTER_BODY).json()
+
+    from loopy_loop.sessions import ensure_iteration_dir
+
+    iteration_dir = ensure_iteration_dir(
+        repo_root=repo_root,
+        session_id=task["session_id"],
+        iteration=task["iteration"],
+        workflow_id=task["workflow_id"],
+    )
+    iteration_dir.joinpath("result.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "text": "stale result from a superseded attempt",
+                "error": None,
+                "harness_run_id": "old",
+                "harness_output_dir": "",
+                "attempt_id": "superseded0000",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "loopy_loop.coordinator_app.is_worker_alive", lambda identity: False
+    )
+    _stub_recovery(monkeypatch)
+    response = client.post("/register", json=REGISTER_BODY).json()
+    assert response["action"] == "run"
+    state = StateStore(repo_root=repo_root).read_state()
+    assert state is not None
+    # The stale artifact was NOT recorded as a successful completion:
+    assert state.history[0].success is False
+    assert state.history[0].error in {"abandoned", "abandoned_after_drain"}
+
+
+def test_semantically_invalid_child_request_is_rejected_not_wedging(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    # M6: a schema-valid request naming an unknown workflow set previously
+    # raised out of the mutator — HTTP 500 on EVERY completion, forever.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    parent_task = client.post("/register", json=REGISTER_BODY).json()
+    request_dir = child_requests_dir_path(
+        repo_root=repo_root, session_id=parent_task["session_id"]
+    )
+    request_dir.mkdir(parents=True, exist_ok=True)
+    request_dir.joinpath("bad.json").write_text(
+        json.dumps(
+            {"workflow_set": "does_not_exist", "goal": "x", "schema_version": 1}
+        ),
+        encoding="utf-8",
+    )
+    response = client.post(
+        "/finished",
+        json={
+            "workflow_id": parent_task["workflow_id"],
+            "session_id": parent_task["session_id"],
+            "iteration": parent_task["iteration"],
+            "success": True,
+            "text": "done",
+            "worker": REGISTER_BODY["worker"],
+            "attempt_id": parent_task["attempt_id"],
+        },
+    )
+    assert response.status_code == 200  # the completion is committed
+    assert response.json()["action"] == "run"
+    assert not request_dir.joinpath("bad.json").exists()
+    rejected = list(request_dir.glob("bad.json*.rejected")) + list(
+        request_dir.glob("bad.json.rejected")
+    )
+    assert rejected, "the unusable request must be terminally rejected"
+
+
+def test_double_finalization_keeps_first_completed_at(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    # m1: crash-replayed finalization must not rewrite the audit timestamp.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_repo_with_child_set(repo_builder)
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    parent_task, child_task = _dispatch_child(client, repo_root)
+    control_path(repo_root=repo_root, session_id=child_task["session_id"]).write_text(
+        json.dumps(
+            {
+                "state": "stopped",
+                "reason": "done",
+                "stop_reason": "goal_met",
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    client.post(
+        "/finished",
+        json={
+            "workflow_id": child_task["workflow_id"],
+            "session_id": child_task["session_id"],
+            "iteration": child_task["iteration"],
+            "success": True,
+            "text": "child done",
+            "worker": REGISTER_BODY["worker"],
+            "attempt_id": child_task["attempt_id"],
+        },
+    )
+    children_file = children_path(
+        repo_root=repo_root, session_id=parent_task["session_id"]
+    )
+    first = json.loads(children_file.read_text())["children"][0]["completed_at"]
+
+    # Simulate the crash-replay: re-finalize at startup (pointer re-set).
+    parent_store = StateStore(
+        repo_root=repo_root,
+        state_path=state_path(
+            repo_root=repo_root, session_id=parent_task["session_id"]
+        ),
+    )
+    parent = parent_store.read_state()
+    assert parent is not None
+    parent.active_child_session_id = child_task["session_id"]
+    parent_store.write_state(state=parent)
+    TestClient(create_coordinator_app(repo_root=repo_root, resume=True))
+    second = json.loads(children_file.read_text())["children"][0]["completed_at"]
+    assert second == first

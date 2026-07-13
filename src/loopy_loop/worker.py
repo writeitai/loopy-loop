@@ -200,6 +200,9 @@ def _run_task(
         iteration_result = IterationResult(
             success=False, text=None, error=str(exc), harness_run_id=""
         )
+    iteration_result = iteration_result.model_copy(
+        update={"attempt_id": task.attempt_id}
+    )
     write_iteration_artifacts(
         iteration_dir=iteration_dir,
         rendered_prompt=rendered_prompt,

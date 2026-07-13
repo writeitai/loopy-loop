@@ -175,6 +175,9 @@ class IterationResult(BaseModel):
     error_detail: dict[str, object] | None = Field(default=None)
     harness_run_id: str = Field(default="")
     harness_output_dir: str = Field(default="")
+    # Attempt provenance: without it, a stale result.json could complete a
+    # NEW attempt right after its stale pending file was correctly rejected.
+    attempt_id: str | None = Field(default=None)
 
 
 class ChildSessionRequest(BaseModel):

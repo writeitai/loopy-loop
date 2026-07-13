@@ -23,7 +23,24 @@
   crash can never leave a truncated recovery artifact.
 - Internal: the three duplicated dispatch blocks in the coordinator collapsed
   into one `_advance()` step (stop checks → child dispatch → next workflow →
-  stamped task), so they can no longer drift apart.
+  stamped task), so they can no longer drift apart. `_advance()` also enforces
+  the suspended-parent invariant: a parent with a live child can never acquire
+  its own task (a duplicate `/finished` retry gets the child's live task
+  instead), and a coordinator-level transition lock serializes cross-store
+  handoffs.
+- Review hardening (adversarial Codex review of the above): request-file
+  tombstones apply only to RUNNING child records (a completed child's
+  filename is reusable for new work); the children.json record lands BEFORE
+  the child state so an interrupted dispatch is always discoverable
+  (`failed_dispatch` + exactly-once redispatch); startup reconciles every
+  running-projected record (terminal children finalize even without a
+  pointer); the first child task carries an attempt id; attempt checks are
+  strict whenever the live task has one (including `result.json` provenance —
+  a stale artifact can no longer complete a new attempt); semantically
+  unusable child requests (unknown workflow set, no eligible workflow) are
+  terminally rejected instead of wedging every completion; packaged prompts
+  instruct atomic control/goal_check publication; the crash model (process
+  crash, no fsync) is documented.
 
 ## 0.3.0 (breaking)
 

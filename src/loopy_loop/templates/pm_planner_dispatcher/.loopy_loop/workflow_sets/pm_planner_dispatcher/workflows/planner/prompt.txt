@@ -97,3 +97,11 @@ Guardrails:
   useful.
 
 Use Codex.
+
+Atomic file publication (important):
+- When updating the Session control path or writing goal_check.json, never
+  write the final path directly. Write a temporary file in the same directory
+  first, then rename it over the final path (e.g. `mv control.json.tmp
+  control.json`). The coordinator reads these files as state-machine inputs;
+  a truncated half-written file is treated as invalid output and can
+  terminate the session.

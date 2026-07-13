@@ -5,6 +5,7 @@ import json
 import logging
 from pathlib import Path
 import socket
+import threading
 from typing import Any
 from typing import TypeVar
 import uuid
@@ -135,6 +136,14 @@ class CoordinatorService:
             preflight.workflow_set: preflight
         }
         self.state_store = state_store
+        # Serializes cross-store transitions (parent<->child handoff and the
+        # phase-B commits): FastAPI runs sync endpoints in a threadpool, so
+        # overlapping requests could otherwise race on self.state_store and
+        # the multi-file dispatch transition (C1). Reentrant because a child's
+        # terminal /finished resumes the parent by calling register_worker()
+        # on the same thread. Phase-A recovery (the long drain) deliberately
+        # runs OUTSIDE this lock on the initial register path.
+        self._transition_lock = threading.RLock()
         self._prepare_state(resume=resume)
 
     def register_worker(
@@ -148,7 +157,8 @@ class CoordinatorService:
         # phase A when the state moved in between.
         for _ in range(3):
             recovery = self._plan_orphan_recovery()
-            response = self._register_attempt(caller=caller, recovery=recovery)
+            with self._transition_lock:
+                response = self._register_attempt(caller=caller, recovery=recovery)
             if response is not None:
                 return response
         raise WorkerBusyError(
@@ -245,6 +255,38 @@ class CoordinatorService:
             path.unlink(missing_ok=True)
         return response
 
+    def _suspended_parent_response(self, *, state: LoopState) -> TaskResponse | None:
+        """A parent with a live child must NEVER acquire its own current_task.
+
+        Reachable via overlapping /finished retries: the first call dispatches
+        the child and commits the suspended parent; a duplicate retry then
+        reads that parent with current_task=None and would otherwise advance
+        it — putting a parent task and a child task live simultaneously (the
+        C1 race from review). The duplicate gets the child's live task instead
+        (idempotent with the first response); a terminal child is finalized so
+        the advance continues as the legitimate parent resume.
+        """
+        child_id = state.active_child_session_id
+        if child_id is None:
+            return None
+        child_store = self._store_for(session_id=child_id)
+        child_state = child_store.read_state()
+        if child_state is None or child_store.is_terminal_state(state=child_state):
+            # Legitimate resume: finalize and let the advance continue.
+            if child_state is not None:
+                self._mark_child_record_complete(child_state=child_state)
+            state.active_child_session_id = None
+            return None
+        if child_state.current_task is not None:
+            return _build_run_response(
+                current_task=child_state.current_task,
+                config_snapshot=child_state.config_snapshot,
+            )
+        raise WorkerBusyError(
+            f"child session {child_id} is active; its next task is dispatched "
+            "through the child session, not the parent"
+        )
+
     def _advance(
         self, *, state: LoopState, caller: WorkerIdentity | None, now: datetime
     ) -> TaskResponse:
@@ -255,6 +297,9 @@ class CoordinatorService:
         so the three former copies (register, finished no-task, finished
         matched) cannot drift apart.
         """
+        suspended = self._suspended_parent_response(state=state)
+        if suspended is not None:
+            return suspended
         stop_response = self._stop_response_if_needed(state=state)
         if stop_response is not None:
             return stop_response
@@ -300,6 +345,12 @@ class CoordinatorService:
 
     def finish_assignment(self, *, request: FinishedRequest) -> TaskResponse:
         caller = request.worker
+        with self._transition_lock:
+            return self._finish_assignment_locked(request=request, caller=caller)
+
+    def _finish_assignment_locked(
+        self, *, request: FinishedRequest, caller: WorkerIdentity | None
+    ) -> TaskResponse:
 
         def mutator(state: LoopState | None) -> tuple[LoopState, TaskResponse]:
             current = _require_state(state=state)
@@ -321,11 +372,14 @@ class CoordinatorService:
                 or request.workflow_id != active.workflow_id
                 or request.iteration != active.iteration
                 or (
-                    # A late /finished from a SUPERSEDED attempt of the very
-                    # same coordinates is stale too: the work was already
-                    # recovered/abandoned and redispatched under a new attempt.
-                    request.attempt_id is not None
-                    and active.attempt_id is not None
+                    # A live task WITH an attempt id accepts only an exact
+                    # echo: a missing or different attempt means a superseded
+                    # or unversioned completion — its work was already
+                    # recovered/abandoned and redispatched. The wildcard
+                    # applies only when the persisted task itself predates
+                    # attempt ids (M5: legacy tolerance belongs to the OLD
+                    # task, never to an unversioned artifact vs a NEW task).
+                    active.attempt_id is not None
                     and request.attempt_id != active.attempt_id
                 )
             ):
@@ -486,6 +540,14 @@ class CoordinatorService:
         )
         if result is None:
             return None
+        if (
+            current_task.attempt_id is not None
+            and result.attempt_id != current_task.attempt_id
+        ):
+            # The artifact belongs to a superseded (or unversioned) attempt:
+            # accepting it would let a stale result complete the NEW attempt
+            # right after its stale pending file was correctly rejected (M5).
+            return None
         return (
             FinishedRequest(
                 session_id=current_task.session_id,
@@ -494,6 +556,7 @@ class CoordinatorService:
                 success=result.success,
                 text=result.text,
                 error=result.error,
+                attempt_id=result.attempt_id,
             ),
             None,
         )
@@ -582,27 +645,72 @@ class CoordinatorService:
             state = child_state
 
     def _adoptable_child_id(self, *, parent_state: LoopState) -> str | None:
-        """The crash window where the child was fully created (state written,
-        children.json recorded) but the parent's pointer commit never landed:
-        adopt the running child instead of redispatching a duplicate."""
+        """Reconcile EVERY running-projected child record, then return the
+        adoptable live child (if any).
+
+        Handles all the projections a crash (or a pre-pointer version of
+        loopy-loop) can leave behind:
+        - record running, child state TERMINAL -> finalize the record, remove
+          its leftover request file (previously ignored forever — M3);
+        - record running, child state MISSING -> mark the record
+          failed_dispatch so its request file redispatches exactly once (M2);
+        - record running, child state running and parent linkage correct ->
+          the crash window where the child was fully created but the parent's
+          pointer commit never landed: adopt it.
+        """
+        parent_session_id = parent_state.active_session_id
         payload = _read_children_payload(
-            path=children_path(
-                repo_root=self.repo_root, session_id=parent_state.active_session_id
-            )
+            path=children_path(repo_root=self.repo_root, session_id=parent_session_id)
         )
-        for record in reversed(payload["children"]):
+        adoptable: str | None = None
+        changed = False
+        for record in payload["children"]:
             if record.get("status") != "running":
                 continue
             child_id = record.get("session_id")
             if not child_id:
                 continue
-            child_state = StateStore(
-                repo_root=self.repo_root,
-                state_path=state_path(repo_root=self.repo_root, session_id=child_id),
-            ).read_state()
-            if child_state is not None and child_state.status == "running":
-                return child_id
-        return None
+            child_store = self._store_for(session_id=child_id)
+            child_state = child_store.read_state()
+            if child_state is None:
+                record["status"] = "failed_dispatch"
+                record["stop_reason"] = "child state was never written"
+                changed = True
+                continue
+            if child_store.is_terminal_state(state=child_state):
+                self._mark_child_record_complete(child_state=child_state)
+                request_file = record.get("request_file")
+                if request_file:
+                    (
+                        child_requests_dir_path(
+                            repo_root=self.repo_root, session_id=parent_session_id
+                        )
+                        / request_file
+                    ).unlink(missing_ok=True)
+                continue
+            if child_state.parent_session_id != parent_session_id:
+                logger.warning(
+                    "child record %s does not link back to parent %s; ignoring",
+                    child_id,
+                    parent_session_id,
+                )
+                continue
+            if adoptable is not None:
+                logger.warning(
+                    "multiple running children recorded (%s, %s); adopting the "
+                    "newest and leaving the other for manual reconciliation",
+                    adoptable,
+                    child_id,
+                )
+            adoptable = child_id
+        if changed:
+            write_json_atomic(
+                path=children_path(
+                    repo_root=self.repo_root, session_id=parent_session_id
+                ),
+                payload=payload,
+            )
+        return adoptable
 
     def _store_for(self, *, session_id: str) -> StateStore:
         return StateStore(
@@ -698,24 +806,29 @@ class CoordinatorService:
                 continue
             request = _read_signal(path=request_path, model=ChildSessionRequest)
             if request is None:
-                # Terminal rejection: leave an inspectable record instead of
-                # silently re-reading a broken file on every dispatch scan.
-                rejected = request_path.with_suffix(request_path.suffix + ".rejected")
-                request_path.rename(rejected)
-                logger.warning(
-                    "rejected invalid child request %s (kept as %s)",
-                    request_path.name,
-                    rejected.name,
-                )
+                _reject_request(request_path, reason="invalid JSON or schema")
                 continue
-            preflight = self._preflight_for(
-                workflow_set=request.workflow_set, goal=request.goal
-            )
+            # Total transition (M6): a schema-valid request that cannot be
+            # dispatched — unknown workflow set, broken workflow configs, or a
+            # set with no initially eligible workflow — must be terminally
+            # rejected, never left to wedge every future completion with the
+            # same error.
+            try:
+                preflight = self._preflight_for(
+                    workflow_set=request.workflow_set, goal=request.goal
+                )
+            except ConfigError as exc:
+                _reject_request(request_path, reason=str(exc))
+                continue
             workflows = preflight.workflows
             workflow = choose_next_workflow(
                 workflows=workflows, history=[], iteration_count=0
             )
             if workflow is None:
+                _reject_request(
+                    request_path,
+                    reason="workflow set has no initially eligible workflow",
+                )
                 continue
             goal_hash = derive_goal_hash(goal=request.goal)
             child_session_id = create_session_id(goal_hash=goal_hash)
@@ -726,6 +839,22 @@ class CoordinatorService:
                 goal=request.goal,
                 workflow_set=request.workflow_set,
                 parent_session_id=state.active_session_id,
+            )
+            # Durable intent FIRST (M2): the children.json record lands before
+            # the child state, so a crash in between leaves a discoverable
+            # "running record, missing state" projection that startup
+            # reconciliation marks failed_dispatch and redispatches — instead
+            # of an unindexed running-looking child no recovery can adopt.
+            self._append_child_record(
+                parent_session_id=state.active_session_id,
+                record=ChildSessionRecord(
+                    session_id=child_session_id,
+                    workflow_set=request.workflow_set,
+                    goal_hash=goal_hash,
+                    status="running",
+                    created_at=utc_now(),
+                    request_file=request_path.name,
+                ),
             )
             snapshot = RootConfigSnapshot.model_validate(
                 preflight.root_config.model_dump(exclude=_COORDINATOR_ONLY_FIELDS)
@@ -746,6 +875,7 @@ class CoordinatorService:
                     iteration=1,
                     started_at=now,
                     worker=caller,
+                    attempt_id=_new_attempt_id(),
                 ),
             )
             child_store = StateStore(
@@ -758,17 +888,6 @@ class CoordinatorService:
             child_task = child_state.current_task
             if child_task is None:
                 raise RuntimeError("Child session was created without a task")
-            self._append_child_record(
-                parent_session_id=state.active_session_id,
-                record=ChildSessionRecord(
-                    session_id=child_session_id,
-                    workflow_set=request.workflow_set,
-                    goal_hash=goal_hash,
-                    status="running",
-                    created_at=now,
-                    request_file=request_path.name,
-                ),
-            )
             # The durable session-stack pointer: committed with the parent
             # state when this mutator returns, so a restarted coordinator can
             # walk parent -> child instead of resuming the parent and
@@ -844,12 +963,22 @@ class CoordinatorService:
             break
 
     def _dispatched_request_files(self, *, parent_session_id: str) -> set[str]:
+        """Filenames suppressed by the crash-window tombstone.
+
+        Only RUNNING records suppress: a completed child's request filename is
+        legal to reuse for genuinely new work (a stable name like child.json
+        is a perfectly reasonable agent protocol). The crash window this
+        protects — record appended, request not yet unlinked — always has a
+        running record; completed leftovers are cleaned by the completion path
+        and by startup reconciliation.
+        """
         path = children_path(repo_root=self.repo_root, session_id=parent_session_id)
         payload = _read_children_payload(path=path)
         return {
             record["request_file"]
             for record in payload["children"]
             if record.get("request_file")
+            and record.get("status") in {"running", "dispatching"}
         }
 
     def _append_child_record(
@@ -869,7 +998,12 @@ class CoordinatorService:
         for record in payload["children"]:
             if record.get("session_id") == child_state.active_session_id:
                 record["status"] = child_state.status
-                record["completed_at"] = utc_now().isoformat().replace("+00:00", "Z")
+                if not record.get("completed_at"):
+                    # Idempotent for audit: keep the FIRST observed completion
+                    # time across crash-replayed finalizations.
+                    record["completed_at"] = (
+                        utc_now().isoformat().replace("+00:00", "Z")
+                    )
                 record["stop_reason"] = child_state.stop_reason
                 break
         write_json_atomic(path=path, payload=payload)
@@ -967,11 +1101,34 @@ def _require_state(*, state: LoopState | None) -> LoopState:
     return state
 
 
+def _reject_request(request_path: Path, *, reason: str) -> None:
+    """Terminally reject a child request, keeping an inspectable record.
+
+    Collision-safe: a second rejection with the same original name never
+    overwrites the first record.
+    """
+    rejected = request_path.with_suffix(request_path.suffix + ".rejected")
+    if rejected.exists():
+        rejected = request_path.with_suffix(
+            request_path.suffix + f".{uuid.uuid4().hex[:8]}.rejected"
+        )
+    request_path.rename(rejected)
+    logger.warning(
+        "rejected child request %s (%s); kept as %s",
+        request_path.name,
+        reason,
+        rejected.name,
+    )
+
+
 def _same_task(a: CurrentTask, b: CurrentTask) -> bool:
     return (
         a.session_id == b.session_id
         and a.workflow_id == b.workflow_id
         and a.iteration == b.iteration
+        and (
+            a.attempt_id is None or b.attempt_id is None or a.attempt_id == b.attempt_id
+        )
     )
 
 
@@ -983,8 +1140,7 @@ def _matches_current_task(
         and request.workflow_id == current_task.workflow_id
         and request.iteration == current_task.iteration
         and (
-            request.attempt_id is None
-            or current_task.attempt_id is None
+            current_task.attempt_id is None
             or request.attempt_id == current_task.attempt_id
         )
     )

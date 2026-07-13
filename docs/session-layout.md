@@ -176,6 +176,15 @@ eval-banana run \
   while a child runs — the durable session-stack pointer a restarted
   coordinator follows to resume the child instead of orphaning it
 
+Atomicity and crash model: the coordinator- and worker-owned artifacts above
+are written atomically (same-directory temp file + rename), so a **process
+crash** never leaves them truncated — readers see either the previous or the
+new complete file. This does not extend to power loss / kernel crashes (no
+fsync), and it cannot be enforced for **workflow-written** signals
+(`control.json`, `goal_check.json`, child requests): the packaged prompts
+instruct agents to publish those via temp-file + rename, but a torn write by a
+non-compliant agent is read as invalid output.
+
 `salvage.json`
 
 - Written into the interrupted iteration's directory during crash recovery,
