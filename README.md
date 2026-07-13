@@ -1,5 +1,9 @@
 # loopy-loop
 
+<p align="center">
+  <img src="docs/images/logo.png" alt="loopy-loop logo" width="400">
+</p>
+
 `loopy-loop` runs long-running AI agent workflows inside your repository.
 It turns a goal file in your repository into an inspectable sequence of agent
 iterations: plan, implement, evaluate, record evidence, and continue until the
@@ -12,8 +16,8 @@ logs. You can pause, resume, audit what happened, adjust the goal, inspect every
 prompt/result pair, and keep the actual project changes in normal git branches
 and PRs.
 
-Under the hood, loopy-loop runs a small FastAPI coordinator and one or more
-workers. The coordinator owns the loop state and chooses the next workflow. The
+Under the hood, loopy-loop runs a small FastAPI coordinator and a single
+worker. The coordinator owns the loop state and chooses the next workflow. The
 workers run assignments through
 [`team-harness`](https://github.com/writeitai/team-harness), which can delegate
 to agent CLIs such as Codex, Claude Code, and Gemini. The packaged
