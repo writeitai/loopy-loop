@@ -25,6 +25,10 @@ relevant decision (and its companion design doc):
 - **D2 — single worker is deliberate.** Do not add parallel loopy workers as a scaling
   feature.
 - **D5 — full autonomy with a last-resort escape hatch.** See Rule 2.
+- **D8 — constraints are detection, not prevention.** Do not add preventive fences
+  (path-level write enforcement, semantic scheduling vetoes, approval flows, arbitrary
+  mid-run hard-fails). Express constraints as evaluation-layer checks whose failure
+  blocks *acceptance* of the work, with repair as the path forward.
 
 If you believe a decision is genuinely wrong, propose amending `design/decisions.md`
 (state what changes and why) — do not silently contradict it in code.

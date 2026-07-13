@@ -203,3 +203,39 @@ and apply a recovery policy per orphan (default bounded drain, reap as escape). 
 state-recovery *safe* (verify-dead-before-reclaim) rather than optimistic. See
 `improvement-proposals.md` P0.1 (worker liveness) and P2.5 (recovery policy), and team-harness
 TH-D5.
+
+## D8. Constraints on agents are fail-closed detection with a repair path, never hard prevention
+
+**Decision.** The system constrains agent behavior by **detecting** violations in evidence
+and blocking *acceptance* of the work until they are repaired — never by **preventing** the
+action up front. No preventive fences: no path-level write sandboxes, no semantic scheduling
+vetoes ("this workflow may not run until X is proven"), no approval gates, no arbitrary
+mid-run hard-fails. Every constraint must be expressed as something the agent can see,
+contest, and repair against — an evaluation check or a recorded disposition — and the only
+hard stops are the evaluation gates that decide whether work is *accepted*
+(`goal_check.json` / `control.json`), not whether it may be *attempted*.
+
+**Context.** Stated as a general principle by the author (July 2026, during the design-loop
+work in writeit-loops-and-standards): agents should have enough freedom to decide;
+"fail-closed detection, not prevention" is the correct mental approach. It generalizes what
+three existing decisions already do individually: D3 keeps mid-run "success" mechanical and
+moves all quality judgment into after-the-fact evidence; D4 bans *agent-authored* pass/fail
+criteria while keeping repo/set-owned checks as detection backstops; D5 rejects a preferred
+human gate in favor of evidence-in (`updates_from_user`) and a last-resort terminal stop.
+The reasoning: prevention encodes today's guess about what agents shouldn't do and hides its
+own mistakes, while detection publishes every constraint as a visible, arguable check
+failure with a defined relaxation route — a wrongly-scoped check gets repaired with a
+counterexample and independent review instead of being silently obeyed forever. Concrete
+shape (from the design-loop): a workflow set ships a deterministic "write barrier" check
+that diffs protected paths against the session-start digest; a child session can physically
+write anywhere, but cannot terminate successfully while the barrier fails — fail-closed
+detection, not a sandbox.
+
+**Consequences.** New engine features and workflow sets must not introduce preventive
+mechanisms: no coordinator-enforced path permissions, no eligibility gates keyed to semantic
+state, no paused/waiting-for-human states (already banned by D5). Where discipline over
+files is needed (a research workflow must not touch binding docs), express it as a shipped
+deterministic check over the diff — consistent with D4's boundary (set-owned, not
+agent-authored) — whose failure blocks the session's goal check until the write is undone.
+The accepted cost: a violating action can occur and must be detected and repaired after the
+fact; that inefficiency buys inspectability and reversibility of the constraint itself.
