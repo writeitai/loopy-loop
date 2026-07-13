@@ -195,8 +195,8 @@ costs are always measurable). Budgets enforceable at session/child/workflow/wall
 levels, checked before dispatch and after each result.
 
 **Effort.** M–L. **Status.** **Implemented (unreleased)** — versioned events
-appended after each committing mutation (at-least-once, torn-tail-tolerant
-reader); worker-read token usage from team-harness `run.json` with explicit
+appended after each committing mutation (best-effort delivery by design —
+state.json stays the durable truth; torn-tail-tolerant reader); worker-read token usage from team-harness `run.json` with explicit
 unknown-usage accounting; durable per-session ledger + children.json roll-up;
 `model_prices`-derived cost with the `max_cost_usd` stop condition
 (coordinator-side, requires prices — preflight-enforced); `loopy status`

@@ -42,6 +42,9 @@ class IterationUsage(BaseModel):
     prompt_tokens: int = Field(default=0, ge=0)
     completion_tokens: int = Field(default=0, ge=0)
     turns: int = Field(default=0, ge=0)
+    # Coordinator turns whose response carried no usage record: non-zero means
+    # the token subtotal above is a lower bound, not complete accounting.
+    turns_without_usage: int = Field(default=0, ge=0)
 
 
 class SessionUsageTotals(BaseModel):
@@ -172,6 +175,21 @@ class LoopState(BaseModel):
     current_task: CurrentTask | None = Field(default=None)
     history: list[HistoryEntry] = Field(default_factory=list)
     config_snapshot: RootConfigSnapshot = Field(...)
+
+    @model_validator(mode="after")
+    def reconcile_usage_ledger(self) -> Self:
+        """Self-heal a ledger that predates it (pre-P1.1 resumed sessions).
+
+        Iterations completed before the ledger existed have unknown usage;
+        without this, a resumed session reports zero unknown iterations and a
+        newly configured max_cost_usd silently treats all prior spend as
+        zero. Idempotent: counted iterations are never reclassified.
+        """
+        totals = self.usage_totals
+        counted = totals.iterations_with_usage + totals.iterations_without_usage
+        if counted < self.iteration_count:
+            totals.iterations_without_usage += self.iteration_count - counted
+        return self
 
 
 class FinishedRequest(BaseModel):

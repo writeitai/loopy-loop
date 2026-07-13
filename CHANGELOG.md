@@ -7,9 +7,12 @@
   `task_dispatched`, `task_finished` (with tokens/duration/failure_kind),
   `iteration_abandoned`, `goal_check`, `child_started`, `child_finished`,
   `session_stopped` — to each session's `events.jsonl` after the producing
-  state mutation commits (at-least-once; readers key on `event_id` and
-  tolerate a torn final line). New `loopy events [--follow] [--json]` tails
-  the deepest active session's stream.
+  state mutation commits. Delivery is best-effort by design: a crash in the
+  commit-to-append window drops the event while the durable truth
+  (`state.json` history/ledger) survives; readers key on `event_id` and
+  tolerate gaps and a torn final line. New `loopy events [--follow]
+  [--json]` tails the deepest active session's stream and follows the
+  active session as it changes.
 - **Usage/cost ledger + `max_cost_usd` (P1.1).** The worker reads
   coordinator-model token usage from team-harness's `run.json` and reports
   it (plus wall-clock duration) on `/finished`; the coordinator keeps a

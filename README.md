@@ -498,12 +498,12 @@ loopy events --follow  # tail it live (--json for raw lines)
 loopy stop
 ```
 
-`status` prints the latest session state — including the whole session stack
-while a child runs, per-session token usage, and (with `model_prices`
-configured) estimated cost. `stop` sets `stop_requested=true` in
-the latest session-local state. Both operate on the latest **top-level**
-session: while a child session runs they show/flag the suspended parent, and a
-requested stop takes effect only after the child reaches a terminal state.
+`status` prints the latest session state — the whole session stack while a
+child runs (the live child is shown under its suspended parent), each
+session's subtree token usage, and (with `model_prices` configured) estimated
+cost. `stop` still flags the latest **top-level** session only: a running
+child does not see the flag, and the stop takes effect once the child reaches
+a terminal state and the parent resumes.
 
 ## Related Projects
 

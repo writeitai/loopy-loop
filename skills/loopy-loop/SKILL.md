@@ -485,8 +485,8 @@ loopy stop            # sets stop_requested=true; honored after the next /finish
 `status` walks the durable session stack: while a child runs it shows the
 live child under the suspended parent. Every session also has an append-only
 `events.jsonl` (`session_started`, `task_dispatched`, `task_finished`,
-`child_started`, `child_finished`, `session_stopped`, ...) — the canonical
-operational stream.
+`child_started`, `child_finished`, `session_stopped`, ...) — the operational
+legibility stream (best-effort; the durable truth stays in state.json).
 
 Both commands print a friendly error and exit if the coordinator holds the
 state lock mid-request — retry shortly.

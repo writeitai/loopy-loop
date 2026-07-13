@@ -186,7 +186,7 @@ class CoordinatorService:
         self._transition_lock = threading.RLock()
         # Buffered (session_id, type, payload) events; appended to the
         # session's events.jsonl AFTER the producing mutation commits
-        # (at-least-once — see events.py). Guarded by _transition_lock on
+        # (best-effort — see events.py). Guarded by _transition_lock on
         # every request path that touches it.
         self._pending_events: list[tuple[str, str, dict]] = []
         self._prepare_state(resume=resume)
@@ -242,9 +242,6 @@ class CoordinatorService:
                 logger.warning(
                     "failed to append events for session %s", session_id, exc_info=True
                 )
-
-    def _discard_pending_events(self) -> None:
-        self._pending_events.clear()
 
     def _emit_stop_transition(self, *, state: LoopState, was_terminal: bool) -> None:
         if not was_terminal and self.state_store.is_terminal_state(state=state):
@@ -356,10 +353,14 @@ class CoordinatorService:
             self._emit_stop_transition(state=current, was_terminal=was_terminal)
             return current, response
 
+        checkpoint = len(self._pending_events)
         try:
             response = self.state_store.mutate(mutator)
         except BaseException:
-            self._discard_pending_events()
+            # Drop only THIS mutation's events: earlier buffered events (e.g.
+            # a child_finished whose children.json write already committed)
+            # must survive to the next flush.
+            del self._pending_events[checkpoint:]
             raise
         self._flush_pending_events()
         for path in recovered_pending_paths:
@@ -561,10 +562,11 @@ class CoordinatorService:
             # Step 7+: stop conditions, child dispatch, next workflow.
             return finish(self._advance(state=current, caller=caller, now=now))
 
+        checkpoint = len(self._pending_events)
         try:
             response = self.state_store.mutate(mutator)
         except BaseException:
-            self._discard_pending_events()
+            del self._pending_events[checkpoint:]
             raise
         self._flush_pending_events()
         if response.action == STOP_ACTION:
@@ -650,7 +652,14 @@ class CoordinatorService:
         if request.usage is not None:
             totals.prompt_tokens += request.usage.prompt_tokens
             totals.completion_tokens += request.usage.completion_tokens
-            totals.iterations_with_usage += 1
+            # "with usage" means FULLY measured: a run where some coordinator
+            # turns carried no usage record keeps its measured subtotal but
+            # counts as not-fully-known, so a cost budget's blind spot stays
+            # visible instead of masquerading as complete accounting.
+            if request.usage.turns_without_usage == 0:
+                totals.iterations_with_usage += 1
+            else:
+                totals.iterations_without_usage += 1
         else:
             totals.iterations_without_usage += 1
         if request.duration_s:
@@ -775,6 +784,8 @@ class CoordinatorService:
                 error=result.error,
                 attempt_id=result.attempt_id,
                 failure_kind=result.failure_kind,
+                usage=result.usage,
+                duration_s=result.duration_s,
             ),
             None,
         )
@@ -1241,6 +1252,7 @@ class CoordinatorService:
             repo_root=self.repo_root, session_id=child_state.parent_session_id
         )
         payload = _read_children_payload(path=path)
+        first_finalization = False
         for record in payload["children"]:
             if record.get("session_id") == child_state.active_session_id:
                 first_finalization = record.get("status") in {"running", "dispatching"}
@@ -1258,18 +1270,19 @@ class CoordinatorService:
                     record["usage"] = session_tree_usage_totals(
                         repo_root=self.repo_root, state=child_state
                     ).model_dump()
-                if first_finalization:
-                    self._emit(
-                        child_state.parent_session_id,
-                        "child_finished",
-                        {
-                            "child_session_id": child_state.active_session_id,
-                            "status": child_state.status,
-                            "stop_reason": child_state.stop_reason,
-                        },
-                    )
                 break
         write_json_atomic(path=path, payload=payload)
+        if first_finalization:
+            self._emit(
+                child_state.parent_session_id,
+                "child_finished",
+                {
+                    "child_session_id": child_state.active_session_id,
+                    "status": child_state.status,
+                    "stop_reason": child_state.stop_reason,
+                },
+            )
+            self._flush_pending_events()
 
     def _apply_stop_precedence(self, *, state: LoopState) -> str | None:
         if state.goal_met:

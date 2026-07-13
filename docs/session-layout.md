@@ -53,10 +53,12 @@ One session directory is created per fresh coordinator run and reused for all it
 - Types in v1: `session_started`, `task_dispatched`, `task_finished`
   (success/error/failure_kind/tokens/duration), `iteration_abandoned`,
   `goal_check`, `child_started`, `child_finished`, `session_stopped`
-- Emission is at-least-once: events append AFTER the producing state
-  mutation commits, so a crash in between loses the event (never the
-  state) and a crash-replayed finalization can duplicate one — consumers
-  key on `event_id`; readers must tolerate a truncated final line
+- Delivery is best-effort, not guaranteed: events append AFTER the
+  producing state mutation commits, so a crash or append failure in that
+  window loses the event (never the state), and a crash-replayed
+  finalization can duplicate one — consumers key on `event_id`, tolerate
+  gaps and a truncated final line, and never build correctness on this
+  stream (`state.json` history/ledger is the durable truth)
 - Tail with `loopy events --follow` (`--json` for raw lines)
 
 `control.json`

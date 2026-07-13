@@ -358,7 +358,11 @@ def test_read_harness_usage_sums_turns(tmp_path: Any) -> None:
 
     usage = _read_harness_usage(harness_output_dir=str(run_dir))
 
-    assert usage == IterationUsage(prompt_tokens=17, completion_tokens=8, turns=2)
+    # Two measured turns; the empty-usage turn and the usage-less turn are
+    # counted as unmeasured so the subtotal is visibly a lower bound.
+    assert usage == IterationUsage(
+        prompt_tokens=17, completion_tokens=8, turns=2, turns_without_usage=2
+    )
 
 
 def test_read_harness_usage_unknown_cases(tmp_path: Any) -> None:
@@ -462,3 +466,157 @@ def test_cli_events_prints_stream(repo_builder: Any, monkeypatch: Any) -> None:
     assert raw.exit_code == 0
     parsed = [json.loads(line) for line in raw.output.strip().splitlines()]
     assert any(event["type"] == "session_started" for event in parsed)
+
+
+def test_result_json_recovery_preserves_usage(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    """Review M2: the crash window result.json recovery exists for must not
+    corrupt the ledger or bypass the budget."""
+    from loopy_loop.sessions import ensure_iteration_dir
+    from loopy_loop.sessions import RESULT_FILENAME
+    from loopy_loop.sessions import write_json_atomic
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder(
+        root_config={
+            "model_prices": {"prompt_usd_per_1m": 10.0, "completion_usd_per_1m": 30.0},
+            "max_cost_usd": 0.02,
+        },
+        workflows=PLANNER_ONLY,
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task = client.post("/register", json=REGISTER_BODY).json()
+
+    # The worker completed and wrote result.json (with usage), then died
+    # before writing pending_finished_request.json.
+    iteration_dir = ensure_iteration_dir(
+        repo_root=repo_root,
+        session_id=task["session_id"],
+        iteration=task["iteration"],
+        workflow_id=task["workflow_id"],
+    )
+    write_json_atomic(
+        path=iteration_dir / RESULT_FILENAME,
+        payload={
+            "success": True,
+            "text": "done",
+            "error": None,
+            "harness_run_id": "r1",
+            "harness_output_dir": "",
+            "attempt_id": task["attempt_id"],
+            "usage": USAGE,
+            "duration_s": 9.5,
+        },
+    )
+
+    response = client.post("/register", json=REGISTER_BODY).json()
+
+    state = StateStore(repo_root=repo_root).read_state()
+    assert state is not None
+    assert state.usage_totals.prompt_tokens == 1000
+    assert state.usage_totals.completion_tokens == 500
+    assert state.usage_totals.iterations_with_usage == 1
+    assert state.usage_totals.duration_s == 9.5
+    # The recovered usage crossed the budget: no more work is dispatched.
+    assert response["action"] == "stop"
+    assert response["stop_reason"] == "max_cost_usd"
+
+
+def test_partial_turn_usage_counts_as_unknown_iteration(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    """Review M3: measured subtotals are kept, but an iteration with any
+    unmeasured coordinator turn must not report complete accounting."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder(workflows=PLANNER_ONLY)
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+
+    task = client.post("/register", json=REGISTER_BODY).json()
+    client.post(
+        "/finished",
+        json=_finished_body(
+            task,
+            success=False,
+            usage={
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "turns": 1,
+                "turns_without_usage": 1,
+            },
+        ),
+    )
+
+    state = StateStore(repo_root=repo_root).read_state()
+    assert state is not None
+    assert state.usage_totals.prompt_tokens == 100
+    assert state.usage_totals.iterations_with_usage == 0
+    assert state.usage_totals.iterations_without_usage == 1
+
+
+def test_legacy_state_reconciles_unknown_iterations() -> None:
+    """Review M4: a pre-ledger session resumes with its prior iterations
+    visible as unknown usage instead of an inconsistent zero ledger."""
+    from loopy_loop.models import LoopState
+    from loopy_loop.models import RootConfigSnapshot
+
+    snapshot = RootConfigSnapshot(
+        goal="g",
+        goal_hash="abc123",
+        workflow_set="main",
+        completion_criteria=[],
+        stop_criteria=[],
+        max_turns=20,
+        goal_check_consecutive_failures_cap=3,
+        team_harness_provider="codex",
+        team_harness_model="m",
+        team_harness_agents=["codex"],
+        team_harness_agent_models={},
+        team_harness_agent_reasoning_efforts={},
+        team_harness_api_base="https://x.ai/v1",
+        team_harness_api_key_env="OPENROUTER_API_KEY",
+        team_harness_system_prompt_extension="",
+    )
+    state = LoopState.model_validate(
+        {
+            "goal_hash": "abc123",
+            "workflow_set": "main",
+            "max_turns": 20,
+            "active_session_id": "s1",
+            "iteration_count": 7,
+            "config_snapshot": snapshot.model_dump(),
+        }
+    )
+
+    assert state.usage_totals.iterations_without_usage == 7
+    assert state.usage_totals.iterations_with_usage == 0
+
+
+def test_read_harness_usage_rejects_non_dict_root(tmp_path: Any) -> None:
+    """Review m4: a decodable-but-wrong run.json must mean unknown, not crash."""
+    run_dir = tmp_path / "run-3"
+    run_dir.mkdir()
+    run_dir.joinpath("run.json").write_text("[]", encoding="utf-8")
+
+    assert _read_harness_usage(harness_output_dir=str(run_dir)) is None
+
+
+def test_cli_status_fails_loudly_on_locked_state(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    """Review m1: one-shot status must exit nonzero when it cannot read
+    state, so health checks can tell failure from status."""
+    from filelock import Timeout as FileLockTimeout
+
+    repo_root = repo_builder(workflows=PLANNER_ONLY)
+
+    def raise_timeout(self: Any) -> Any:
+        raise FileLockTimeout("lock")
+
+    monkeypatch.setattr("loopy_loop.state_store.StateStore.read_state", raise_timeout)
+    monkeypatch.chdir(repo_root)
+
+    result = CliRunner().invoke(main, ["status"])
+
+    assert result.exit_code != 0
+    assert "locked" in result.output

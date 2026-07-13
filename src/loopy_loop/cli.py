@@ -276,22 +276,32 @@ def status(watch: bool) -> None:
     """Show loop status (the whole session stack, with usage totals)."""
     repo_root = Path.cwd()
     if not watch:
-        click.echo("\n".join(_status_lines(repo_root=repo_root)))
+        try:
+            lines = _status_lines(repo_root=repo_root)
+        except FileLockTimeout:
+            raise click.ClickException(
+                "coordinator state is locked (likely mid-request); retry shortly"
+            ) from None
+        click.echo("\n".join(lines))
         return
     try:
         while True:
             click.clear()
-            click.echo("\n".join(_status_lines(repo_root=repo_root)))
+            click.echo(
+                "\n".join(_status_lines(repo_root=repo_root, tolerate_lock=True))
+            )
             time.sleep(2.0)
     except KeyboardInterrupt:
         pass
 
 
-def _status_lines(*, repo_root: Path) -> list[str]:
+def _status_lines(*, repo_root: Path, tolerate_lock: bool = False) -> list[str]:
     try:
         state = StateStore(repo_root=repo_root).read_state()
     except FileLockTimeout:
-        return ["coordinator state is locked (likely mid-request); retry shortly"]
+        if tolerate_lock:
+            return ["coordinator state is locked (likely mid-request); retry shortly"]
+        raise
     if state is None:
         return ["No loopy-loop state found."]
     prices = _configured_model_prices(repo_root=repo_root)
@@ -315,6 +325,10 @@ def _status_lines(*, repo_root: Path) -> list[str]:
             lines.append(f"active child {child_id}: state locked; retry shortly")
             break
         if child_state is None:
+            lines.append(
+                f"active_child_session_id points at {child_id}, but its state "
+                "is missing (stale pointer)"
+            )
             break
         lines.append("")
         lines.append(f"active child session {child_id}:")
@@ -345,21 +359,22 @@ def _session_status_lines(
             f"started {state.current_task.started_at})"
         )
     lines.append(f"{indent}stop_reason: {state.stop_reason or 'none'}")
+    # Subtree totals: this session's own iterations plus finalized children.
     totals = session_tree_usage_totals(repo_root=repo_root, state=state)
     lines.append(
-        f"{indent}usage: prompt_tokens={totals.prompt_tokens} "
+        f"{indent}subtree_usage: prompt_tokens={totals.prompt_tokens} "
         f"completion_tokens={totals.completion_tokens} "
-        f"(iterations with usage: {totals.iterations_with_usage}, "
+        f"(iterations fully measured: {totals.iterations_with_usage}, "
         f"unknown: {totals.iterations_without_usage})"
     )
-    lines.append(f"{indent}harness_duration_s: {totals.duration_s:.0f}")
+    lines.append(f"{indent}subtree_harness_duration_s: {totals.duration_s:.0f}")
     cost = estimate_cost_usd(
         prompt_tokens=totals.prompt_tokens,
         completion_tokens=totals.completion_tokens,
         prices=prices,
     )
     if cost is not None:
-        lines.append(f"{indent}estimated_cost_usd: {cost:.4f}")
+        lines.append(f"{indent}subtree_estimated_cost_usd: {cost:.4f}")
     return lines
 
 
@@ -381,11 +396,12 @@ def events(follow: bool, as_json: bool) -> None:
     session_id = _deepest_active_session_id(repo_root=repo_root)
     if session_id is None:
         raise click.ClickException("No loopy-loop state found.")
-    path = events_path(repo_root=repo_root, session_id=session_id)
     printed = 0
     try:
         while True:
-            entries = read_events(path=path)
+            entries = read_events(
+                path=events_path(repo_root=repo_root, session_id=session_id)
+            )
             for event in entries[printed:]:
                 click.echo(
                     json.dumps(event, separators=(",", ":"))
@@ -396,6 +412,17 @@ def events(follow: bool, as_json: bool) -> None:
             if not follow:
                 break
             time.sleep(1.0)
+            # The active session moves (child dispatched, child finished,
+            # fresh session after archive): re-resolve and switch streams.
+            try:
+                current = _deepest_active_session_id(repo_root=repo_root)
+            except click.ClickException:
+                current = None  # transient lock; keep following the old file
+            if current is not None and current != session_id:
+                if not as_json:
+                    click.echo(f"--- now following session {current} ---")
+                session_id = current
+                printed = 0
     except KeyboardInterrupt:
         pass
 
@@ -425,10 +452,15 @@ def _deepest_active_session_id(*, repo_root: Path) -> str | None:
         if child_id in seen:
             break
         seen.add(child_id)
-        child_state = StateStore(
-            repo_root=repo_root,
-            state_path=state_path(repo_root=repo_root, session_id=child_id),
-        ).read_state()
+        try:
+            child_state = StateStore(
+                repo_root=repo_root,
+                state_path=state_path(repo_root=repo_root, session_id=child_id),
+            ).read_state()
+        except FileLockTimeout:
+            raise click.ClickException(
+                "coordinator state is locked (likely mid-request); retry shortly"
+            ) from None
         if child_state is None:
             break
         state = child_state

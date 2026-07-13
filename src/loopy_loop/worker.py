@@ -331,22 +331,27 @@ def _read_harness_usage(*, harness_output_dir: str) -> IterationUsage | None:
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(record, dict):
+        return None
     turns = record.get("turns")
     if not isinstance(turns, list):
         return None
     prompt_tokens = 0
     completion_tokens = 0
     turns_with_usage = 0
+    turns_without_usage = 0
     for turn in turns:
         if not isinstance(turn, dict):
             continue
         usage = turn.get("usage")
         if not isinstance(usage, dict) or not usage:
+            turns_without_usage += 1
             continue
         try:
             prompt_tokens += int(usage.get("prompt_tokens") or 0)
             completion_tokens += int(usage.get("completion_tokens") or 0)
         except (TypeError, ValueError):
+            turns_without_usage += 1
             continue
         turns_with_usage += 1
     if turns_with_usage == 0:
@@ -355,6 +360,7 @@ def _read_harness_usage(*, harness_output_dir: str) -> IterationUsage | None:
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         turns=turns_with_usage,
+        turns_without_usage=turns_without_usage,
     )
 
 

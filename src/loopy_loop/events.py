@@ -1,15 +1,18 @@
 """Session event log: the append-only ``events.jsonl`` stream (P1.1).
 
 One versioned JSON object per line, one file per session (child sessions have
-their own). This is the canonical operational stream: budgets, `loopy status
---watch`, `loopy events`, and any future TUI read this one truth instead of
-inventing separate ones.
+their own). This is the operational LEGIBILITY stream — what `loopy events`
+and any future TUI read. It is deliberately NOT the durable source of truth:
+that is ``state.json`` (history, ledger, stop reasons), which every event
+here is derived from.
 
-Emission semantics are at-least-once: events are appended AFTER the state
-mutation that produced them commits, so a crash in between loses the event
-(never the state), and a crash-replayed finalization can duplicate one.
-Consumers key on ``event_id``. The reader tolerates a truncated final line
-(a torn append from a crash) by skipping lines that do not decode.
+Delivery is best-effort: events are appended AFTER the state mutation that
+produced them commits, so a crash (or append failure) in that window loses
+the event while the state survives — and a crash-replayed finalization can
+duplicate one. Consumers must tolerate both gaps and duplicates (key on
+``event_id``) and must never build correctness on this stream; anything that
+matters is reconstructable from ``state.json``. The reader tolerates a
+truncated final line (a torn append) by skipping lines that do not decode.
 """
 
 from __future__ import annotations
