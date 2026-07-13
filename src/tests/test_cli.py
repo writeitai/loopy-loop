@@ -309,6 +309,7 @@ def test_clean_pm_init_can_dispatch_an_inner_outer_eval_child(
             "success": True,
             "text": "planner selected an item",
             "worker": register_body["worker"],
+            "attempt_id": parent_task["attempt_id"],
         },
     ).json()
     assert child_task["action"] == "run"
