@@ -1,6 +1,6 @@
 # Design: Improvement Proposals
 
-**Status:** Proposed (not yet accepted)
+**Status:** Living — per-proposal statuses below (last status pass: 2026-07-13)
 **Date:** 2026-07-12
 **Relationship to other docs:** Companion to
 [`success-semantics-and-evaluation.md`](./success-semantics-and-evaluation.md)
@@ -86,8 +86,9 @@ hard OS ceiling (see P2.5). This is the right split, because the two crash cases
   running. That is a process-cleanup problem, handled separately in P2.5 — do not fold it
   into P0.1.
 
-**Effort.** M–L. **Status.** Proposed — **highest priority** given the double-loop
-decision.
+**Effort.** M–L. **Status.** **Implemented in 0.4.0** — `active_child_session_id`
+pointer, startup session-stack walk with adoption/finalization, attempt ids,
+request-file tombstones, atomic artifact writes.
 
 ### P0.2 — Keep the last-resort human escape hatch; do NOT build a preferred human-gate
 
@@ -126,9 +127,9 @@ resume-after-human flow, no external-action approval gate.
   `unresolvable_error` reason with a good message is likely sufficient. Only split it
   if operational reports actually need to tell the two apart.
 
-**Effort.** S (prompt guidance only) — or none. **Status.** Reframed: **do not build
-the pause/resume gate.** The autonomy escape hatch already exists; only optional
-prompt/report polish remains.
+**Effort.** S (prompt guidance only) — or none. **Status.** **Resolved by decision
+(D5), no code** — do not build the pause/resume gate. The autonomy escape hatch
+already exists; only optional prompt/report polish remains.
 
 ### P0.3 — Per-child budgets *(withdrawn)*
 
@@ -160,7 +161,9 @@ the PM template, or make workflow-set dependencies declarative and installable
 (`requires_workflow_sets: [...]`) with preflight validation and a clean-install
 template smoke test in CI.
 
-**Effort.** S–M. **Status.** Proposed.
+**Effort.** S–M. **Status.** **Implemented in 0.4.0** — the PM template ships its
+child workflow set via packaged-template extra sources, with an end-to-end
+clean-init smoke test.
 
 ---
 
@@ -188,7 +191,8 @@ usage adapter with explicit `known`/`unknown` fields (don't pretend worker token
 costs are always measurable). Budgets enforceable at session/child/workflow/wall-clock
 levels, checked before dispatch and after each result.
 
-**Effort.** M–L. **Status.** Proposed.
+**Effort.** M–L. **Status.** Proposed — next major piece before the flagship
+double-loop run.
 
 ### P1.2 — Deterministic backstop under the judge (per target, for high-stakes work)
 
@@ -212,7 +216,10 @@ outcome"; add the deterministic suite as the objective floor so a mis-judged
 > that overrides the stock policy.
 
 **Effort.** S–M (mostly the child workflow set + runner-side report parsing).
-**Status.** Proposed — needed before high-stakes acceptance is trustworthy.
+**Status.** **Deferred (2026-07-13)** — out of scope for the pre-target milestone.
+It only pays off against a target repo that owns a trustworthy suite, so build it
+as part of that target's dedicated child workflow set when the double loop is
+pointed at one, not generically now. The boundary above still binds when it lands.
 
 ### P1.3 — Fix the Agent Skill and stale "multi-worker" claims
 
@@ -239,15 +246,16 @@ coordinator is explicitly safe under.
 **What.** Replace hardcoded model IDs (repeated across `config.py`, `cli.py`, packaged
 YAML, README, `.team-harness/config.toml`, `.eval-banana/config.toml`, and sibling
 repos) with named profiles (`balanced`, `high_assurance`, `cheap`) resolved once in a
-project-local file. Pin `team-harness>=0.2.10,<0.3`. Make eval-banana a declared
-extra (`loopy-loop[eval]`) or fail preflight with a clear message.
+project-local file. Consider bounding the `team-harness` dependency once its contract
+churns independently of loopy releases. ~~Make eval-banana a declared extra
+(`loopy-loop[eval]`) or fail preflight with a clear message~~ — superseded, see Status.
 
 **Why.** Model IDs churn (git history is full of "bump gpt-5.4 → 5.5"); duplicating a
 model string across N files and sibling repos guarantees drift and a launch-day
 footgun (install today, hit a decommissioned model). team-harness has already shipped
 breaking pre-1.0 changes, so an unbounded `>=` dependency is a standing risk.
-eval-banana is required by the recommended template but is not a hard dependency, so a
-template can require a tool that isn't installed.
+eval-banana was required by the recommended template without being a dependency, so a
+template could require a tool that wasn't installed.
 
 **Sketch.** One resolved profile → exact provider/model/effort, snapshotted into the
 session. `loopy doctor` validates the profile against the actually-installed CLIs.
@@ -255,7 +263,12 @@ Consider a small compatibility matrix (loopy-loop × team-harness × eval-banana
 in CI: "treat the trio as one release train" until the contracts have survived real
 use.
 
-**Effort.** M. **Status.** Proposed.
+**Effort.** M. **Status.** **Partially resolved (2026-07-13)** — the eval-banana
+piece landed the simple way: it is now a plain hard dependency (chosen over the
+optional-extra design; one less install mode to document), and the worker appends
+its interpreter's scripts directory to `PATH` so the CLI resolves for spawned
+agents under every install mode (`uv tool install` exposes only the primary
+package's entry points). Named profiles and trio pinning remain **Proposed**.
 
 ### P2.2 — `_advance()` refactor, folded into the P0.1 state-machine work
 
@@ -270,7 +283,8 @@ P0.1, not as a cosmetic pass first — encode the new session-stack invariants a
 table-driven transition tests at the same time, or the refactor just centralizes the
 current ambiguity.
 
-**Effort.** S (as part of P0.1). **Status.** Proposed.
+**Effort.** S (as part of P0.1). **Status.** **Implemented in 0.4.0** — folded into
+P0.1 as `_advance()`.
 
 ### P2.3 — Richer failure taxonomy + per-workflow failure cap
 
@@ -345,8 +359,10 @@ the ownership split. Summary of the split:
   team-harness provides the liveness check + policy ops + timeout (TH-D5); the logical-session
   resume path is a separate, larger option and is **not** proposed here.
 
-**Effort.** M (team-harness, tracked there) + S (loopy surfacing). **Status.** Proposed —
-separate from P0.1, which recovers state only. Pairs with the P0.1 worker-liveness bullet.
+**Effort.** M (team-harness, tracked there) + S (loopy surfacing). **Status.**
+**Implemented** — team-harness 0.3.0 (TH-D5: process-group identity + `th reap`)
+plus loopy-loop 0.3.0 (worker identity on `/register`, bounded-drain recovery of
+orphaned agents, `salvage.json`).
 
 ---
 
@@ -368,18 +384,22 @@ separate from P0.1, which recovers state only. Pairs with the P0.1 worker-livene
 
 ## Suggested sequencing
 
-1. **P0.1 + P2.2 together** — the session-stack/state-machine hardening and the
-   `_advance()` refactor are one coherent piece of work. (P0.2 needs no code — the
-   autonomy escape hatch already exists; at most it's prompt polish.)
-2. **P0.4** — a PM template runnable from a clean init; the double loop is now
-   executable end to end.
-3. **P1.1** — events/cost ledger + `status --watch`, so double-loop runs are legible.
-4. **P1.2 + P1.3** — deterministic backstop for high-stakes targets; fix the skill.
-5. **P2.1, P2.3, P2.4, P2.5** — profiles/pins, failure taxonomy, operator UX, and
-   orphan-process cleanup (rolling).
+1. ~~**P0.1 + P2.2 together**~~ — **done (0.4.0)**: session-stack/state-machine
+   hardening plus the `_advance()` refactor. (P0.2 needed no code — the autonomy
+   escape hatch already exists.)
+2. ~~**P0.4**~~ — **done (0.4.0)**: PM template runnable from a clean init; the
+   double loop is executable end to end. (P2.5 also **done**: team-harness 0.3.0 +
+   loopy-loop 0.3.0.)
+3. **P1.3** — fix the Agent Skill and stale claims (now also stale against
+   0.3.0/0.4.0: worker identity, attempt ids, workflow sets).
+4. **P2.3** — failure taxonomy + per-workflow failure cap.
+5. **P1.1** — events/cost ledger + `status --watch`, so double-loop runs are legible.
+6. **P2.1 remainder, P2.4** — profiles/pins and operator UX (rolling). **P1.2** is
+   deferred into the flagship target's own workflow-set design.
 
-After (1)–(3), the double loop is ready to drive a large, multi-phase target as a
-sequence of narrow, deterministically-backstopped work packages that runs
-unattended — falling back to the `unresolvable_error` escape hatch only when a
-blocker is genuinely unresolvable without a human. That target-execution design is
-the subject of a separate doc, not this one.
+After (3)–(5), the double loop is ready to drive a large, multi-phase target as a
+sequence of narrow work packages that runs unattended — falling back to the
+`unresolvable_error` escape hatch only when a blocker is genuinely unresolvable
+without a human. Deterministic backstops (P1.2) arrive with that target's own
+workflow-set design. That target-execution design is the subject of a separate
+doc, not this one.

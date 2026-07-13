@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sysconfig
 from typing import Any
 
 import httpx
@@ -11,6 +13,7 @@ from loopy_loop.sessions import create_session_dir
 from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.worker import _render_prompt
 from loopy_loop.worker import _run_task
+from loopy_loop.worker import ensure_interpreter_scripts_on_path
 from loopy_loop.worker import run_worker_loop
 
 
@@ -440,3 +443,35 @@ def test_finished_payload_has_no_assignment_id(
     assert len(finished_calls) == 1
     assert "assignment_id" not in finished_calls[0]["json"]
     assert finished_calls[0]["json"]["iteration"] == 1
+
+
+def test_ensure_interpreter_scripts_appends_without_reordering() -> None:
+    scripts_dir = sysconfig.get_path("scripts")
+    environ = {"PATH": os.pathsep.join(["/usr/bin", "/bin"])}
+
+    ensure_interpreter_scripts_on_path(environ)
+
+    entries = environ["PATH"].split(os.pathsep)
+    assert entries[:2] == ["/usr/bin", "/bin"]
+    assert entries[-1] == scripts_dir
+
+
+def test_ensure_interpreter_scripts_noop_when_already_present() -> None:
+    scripts_dir = sysconfig.get_path("scripts")
+    original = os.pathsep.join(["/usr/bin", scripts_dir])
+    environ = {"PATH": original}
+
+    ensure_interpreter_scripts_on_path(environ)
+
+    assert environ["PATH"] == original
+
+
+def test_ensure_interpreter_scripts_drops_empty_entries_when_appending() -> None:
+    scripts_dir = sysconfig.get_path("scripts")
+    environ = {"PATH": os.pathsep.join(["", "/usr/bin"])}
+
+    ensure_interpreter_scripts_on_path(environ)
+
+    # An empty PATH entry means "current directory"; the rewrite must not
+    # preserve it.
+    assert environ["PATH"] == os.pathsep.join(["/usr/bin", scripts_dir])

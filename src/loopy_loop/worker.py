@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import sys
+import sysconfig
 import time
 import traceback
 
@@ -56,7 +59,27 @@ class FinishedAssignment:
     pending_path: Path
 
 
+def ensure_interpreter_scripts_on_path(environ: MutableMapping[str, str]) -> None:
+    """Make console scripts installed next to this interpreter findable by agents.
+
+    Harness agent processes inherit this worker's environment. CLIs shipped as
+    loopy-loop dependencies (e.g. eval-banana) install into this interpreter's
+    scripts directory, which is not on PATH under `uv tool install` or `pipx`
+    (those expose only the primary package's entry points). Appending — not
+    prepending — keeps existing resolution intact (agents running `python` in
+    the target repo must not pick up loopy-loop's interpreter) while making
+    dependency CLIs resolvable in every install mode.
+    """
+    # sysconfig, not Path(sys.executable).resolve(): resolving follows the venv
+    # symlink to the base interpreter's bin, which does not hold the scripts.
+    scripts_dir = sysconfig.get_path("scripts")
+    entries = [entry for entry in environ.get("PATH", "").split(os.pathsep) if entry]
+    if scripts_dir not in entries:
+        environ["PATH"] = os.pathsep.join([*entries, scripts_dir])
+
+
 def run_worker_loop(*, repo_root: Path, coordinator_url: str) -> None:
+    ensure_interpreter_scripts_on_path(os.environ)
     base_url = coordinator_url.rstrip("/")
     identity = current_worker_identity()
     with httpx.Client(timeout=30.0) as client:

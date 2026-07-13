@@ -23,7 +23,8 @@ workers run assignments through
 to agent CLIs such as Codex, Claude Code, and Gemini. The packaged
 `inner_outer_eval` template also uses
 [`eval-banana`](https://github.com/writeitai/eval-banana) conventions for
-session-scoped evaluation checks.
+session-scoped evaluation checks; eval-banana installs automatically as a
+loopy-loop dependency.
 
 ## Install
 
@@ -473,4 +474,5 @@ the latest session-local state.
 - [`team-harness`](https://github.com/writeitai/team-harness): the model and
   agent-CLI orchestration layer used by loopy-loop workers.
 - [`eval-banana`](https://github.com/writeitai/eval-banana): a lightweight YAML
-  evaluation framework used by the packaged eval workflows.
+  evaluation framework used by the packaged eval workflows. Installed
+  automatically as a loopy-loop dependency.

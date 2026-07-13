@@ -72,6 +72,20 @@ wheels = [
 ]
 
 [[package]]
+name = "eval-banana"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/16/ba/21def25d0a8e141c278dd84cd78ae8b165f83c9d3d772f7808e0a32a6e3a/eval_banana-0.3.1.tar.gz", hash = "sha256:ee4933b9ece6c74b700943b3d6310f87a00d03caf333f2d9c87bea1fad6e9f61", size = 2225175 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/22/3d/7d7c0468c05e4de1ed3aca3670821841380d6749b643013d5dad75f1416b/eval_banana-0.3.1-py3-none-any.whl", hash = "sha256:5f4ff33185fd29657beedadd9e7d0e4be70b324162a3568bedc4291cc02b9532", size = 31885 },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.136.0"
 source = { registry = "https://pypi.org/simple" }
@@ -258,10 +272,11 @@ wheels = [
 
 [[package]]
 name = "loopy-loop"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
+    { name = "eval-banana" },
     { name = "fastapi" },
     { name = "filelock" },
     { name = "httpx" },
@@ -283,6 +298,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
+    { name = "eval-banana", specifier = ">=0.3.1" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "filelock", specifier = ">=3.16" },
     { name = "httpx", specifier = ">=0.28" },
