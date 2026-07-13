@@ -1,6 +1,6 @@
 ---
 name: loopy-loop
-description: Set up and run loopy-loop, an automation loop inside a repository that drives AI agents toward a goal across many iterations via a FastAPI coordinator and a single identity-verified worker. Use this skill when the user wants to install loopy-loop in a target repo, scaffold a workflow-set template, define workflows, configure workflow scheduling/cadence, use session-scoped project_state or eval checks, spawn child sessions (planner/dispatcher double loop), or operate the coordinator/worker pair (start, monitor, stop, resume, crash recovery).
+description: Set up and run loopy-loop, an automation loop inside a repository that drives AI agents toward a goal across many iterations via a FastAPI coordinator and a single identity-verified worker. Use this skill when the user wants to install loopy-loop in a target repo, scaffold a workflow-set template, define workflows, configure workflow scheduling/cadence, use session-scoped project_state or eval checks, spawn child sessions (planner/dispatcher double loop), or operate the coordinator/worker pair (start, monitor, stop, resume, crash recovery). Also use it to migrate a pre-0.2.0 loopy-loop setup or to implement/debug a custom worker client against the coordinator HTTP contract.
 ---
 
 # loopy-loop
@@ -54,7 +54,9 @@ loopy init --template inner_outer_eval        # recommended single loop
 loopy init --template pm_planner_dispatcher   # double loop (parent + child sessions)
 ```
 
-Idempotent — existing files are never overwritten. Creates:
+Idempotent — existing scaffold files are never overwritten (the one
+exception is `.gitignore`, which is updated in place to ensure the sessions
+ignore rule). Creates:
 
 - `loopy_loop_config.yaml` — root config, edit this
 - `loopy_loop_goal.txt` — the goal text (referenced by `goal_file` in config)
@@ -65,7 +67,11 @@ Idempotent — existing files are never overwritten. Creates:
 Templates:
 
 - **default**: a single `goal_check` workflow in workflow set `main`. A
-  starting point for fully custom workflow sets.
+  starting point for fully custom workflow sets — **not runnable as-is**:
+  `goal_check` is never eligible until some non-`goal_check` workflow has
+  succeeded, so a bare default init stops immediately with
+  `no_eligible_workflow`. Add at least one implementation workflow first;
+  the packaged templates below are the runnable walkthroughs.
 - **inner_outer_eval**: `outer` (plan/review), `inner` (implement),
   `eval_reviewer` (author session-scoped eval-banana checks), `eval_runner`
   (run checks, write `goal_check.json`). The recommended general-purpose loop.
@@ -191,8 +197,17 @@ run_after_successes:
 ```
 
 - `emits_goal_check: true` adds a `goal_check.json` output path to that
-  workflow's rendered prompt. The workflow must still update session
-  `control.json` if it wants the loop to stop.
+  workflow's rendered prompt. The required payload is exactly:
+
+  ```json
+  {"goal_met": false, "reason": "brief explanation", "schema_version": 1}
+  ```
+
+  `goal_met` (bool) and `reason` (string) are required; `schema_version`
+  must be 1 when present. Any other shape counts as invalid goal-check
+  output (fails the iteration and feeds the `goal_check_broken` cap). The
+  workflow must still update session `control.json` if it wants the loop to
+  stop.
 - An iteration counts as **successful when the harness run completed**, not
   when its work was good — quality judgment belongs to eval workflows (a
   deliberate design decision; see `design/decisions.md` D3 in the source repo).
@@ -243,8 +258,13 @@ This sequence starts with `eval_reviewer`, then repeats `outer -> inner`. After
 
 ## Session-Scoped State
 
-Every rendered workflow prompt includes these paths (plus the goal text,
-completion criteria, and stop criteria):
+Every rendered workflow prompt includes these path inputs (plus the goal
+text, completion criteria, and stop criteria). The labels are exact; the
+values below are schematic top-level examples — real rendered values are
+absolute paths, and a child session's directories live nested under the
+parent (`.loopy_loop/sessions/<parent_id>/children/<child_id>/...`, plus an
+extra `Parent session directory:` line). Workflows must consume the rendered
+values verbatim, never reconstruct them:
 
 ```text
 Session directory: .loopy_loop/sessions/<session_id>
@@ -261,8 +281,9 @@ Iteration harness output root: .loopy_loop/sessions/<session_id>/harness_outputs
 ```
 
 **Prompts must treat the rendered Goal and the Session goal path as canonical**
-— never the repo-root goal file. In a child session the repo-root
-`loopy_loop_goal.txt` holds the PARENT's goal, not the session's.
+— never the repo-root goal file. That file is not session-canonical: in a
+child session it typically holds the parent's goal, and after
+`loopy coordinator --goal-file ...` it does not match any session's goal.
 
 The runtime only provides the paths; it does not parse markdown state. Put the
 ownership rules in each workflow prompt. The packaged templates use:
@@ -296,27 +317,38 @@ not append to `finished.md`; the outer workflow owns verified completion.
 Eval workflows run eval-banana against session-scoped checks:
 
 ```bash
-eval-banana validate --cwd . --check-dir .loopy_loop/sessions/<session_id>/eval_checks
+eval-banana validate --cwd . --check-dir "<Session eval_checks directory>"
 eval-banana run \
   --cwd . \
-  --check-dir .loopy_loop/sessions/<session_id>/eval_checks \
-  --output-dir .loopy_loop/sessions/<session_id>/eval_results
+  --check-dir "<Session eval_checks directory>" \
+  --output-dir "<Session directory>/eval_results"
 ```
 
-then summarize and link the resulting `report.json` / `report.md` from
+substituting the rendered path values (they differ for child sessions), then
+summarize and link the resulting `report.json` / `report.md` from
 `project_state/eval_results.md`.
 
 ### Workflow-written control files must be published atomically
 
 `control.json`, `goal_check.json`, and child request files are state-machine
 inputs. Prompts should instruct agents to write a temp file in the same
-directory and `mv` it over the final path — a truncated half-written file is
-read as invalid output and can terminate the session.
+directory and `mv` it over the final path. The failure modes differ:
+
+- A torn `control.json` or `goal_check.json` is read as invalid output — it
+  fails the iteration and, repeated, stops the loop (`goal_check_broken` /
+  `invalid_control_output`).
+- An unreadable or schema-invalid child request is renamed to an inspectable
+  `*.json.rejected` file and skipped — the dispatch is silently lost while
+  PM state may already claim `waiting_for_child`.
+
+For child requests the temp filename must **not** end in `.json` (use e.g.
+`item_042.json.tmp`): the coordinator dispatches any `*.json` file it sees.
 
 ## Child Sessions (double loop)
 
-A parent workflow requests a depth-first child loop by writing a JSON file
-under the active session's `child_requests/` directory:
+A parent workflow requests a child loop by writing a uniquely named `*.json`
+file under the active session's `child_requests/` directory (only `*.json`
+filenames are scanned — any other name is silently ignored forever):
 
 ```json
 {
@@ -329,7 +361,10 @@ under the active session's `child_requests/` directory:
 The coordinator then suspends the parent, creates the child session (nested
 under the parent's session directory), runs the child workflow set to a
 terminal state, and resumes the parent with the child recorded in
-`children.json`. One child at a time, depth-first. The `pm_planner_dispatcher`
+`children.json`. One child at a time, and **one level only in v1**: only the
+top-level session dispatches children. A child session writing its own
+`child_requests/` is never dispatched — a nested workflow design that expects
+grandchildren waits forever. The `pm_planner_dispatcher`
 template packages this pattern: the **dispatcher** workflow owns
 `child_requests/` (the planner never writes there), and the planner reviews
 child evidence after the child terminates.
@@ -387,7 +422,7 @@ loopy worker --coordinator http://127.0.0.1:8080
 
 On startup the coordinator inspects the latest session's state:
 
-- Terminal state → archived to `state.json.archive_<timestamp>`, fresh session.
+- Terminal state → archived to `state.json.archive_<timestamp>.json`, fresh session.
 - Still `running` → startup fails unless `--resume` is passed.
 
 ```bash
@@ -411,11 +446,14 @@ When a new worker registers while a task is still marked live, the coordinator:
 3. **Orphan recovery** — otherwise the recovery policy is applied to agent
    processes the dead worker's harness run left behind: `drain` (default)
    waits up to `recovery_drain_timeout_s` for them to finish; `reap` kills
-   them. A `salvage.json` in the interrupted iteration directory records what
-   happened to each orphan, and the iteration is recorded as failed with
-   `error="abandoned_after_<policy>"`, then re-dispatched. If any orphan may
-   still be running, the coordinator refuses to dispatch (409) rather than risk
-   duplicate work.
+   them. When at least one orphaned run was actually handled, a
+   `salvage.json` in the interrupted iteration directory records what
+   happened to each orphan and the failed iteration carries
+   `error="abandoned_after_<policy>"` (plain `"abandoned"` when nothing
+   settled). The iteration is then re-dispatched unless a stop condition
+   fires first (the abandonment consumes a turn, so it can itself trigger
+   `max_turns`). If any orphan may still be running, the coordinator refuses
+   to dispatch (409) rather than risk duplicate work.
 
 A hung-but-alive worker keeps its task (409 names its pid); the escape hatch is
 to kill that process and register again.
@@ -430,6 +468,13 @@ loopy stop     # sets stop_requested=true; the worker stops after its next /fini
 Both commands print a friendly error and exit if the coordinator holds the
 state lock mid-request — retry shortly.
 
+**Child-session caveat:** both commands operate on the latest **top-level**
+session state. While a child session runs, `loopy status` shows the suspended
+parent (often `current_task: none`), not the live child; and `loopy stop`
+sets `stop_requested` on the parent — the child does not see the flag and
+keeps iterating until it reaches a terminal state, and only then does the
+resumed parent honor the stop.
+
 Per-iteration artifacts live at
 `.loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>/`
 (`prompt.txt`, `result.json`, `result_text.txt`, `harness_run_id.txt`, plus
@@ -442,8 +487,11 @@ session-root `control.json`:
 
 `stop_reason` must be `goal_met` or `unresolvable_error`. `unresolvable_error`
 is the loop's **last-resort** autonomous escape hatch: workflows should exhaust
-re-scoping, retries, and routing around a blocker before using it, and must
-record the exact blocker in `project_state/current_state.md`.
+re-scoping, retries, and routing around a blocker before using it — and the
+`control.json` `reason` field itself must state the exact terminal blocker and
+what autonomous alternatives were tried. A generic reason breaks the repo's
+"make the give-up legible" contract (D5). Record the same blocker in
+`project_state/current_state.md`.
 
 If `goal_check.json` is repeatedly missing or invalid, the coordinator stops
 with `stop_reason="goal_check_broken"` after
@@ -463,15 +511,19 @@ with `stop_reason="goal_check_broken"` after
   verifiably alive. One worker per coordinator, by design.
 - **Old workflows layout** → `.loopy_loop/workflows/<id>/` is not loaded.
   Workflows live under `.loopy_loop/workflow_sets/<set>/workflows/<id>/`.
+- **Bare default template with no added workflow** → stops immediately with
+  `no_eligible_workflow` (`goal_check` alone is never eligible first).
+- **Child request file not named `*.json`** → never scanned; the child is
+  silently never dispatched.
 - **Workflow id collision with `goal_check`** → reserved; pick a different id.
 - **`must_follow` / `run_after_successes.workflow_id` references a missing
   workflow** → preflight fails; the id must match a folder in the same set.
 - **Eval runner does not stop the loop** → confirm the workflow has
   `emits_goal_check: true`, writes valid JSON to the exact `goal_check.json`
   output path, and updates session `control.json` when the goal is met.
-- **Child workflow prompts reading the repo-root goal file** → in a child
-  session that file holds the parent's goal. Prompts must use the rendered
-  Goal / Session goal path.
+- **Child workflow prompts reading the repo-root goal file** → that file is
+  never session-canonical (in a child session it typically holds the parent's
+  goal). Prompts must use the rendered Goal / Session goal path.
 - **A PM-only `team_harness_system_prompt_extension`** → it leaks into child
   sessions' system prompts. Keep it empty or set-neutral.
 - **Non-atomic `control.json`/`goal_check.json` writes** → a torn file is
@@ -481,9 +533,13 @@ with `stop_reason="goal_check_broken"` after
 - **Killing only the coordinator** → state stays `running`. Either pass
   `--resume` next time or `loopy stop` first to reach a terminal state.
 - **Custom worker implementations** must send worker identity on `/register`
-  (required since 0.3) and echo the task's `attempt_id` on `/finished`
-  (required since 0.4) — otherwise registration is rejected (400) or the
-  completion is treated as stale.
+  (required since 0.3, else HTTP 400) **and on every `/finished`** — the
+  `/finished` identity is what gets stamped onto the next dispatched task;
+  omit it and liveness verification (the second-worker 409 protection)
+  silently degrades to "unknown" after the first task. Echo the task's
+  `attempt_id` on `/finished` (required since 0.4) or the completion is
+  treated as stale, and supply a `starttime` token if verifiable same-host
+  liveness is wanted.
 
 ## Reference
 
