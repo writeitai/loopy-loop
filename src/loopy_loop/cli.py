@@ -46,6 +46,20 @@ PACKAGED_TEMPLATE_FILES_BY_NAME = {
         ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/dispatcher/prompt.txt",
     ],
 }
+# Files a template ships FROM ANOTHER template's directory. The
+# pm_planner_dispatcher dispatcher spawns child sessions running the
+# inner_outer_eval workflow set, so a clean `loopy init` must ship that set
+# too — sourced from the inner_outer_eval template itself so the two copies
+# can never drift apart.
+PACKAGED_TEMPLATE_EXTRA_SOURCES: dict[str, list[tuple[str, str]]] = {
+    PM_PLANNER_DISPATCHER_TEMPLATE_NAME: [
+        (INNER_OUTER_EVAL_TEMPLATE_NAME, relative_path)
+        for relative_path in PACKAGED_TEMPLATE_FILES_BY_NAME[
+            INNER_OUTER_EVAL_TEMPLATE_NAME
+        ]
+        if relative_path.startswith(".loopy_loop/workflow_sets/")
+    ]
+}
 PACKAGED_TEMPLATE_NAMES = list(PACKAGED_TEMPLATE_FILES_BY_NAME)
 GITIGNORE_LINES = [".loopy_loop/sessions/"]
 ROOT_CONFIG_TEMPLATE = f"""goal_file: "{DEFAULT_GOAL_FILENAME}"
@@ -172,6 +186,16 @@ def _init_packaged_template(*, repo_root: Path, template_name: str) -> list[str]
         created.extend(
             _copy_template_file_if_missing(
                 source_root=template_root,
+                relative_path=relative_path,
+                repo_root=repo_root,
+            )
+        )
+    for source_template, relative_path in PACKAGED_TEMPLATE_EXTRA_SOURCES.get(
+        template_name, []
+    ):
+        created.extend(
+            _copy_template_file_if_missing(
+                source_root=files("loopy_loop").joinpath("templates", source_template),
                 relative_path=relative_path,
                 repo_root=repo_root,
             )
