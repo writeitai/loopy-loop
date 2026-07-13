@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 - **events.jsonl is now written (P1.1).** The coordinator appends one
   versioned JSON event per significant transition — `session_started`,
