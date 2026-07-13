@@ -44,6 +44,15 @@ class ConfigError(Exception):
     """Raised when config loading or validation fails."""
 
 
+class ModelPrices(BaseModel):
+    """USD prices per 1M tokens for the harness coordinator model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_usd_per_1m: float = Field(ge=0)
+    completion_usd_per_1m: float = Field(ge=0)
+
+
 class RootConfig(BaseModel):
     """Repo-level loop configuration loaded from loopy_loop_config.yaml."""
 
@@ -151,6 +160,22 @@ class RootConfig(BaseModel):
             "'reap' kills them immediately."
         ),
     )
+    max_cost_usd: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Stop the loop with stop_reason=max_cost_usd once the session "
+            "tree's estimated coordinator-model cost reaches this budget. "
+            "Requires model_prices. Coordinator-side only."
+        ),
+    )
+    model_prices: ModelPrices | None = Field(
+        default=None,
+        description=(
+            "USD prices per 1M tokens for the coordinator model; used to "
+            "derive cost from the token ledger. Coordinator-side only."
+        ),
+    )
     recovery_drain_timeout_s: float = Field(
         default=600.0,
         ge=0,
@@ -188,6 +213,16 @@ class RootConfig(BaseModel):
     @classmethod
     def normalize_api_base_value(cls, value: str) -> str:
         return normalize_api_base(value=value)
+
+    @model_validator(mode="after")
+    def validate_cost_budget(self) -> "RootConfig":
+        if self.max_cost_usd is not None and self.model_prices is None:
+            raise ValueError(
+                "max_cost_usd requires model_prices: cost is derived from the "
+                "token ledger and your configured prices — without prices the "
+                "budget could never trigger"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_retry_delay_bounds(self) -> "RootConfig":
@@ -278,6 +313,18 @@ class PreflightResult(BaseModel):
     root_config: RootConfig
     workflow_set: str
     workflows: list[WorkflowDefinition]
+
+
+def estimate_cost_usd(
+    *, prompt_tokens: int, completion_tokens: int, prices: ModelPrices | None
+) -> float | None:
+    """Estimated coordinator-model cost; None when no prices are configured."""
+    if prices is None:
+        return None
+    return (
+        prompt_tokens * prices.prompt_usd_per_1m
+        + completion_tokens * prices.completion_usd_per_1m
+    ) / 1_000_000
 
 
 def normalize_api_base(*, value: str) -> str:

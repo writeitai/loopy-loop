@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from importlib.resources import files
 from importlib.resources.abc import Traversable
+import json
 from pathlib import Path
+import time
 
 import click
 from filelock import Timeout as FileLockTimeout
@@ -10,10 +12,17 @@ import uvicorn
 
 from loopy_loop.config import ConfigError
 from loopy_loop.config import DEFAULT_GOAL_FILENAME
+from loopy_loop.config import estimate_cost_usd
+from loopy_loop.config import load_root_config
 from loopy_loop.config import LOOPY_DIRNAME
+from loopy_loop.config import ModelPrices
 from loopy_loop.config import ROOT_CONFIG_FILENAME
 from loopy_loop.coordinator_app import create_coordinator_app
+from loopy_loop.coordinator_app import session_tree_usage_totals
+from loopy_loop.events import events_path
+from loopy_loop.events import read_events
 from loopy_loop.models import LoopState
+from loopy_loop.sessions import state_path
 from loopy_loop.state_store import StateStore
 from loopy_loop.worker import run_worker_loop
 
@@ -257,9 +266,151 @@ def worker(coordinator_url: str) -> None:
 
 
 @main.command()
-def status() -> None:
-    """Show loop status."""
+@click.option(
+    "--watch",
+    is_flag=True,
+    default=False,
+    help="Re-render every 2 seconds until interrupted.",
+)
+def status(watch: bool) -> None:
+    """Show loop status (the whole session stack, with usage totals)."""
     repo_root = Path.cwd()
+    if not watch:
+        click.echo("\n".join(_status_lines(repo_root=repo_root)))
+        return
+    try:
+        while True:
+            click.clear()
+            click.echo("\n".join(_status_lines(repo_root=repo_root)))
+            time.sleep(2.0)
+    except KeyboardInterrupt:
+        pass
+
+
+def _status_lines(*, repo_root: Path) -> list[str]:
+    try:
+        state = StateStore(repo_root=repo_root).read_state()
+    except FileLockTimeout:
+        return ["coordinator state is locked (likely mid-request); retry shortly"]
+    if state is None:
+        return ["No loopy-loop state found."]
+    prices = _configured_model_prices(repo_root=repo_root)
+    lines = _session_status_lines(
+        repo_root=repo_root, state=state, indent="", prices=prices
+    )
+    # Walk the durable session stack so a running child is visible instead of
+    # the suspended parent's "current_task: none".
+    seen: set[str] = {state.active_session_id}
+    while state.active_child_session_id:
+        child_id = state.active_child_session_id
+        if child_id in seen:
+            break
+        seen.add(child_id)
+        try:
+            child_state = StateStore(
+                repo_root=repo_root,
+                state_path=state_path(repo_root=repo_root, session_id=child_id),
+            ).read_state()
+        except FileLockTimeout:
+            lines.append(f"active child {child_id}: state locked; retry shortly")
+            break
+        if child_state is None:
+            break
+        lines.append("")
+        lines.append(f"active child session {child_id}:")
+        lines.extend(
+            _session_status_lines(
+                repo_root=repo_root, state=child_state, indent="  ", prices=prices
+            )
+        )
+        state = child_state
+    return lines
+
+
+def _session_status_lines(
+    *, repo_root: Path, state: LoopState, indent: str, prices: ModelPrices | None
+) -> list[str]:
+    lines = [
+        f"{indent}status: {state.status}",
+        f"{indent}session: {state.active_session_id}",
+        f"{indent}iteration_count: {state.iteration_count}",
+    ]
+    if state.current_task is None:
+        lines.append(f"{indent}current_task: none")
+    else:
+        lines.append(
+            f"{indent}current_task: {state.current_task.workflow_id} "
+            f"(iteration {state.current_task.iteration}, "
+            f"session {state.current_task.session_id}, "
+            f"started {state.current_task.started_at})"
+        )
+    lines.append(f"{indent}stop_reason: {state.stop_reason or 'none'}")
+    totals = session_tree_usage_totals(repo_root=repo_root, state=state)
+    lines.append(
+        f"{indent}usage: prompt_tokens={totals.prompt_tokens} "
+        f"completion_tokens={totals.completion_tokens} "
+        f"(iterations with usage: {totals.iterations_with_usage}, "
+        f"unknown: {totals.iterations_without_usage})"
+    )
+    lines.append(f"{indent}harness_duration_s: {totals.duration_s:.0f}")
+    cost = estimate_cost_usd(
+        prompt_tokens=totals.prompt_tokens,
+        completion_tokens=totals.completion_tokens,
+        prices=prices,
+    )
+    if cost is not None:
+        lines.append(f"{indent}estimated_cost_usd: {cost:.4f}")
+    return lines
+
+
+def _configured_model_prices(*, repo_root: Path) -> ModelPrices | None:
+    try:
+        return load_root_config(repo_root=repo_root).model_prices
+    except ConfigError:
+        return None
+
+
+@main.command()
+@click.option("--follow", is_flag=True, default=False, help="Keep tailing new events.")
+@click.option(
+    "--json", "as_json", is_flag=True, default=False, help="Raw JSON, one per line."
+)
+def events(follow: bool, as_json: bool) -> None:
+    """Print the deepest active session's event stream (events.jsonl)."""
+    repo_root = Path.cwd()
+    session_id = _deepest_active_session_id(repo_root=repo_root)
+    if session_id is None:
+        raise click.ClickException("No loopy-loop state found.")
+    path = events_path(repo_root=repo_root, session_id=session_id)
+    printed = 0
+    try:
+        while True:
+            entries = read_events(path=path)
+            for event in entries[printed:]:
+                click.echo(
+                    json.dumps(event, separators=(",", ":"))
+                    if as_json
+                    else _format_event(event)
+                )
+            printed = len(entries)
+            if not follow:
+                break
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
+
+
+def _format_event(event: dict) -> str:
+    payload = event.get("payload")
+    detail = ""
+    if isinstance(payload, dict) and payload:
+        detail = " " + " ".join(
+            f"{key}={value}" for key, value in payload.items() if value is not None
+        )
+    return f"{event.get('ts', '?')} {event.get('type', '?')}{detail}"
+
+
+def _deepest_active_session_id(*, repo_root: Path) -> str | None:
     try:
         state = StateStore(repo_root=repo_root).read_state()
     except FileLockTimeout:
@@ -267,21 +418,21 @@ def status() -> None:
             "coordinator state is locked (likely mid-request); retry shortly"
         ) from None
     if state is None:
-        click.echo("No loopy-loop state found.")
-        return
-    click.echo(f"status: {state.status}")
-    click.echo(f"session: {state.active_session_id}")
-    click.echo(f"iteration_count: {state.iteration_count}")
-    if state.current_task is None:
-        click.echo("current_task: none")
-    else:
-        click.echo(
-            f"current_task: {state.current_task.workflow_id} "
-            f"(iteration {state.current_task.iteration}, "
-            f"session {state.current_task.session_id}, "
-            f"started {state.current_task.started_at})"
-        )
-    click.echo(f"stop_reason: {state.stop_reason or 'none'}")
+        return None
+    seen: set[str] = {state.active_session_id}
+    while state.active_child_session_id:
+        child_id = state.active_child_session_id
+        if child_id in seen:
+            break
+        seen.add(child_id)
+        child_state = StateStore(
+            repo_root=repo_root,
+            state_path=state_path(repo_root=repo_root, session_id=child_id),
+        ).read_state()
+        if child_state is None:
+            break
+        state = child_state
+    return state.active_session_id
 
 
 @main.command()

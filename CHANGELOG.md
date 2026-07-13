@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **events.jsonl is now written (P1.1).** The coordinator appends one
+  versioned JSON event per significant transition — `session_started`,
+  `task_dispatched`, `task_finished` (with tokens/duration/failure_kind),
+  `iteration_abandoned`, `goal_check`, `child_started`, `child_finished`,
+  `session_stopped` — to each session's `events.jsonl` after the producing
+  state mutation commits (at-least-once; readers key on `event_id` and
+  tolerate a torn final line). New `loopy events [--follow] [--json]` tails
+  the deepest active session's stream.
+- **Usage/cost ledger + `max_cost_usd` (P1.1).** The worker reads
+  coordinator-model token usage from team-harness's `run.json` and reports
+  it (plus wall-clock duration) on `/finished`; the coordinator keeps a
+  durable per-session ledger in `state.json` and records a finalized
+  child's totals on its `children.json` record. With the new optional
+  `model_prices` (USD per 1M tokens, coordinator-side), `loopy status`
+  shows estimated cost and the new optional `max_cost_usd` budget stops
+  the loop with `stop_reason="max_cost_usd"`. Cost explicitly covers the
+  harness coordinator model only — agent-CLI subprocess spend is not
+  measurable and is never pretended into the number.
+- **`loopy status` shows the session stack and `--watch`.** While a child
+  session runs, `status` now walks the durable parent→child pointers and
+  shows the live child (previously it showed only the suspended parent);
+  `--watch` re-renders every 2 seconds.
+
 - **Failure taxonomy + per-workflow failure cap (P2.3).** Failed iterations
   now record a `failure_kind` — `transient` (provider said retry;
   team-harness's own retries were exhausted), `deterministic` (auth/config

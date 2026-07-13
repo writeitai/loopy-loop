@@ -194,8 +194,17 @@ usage adapter with explicit `known`/`unknown` fields (don't pretend worker token
 costs are always measurable). Budgets enforceable at session/child/workflow/wall-clock
 levels, checked before dispatch and after each result.
 
-**Effort.** M–L. **Status.** Proposed — next major piece before the flagship
-double-loop run.
+**Effort.** M–L. **Status.** **Implemented (unreleased)** — versioned events
+appended after each committing mutation (at-least-once, torn-tail-tolerant
+reader); worker-read token usage from team-harness `run.json` with explicit
+unknown-usage accounting; durable per-session ledger + children.json roll-up;
+`model_prices`-derived cost with the `max_cost_usd` stop condition
+(coordinator-side, requires prices — preflight-enforced); `loopy status`
+(session stack + usage + cost, `--watch`) and `loopy events [--follow]
+[--json]`. Scope notes: budget enforcement is per session subtree (a running
+child enforces against its own spend until finalized — bounded by the
+two-level depth limit); only session-level budgets shipped (per-workflow and
+wall-clock budgets were not needed yet).
 
 ### P1.2 — Deterministic backstop under the judge (per target, for high-stakes work)
 
