@@ -165,6 +165,26 @@ eval-banana run \
 - If the file is missing but `result.json` exists for the active task, the
   coordinator can reconstruct the finished request from `result.json`
 
+`children.json` (parent sessions)
+
+- Index of child sessions dispatched by this session; each record carries the
+  child `session_id`, `workflow_set`, `status`, timestamps, `stop_reason`, and
+  the originating `request_file` name (which makes the dispatch scan
+  idempotent: a request whose filename already appears here is never
+  dispatched twice, even if a crash left the file behind)
+- The parent's `state.json` additionally records `active_child_session_id`
+  while a child runs — the durable session-stack pointer a restarted
+  coordinator follows to resume the child instead of orphaning it
+
+Atomicity and crash model: the coordinator- and worker-owned artifacts above
+are written atomically (same-directory temp file + rename), so a **process
+crash** never leaves them truncated — readers see either the previous or the
+new complete file. This does not extend to power loss / kernel crashes (no
+fsync), and it cannot be enforced for **workflow-written** signals
+(`control.json`, `goal_check.json`, child requests): the packaged prompts
+instruct agents to publish those via temp-file + rename, but a torn write by a
+non-compliant agent is read as invalid output.
+
 `salvage.json`
 
 - Written into the interrupted iteration's directory during crash recovery,

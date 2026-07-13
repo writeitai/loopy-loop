@@ -39,6 +39,7 @@ from typing import Any
 from loopy_loop.models import utc_now
 from loopy_loop.sessions import iteration_dir_path
 from loopy_loop.sessions import iteration_harness_output_root
+from loopy_loop.sessions import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +258,4 @@ def _write_salvage_record(
         "unsettled_workers": outcome.unsettled_workers,
         "reports": outcome.reports,
     }
-    (iteration_dir / SALVAGE_FILENAME).write_text(
-        json.dumps(payload, indent=2), encoding="utf-8"
-    )
+    write_json_atomic(path=iteration_dir / SALVAGE_FILENAME, payload=payload)

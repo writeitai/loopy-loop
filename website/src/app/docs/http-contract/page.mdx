@@ -181,6 +181,18 @@ acknowledgment never corrupts loop state.
 coordinator does **not** mutate state and does **not** change the current task; it
 returns the current task's run response so the caller sees what is actually running.
 
+**Attempt ids.** Every dispatched task carries a unique `attempt_id`, echoed by
+the worker on `/finished`. A call from a superseded attempt — same
+session/workflow/iteration, different attempt — is treated as stale, so a late
+result from work that was already recovered or abandoned can never be recorded
+as the current iteration's outcome.
+
+**Session-stack recovery on `--resume`.** The coordinator walks the durable
+parent→child pointers to the deepest live session: a running child continues
+where it was (previously a restart silently reopened the parent and orphaned
+the child), a terminal child is finalized and its parent resumed, and every
+interrupted-dispatch crash window reconciles deterministically.
+
 **Finish with no active task.** If `/finished` arrives when no task is current, the
 coordinator dispatches the next available task as if `/register` had been called —
 or returns `action: "stop"` if the state is terminal. This makes a post-crash retry

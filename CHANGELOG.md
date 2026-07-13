@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+- **Durable session-stack recovery (P0.1).** While a child session runs, the
+  parent's `state.json` records `active_child_session_id`; on `--resume` the
+  coordinator walks the pointer chain to the deepest live session instead of
+  silently reopening the parent and orphaning the running child. Terminal
+  children found at startup are finalized (children.json completed, pointer
+  cleared) and their parent resumed. Every interrupted-dispatch crash window
+  reconciles deterministically: dangling pointers are cleared, a fully
+  created child whose parent commit never landed is adopted, and leftover
+  request files never dispatch twice (children.json records the originating
+  `request_file`). Invalid child requests are terminally rejected
+  (`*.json.rejected`) instead of being re-read forever.
+- **Attempt ids.** Every dispatched task carries a unique `attempt_id`
+  (also on the wire in `TaskResponse`, echoed in `FinishedRequest`); a late
+  `/finished` from a superseded attempt of the same coordinates is treated as
+  stale rather than recorded as the current result.
+- Iteration artifacts (`result.json`, `result_text.txt`, `prompt.txt`,
+  `harness_run_id.txt`, `pending_finished_request.json`), `children.json`,
+  and `salvage.json` are all written atomically (unique temp + rename) — a
+  crash can never leave a truncated recovery artifact.
+- Internal: the three duplicated dispatch blocks in the coordinator collapsed
+  into one `_advance()` step (stop checks → child dispatch → next workflow →
+  stamped task), so they can no longer drift apart. `_advance()` also enforces
+  the suspended-parent invariant: a parent with a live child can never acquire
+  its own task (a duplicate `/finished` retry gets the child's live task
+  instead), and a coordinator-level transition lock serializes cross-store
+  handoffs.
+- Review hardening (adversarial Codex review of the above): request-file
+  tombstones apply only to RUNNING child records (a completed child's
+  filename is reusable for new work); the children.json record lands BEFORE
+  the child state so an interrupted dispatch is always discoverable
+  (`failed_dispatch` + exactly-once redispatch); startup reconciles every
+  running-projected record (terminal children finalize even without a
+  pointer); the first child task carries an attempt id; attempt checks are
+  strict whenever the live task has one (including `result.json` provenance —
+  a stale artifact can no longer complete a new attempt); semantically
+  unusable child requests (unknown workflow set, no eligible workflow) are
+  terminally rejected instead of wedging every completion; packaged prompts
+  instruct atomic control/goal_check publication; the crash model (process
+  crash, no fsync) is documented.
 - **The `pm_planner_dispatcher` template is executable from a clean init
   (P0.4).** `loopy init --template pm_planner_dispatcher` now also ships the
   `inner_outer_eval` child workflow set its dispatcher spawns — previously a
