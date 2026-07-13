@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (breaking)
+## 0.3.0 (breaking)
 
 **Breaking API change — `/register` requires the worker's process identity.**
 A register without a `worker` object is rejected with HTTP 400. Pre-0.3
