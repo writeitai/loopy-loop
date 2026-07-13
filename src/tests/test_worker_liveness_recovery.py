@@ -37,6 +37,8 @@ LOCAL_IDENTITY = {
     "starttime": "lstart:Sun Jul 12 00:00:00 2026",
 }
 
+REGISTER_BODY = {"worker": {"hostname": "test-host", "pid": 999983, "starttime": None}}
+
 
 # ---------------------------------------------------------------------------
 # worker_identity unit behavior
@@ -159,7 +161,7 @@ def _register_with_orphan(
         "loopy_loop.coordinator_app.recover_interrupted_iteration",
         lambda **kwargs: recovery_outcome or RecoveryOutcome(),
     )
-    response = client.post("/register", json={})
+    response = client.post("/register", json=REGISTER_BODY)
     return response, store, state
 
 
@@ -201,7 +203,8 @@ def test_register_recovers_when_worker_verifiably_dead(
 def test_register_recovers_when_liveness_unknown(
     repo_builder: Any, monkeypatch: Any, current_task_factory: Any
 ) -> None:
-    # Old workers / remote hosts: no identity -> pre-existing behavior.
+    # Pre-upgrade persisted tasks / remote hosts: no verifiable identity
+    # -> the pre-existing assume-abandoned recovery behavior.
     response, store, _ = _register_with_orphan(
         repo_builder,
         current_task_factory,
@@ -252,7 +255,7 @@ def test_register_surfaces_recovery_refused_as_409(
     monkeypatch.setattr(
         "loopy_loop.coordinator_app.recover_interrupted_iteration", refuse
     )
-    response = client.post("/register", json={})
+    response = client.post("/register", json=REGISTER_BODY)
     assert response.status_code == 409
     assert "still alive" in response.json()["detail"]
     updated = store.read_state()
@@ -301,12 +304,12 @@ def test_finished_stamps_callers_identity_on_next_task(
     assert state.current_task.worker.pid == LOCAL_IDENTITY["pid"]
 
 
-def test_register_without_body_still_works(repo_builder: Any, monkeypatch: Any) -> None:
-    # Pre-identity workers post an empty body; the contract stays compatible.
+def test_register_with_identity_dispatches(repo_builder: Any, monkeypatch: Any) -> None:
+    # The canonical register: identity present, task dispatched and stamped.
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
-    response = client.post("/register", json={})
+    response = client.post("/register", json=REGISTER_BODY)
     assert response.status_code == 200
     assert response.json()["action"] == "run"
 
@@ -659,12 +662,57 @@ def test_stale_finished_from_other_identified_worker_is_refused(
     response = client.post("/finished", json=stale)
     assert response.status_code == 409
     assert "belongs to worker" in response.json()["detail"]
-    # Unknown identity keeps the legacy stale-retry behavior:
-    stale_legacy = {**stale}
-    del stale_legacy["worker"]
-    response = client.post("/finished", json=stale_legacy)
+    # An unidentified stale caller is refused too (identity is required at
+    # /register, so every live task has a recorded owner):
+    stale_anonymous = {**stale}
+    del stale_anonymous["worker"]
+    response = client.post("/finished", json=stale_anonymous)
+    assert response.status_code == 409
+    # The OWNER's stale call still gets the live-task replay:
+    stale_owner = {**stale, "worker": LOCAL_IDENTITY}
+    response = client.post("/finished", json=stale_owner)
     assert response.status_code == 200
     assert response.json()["iteration"] == task["iteration"]
+
+
+def test_stale_finished_replays_for_pre_upgrade_ownerless_task(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    # A task persisted by a pre-identity version has no recorded owner; the
+    # legacy stale-replay behavior is preserved for that one resume.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    body = RegisterRequest(worker=WorkerIdentity(**LOCAL_IDENTITY)).model_dump()
+    task = client.post("/register", json=body).json()
+    store = StateStore(repo_root=repo_root)
+    state = store.read_state()
+    assert state is not None and state.current_task is not None
+    state.current_task = state.current_task.model_copy(update={"worker": None})
+    store.write_state(state=state)
+    stale = {
+        "workflow_id": task["workflow_id"],
+        "session_id": task["session_id"],
+        "iteration": 999,
+        "success": True,
+        "worker": {"hostname": "someone-else", "pid": 1, "starttime": None},
+    }
+    response = client.post("/finished", json=stale)
+    assert response.status_code == 200
+    assert response.json()["iteration"] == task["iteration"]
+
+
+def test_register_requires_worker_identity(repo_builder: Any, monkeypatch: Any) -> None:
+    # Breaking change (0.3): a register without identity fails fast with a
+    # clear message instead of silently degrading recovery guarantees.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    response = client.post("/register", json={})
+    assert response.status_code == 400
+    assert "worker identity is required" in response.json()["detail"]
+    response = client.post("/register")
+    assert response.status_code == 400
 
 
 def test_config_snapshot_on_the_wire_has_no_recovery_fields(
@@ -675,6 +723,6 @@ def test_config_snapshot_on_the_wire_has_no_recovery_fields(
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder(root_config={"recovery_policy": "reap"})
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
-    task = client.post("/register", json={}).json()
+    task = client.post("/register", json=REGISTER_BODY).json()
     assert "recovery_policy" not in task["config_snapshot"]
     assert "recovery_drain_timeout_s" not in task["config_snapshot"]

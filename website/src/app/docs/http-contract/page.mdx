@@ -28,7 +28,8 @@ Every response from either endpoint is a `TaskResponse` whose `action` is either
 A worker calls `/register` to receive its first assignment. The request body is
 empty.
 
-Request: `{}` — or, optionally, the worker's process identity:
+Request — the worker's process identity is **required** (a breaking change in
+0.3; pre-0.3 workers are rejected with HTTP 400):
 
 ```json
 {
@@ -36,10 +37,12 @@ Request: `{}` — or, optionally, the worker's process identity:
 }
 ```
 
-When present, the coordinator stamps the identity onto the dispatched task so a
-later `/register` can verify whether that worker is still alive before reclaiming
-its task. The same optional `worker` field exists on `/finished` (the caller runs
-the next dispatched task). Old workers that post `{}` keep working unchanged.
+The coordinator stamps the identity onto the dispatched task, so a later
+`/register` can verify whether that worker is still alive before reclaiming its
+task, and a stale `/finished` is only ever replayed to the task's recorded owner.
+The same `worker` field rides on `/finished` (the caller runs the next dispatched
+task); `starttime` is null when the worker's team-harness predates process
+identity, and verification then degrades to "unknown".
 
 Run response:
 

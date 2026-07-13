@@ -81,6 +81,16 @@ def create_coordinator_app(
 
     @app.post("/register", response_model=TaskResponse)
     def register_worker(request: RegisterRequest | None = None) -> TaskResponse:
+        # Breaking change (0.3): identity is required. It guarantees every
+        # dispatched task has a recorded owner, so liveness verification and
+        # the stale-/finished owner check are always possible. Old workers
+        # fail fast here with a clear message instead of degrading silently.
+        if request is None or request.worker is None:
+            raise HTTPException(
+                status_code=400,
+                detail="worker identity is required; upgrade the worker CLI "
+                "(loopy-loop >= 0.3)",
+            )
         try:
             return service.register_worker(request=request)
         except (WorkerBusyError, RecoveryRefusedError, RecoveryIncompleteError) as exc:
@@ -337,23 +347,27 @@ class CoordinatorService:
                 or request.iteration != active.iteration
             ):
                 # Replaying the live task is only safe to its recorded owner:
-                # handing it to a DIFFERENT identified worker would start a
-                # second executor of the same task. Unknown identities (old
-                # workers) keep the pre-existing stale-retry behavior.
-                if (
-                    caller is not None
-                    and active.worker is not None
-                    and (
-                        caller.hostname != active.worker.hostname
-                        or caller.pid != active.worker.pid
-                        or caller.starttime != active.worker.starttime
-                    )
+                # handing it to anyone else would start a second executor of
+                # the same task. Identity is required at /register, so every
+                # task dispatched by this version has an owner; a None owner
+                # can only come from pre-upgrade persisted state and keeps
+                # the legacy replay behavior for that one resume.
+                if active.worker is not None and (
+                    caller is None
+                    or caller.hostname != active.worker.hostname
+                    or caller.pid != active.worker.pid
+                    or caller.starttime != active.worker.starttime
                 ):
+                    caller_desc = (
+                        f"pid={caller.pid} on {caller.hostname}"
+                        if caller is not None
+                        else "an unidentified caller"
+                    )
                     raise WorkerBusyError(
-                        f"stale /finished from pid={caller.pid} on "
-                        f"{caller.hostname}: iteration {active.iteration} "
-                        f"({active.workflow_id}) belongs to worker "
-                        f"pid={active.worker.pid} on {active.worker.hostname}"
+                        f"stale /finished from {caller_desc}: iteration "
+                        f"{active.iteration} ({active.workflow_id}) belongs "
+                        f"to worker pid={active.worker.pid} on "
+                        f"{active.worker.hostname}"
                     )
                 return current, _build_run_response(
                     current_task=active, config_snapshot=current.config_snapshot

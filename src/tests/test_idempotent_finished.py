@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 from loopy_loop.coordinator_app import create_coordinator_app
 from loopy_loop.state_store import StateStore
 
+REGISTER_BODY = {"worker": {"hostname": "test-host", "pid": 999983, "starttime": None}}
+
 
 def test_stale_finished_mismatch_does_not_record_history_twice(
     repo_builder: Any, monkeypatch: Any
@@ -17,7 +19,7 @@ def test_stale_finished_mismatch_does_not_record_history_twice(
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     store = StateStore(repo_root=repo_root)
 
-    reg = client.post("/register", json={}).json()
+    reg = client.post("/register", json=REGISTER_BODY).json()
     # First /finished — legitimate call, processes the task.
     first = client.post(
         "/finished",
@@ -65,11 +67,13 @@ def test_stale_finished_returns_current_task_run_response(
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     store = StateStore(repo_root=repo_root)
 
-    reg = client.post("/register", json={}).json()
-    # Send /finished with wrong session_id — stale mismatch.
+    reg = client.post("/register", json=REGISTER_BODY).json()
+    # Send /finished with wrong session_id — stale mismatch FROM THE OWNER
+    # (the live-task replay is only served to the task's recorded worker).
     stale = client.post(
         "/finished",
         json={
+            "worker": REGISTER_BODY["worker"],
             "workflow_id": reg["workflow_id"],
             "session_id": "stale-session-id",
             "iteration": reg["iteration"],

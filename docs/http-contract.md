@@ -4,7 +4,8 @@ loopy-loop exposes exactly two coordinator endpoints.
 
 ## POST /register
 
-Request: `{}` (empty body), or with the worker's process identity:
+Request (the worker's process identity is **required** — a breaking change in
+0.3; pre-0.3 workers are rejected with HTTP 400):
 
 ```json
 {
@@ -16,11 +17,12 @@ Request: `{}` (empty body), or with the worker's process identity:
 }
 ```
 
-`worker` is optional and backward compatible. When present, the coordinator
-stamps it onto the dispatched task so a later `/register` can *verify* whether
-that worker is still alive before reclaiming its task. `starttime` is
-team-harness's pid-reuse-proof process-identity token (requires team-harness
-with process identity support; omitted otherwise).
+The coordinator stamps the identity onto the dispatched task, which is what
+makes two guarantees possible: a later `/register` can *verify* whether that
+worker is still alive before reclaiming its task, and a stale `/finished` is
+only ever replayed to the task's recorded owner. `starttime` is team-harness's
+pid-reuse-proof process-identity token (null when the worker's team-harness
+predates process identity — verification then degrades to "unknown").
 
 Run response:
 

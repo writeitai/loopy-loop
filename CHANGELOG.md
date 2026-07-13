@@ -1,14 +1,23 @@
 # Changelog
 
-## Unreleased
+## Unreleased (breaking)
 
-- **Worker liveness verification (D7).** The worker now sends its process
+**Breaking API change — `/register` requires the worker's process identity.**
+A register without a `worker` object is rejected with HTTP 400. Pre-0.3
+workers cannot register against a 0.3 coordinator; upgrade workers and
+coordinator together (they normally ship in the same install).
+
+- **Worker liveness verification (D7).** The worker sends its process
   identity (hostname + pid + a pid-reuse-proof start-time token) with
   `/register` and `/finished`; the coordinator stamps it onto the dispatched
   task. A `/register` while the recorded worker is *verifiably still alive*
   returns HTTP 409 instead of abandoning live work — closing the
-  duplicate-work window. Unverifiable identities (old workers, remote hosts)
-  keep the pre-existing behavior; the wire change is backward compatible.
+  duplicate-work window. Unverifiable identities (remote hosts, or a
+  team-harness without process identity) keep the pre-existing
+  assume-abandoned recovery behavior. Because every dispatched task now has
+  a recorded owner, a stale `/finished` is replayed **only to that owner**
+  (anyone else gets HTTP 409) — a task persisted by a pre-identity version
+  keeps the legacy replay for that one resume.
 - **Orphaned-agent recovery (P2.5 / TH-D5 consumer side).** When a worker is
   confirmed dead with nothing recoverable, the coordinator applies
   `recovery_policy` (new coordinator-side config, NOT part of the wire
