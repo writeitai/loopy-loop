@@ -16,7 +16,9 @@ Inputs available in the rendered assignment:
 - goal_check.json output path
 
 Goal source of truth:
-- Treat the rendered Goal input and loopy_loop_goal.txt as canonical.
+- Treat the rendered Goal input and the Session goal path as canonical.
+  (Never the repo-root goal file: in a child session that holds the PARENT's
+  goal, not this session's.)
 - Do not infer or restate the goal from project_state files.
 - Use project_state only to understand progress, memory, and eval history.
 

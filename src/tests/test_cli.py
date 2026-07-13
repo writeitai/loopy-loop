@@ -314,3 +314,31 @@ def test_clean_pm_init_can_dispatch_an_inner_outer_eval_child(
     assert child_task["action"] == "run"
     assert child_task["workflow_set"] == "inner_outer_eval"
     assert child_task["session_id"] != parent_task["session_id"]
+
+    # Run the dispatched child assignment through the real worker path (fake
+    # harness) and verify the SEMANTICS, not just the dispatch: the child works
+    # on ITS goal, and nothing tells its implementer not to implement.
+    from loopy_loop.models import IterationResult
+    from loopy_loop.models import TaskResponse
+    from loopy_loop.worker import _run_task
+
+    captured: dict[str, Any] = {}
+
+    def fake_run_harness_iteration(**kwargs: Any) -> IterationResult:
+        captured.update(kwargs)
+        return IterationResult(success=True, text="ok", harness_run_id="r1")
+
+    monkeypatch.setattr(
+        "loopy_loop.worker.run_harness_iteration", fake_run_harness_iteration
+    )
+    _run_task(repo_root=tmp_path, task=TaskResponse.model_validate(child_task))
+
+    rendered = captured["rendered_prompt"]
+    assert "Implement the selected planner item." in rendered  # the CHILD goal
+    # The child prompts treat the SESSION goal as canonical — never the
+    # repo-root goal file, which in a child session is the PARENT's goal.
+    assert "loopy_loop_goal" not in rendered
+    # The PM template's system-prompt extension must not leak a
+    # "do not implement" instruction into the child's implementer.
+    snapshot = captured["config_snapshot"]
+    assert "not implement" not in snapshot.team_harness_system_prompt_extension
