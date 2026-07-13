@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased (breaking)
+
+**Breaking API change — `/register` requires the worker's process identity.**
+A register without a `worker` object is rejected with HTTP 400. Pre-0.3
+workers cannot register against a 0.3 coordinator; upgrade workers and
+coordinator together (they normally ship in the same install).
+
+- **Worker liveness verification (D7).** The worker sends its process
+  identity (hostname + pid + a pid-reuse-proof start-time token) with
+  `/register` and `/finished`; the coordinator stamps it onto the dispatched
+  task. A `/register` while the recorded worker is *verifiably still alive*
+  returns HTTP 409 instead of abandoning live work — closing the
+  duplicate-work window. Unverifiable identities (remote hosts, or a
+  team-harness without process identity) keep the pre-existing
+  assume-abandoned recovery behavior. Because every dispatched task now has
+  a recorded owner, a stale `/finished` is replayed **only to that owner**
+  (anyone else gets HTTP 409) — a task persisted by a pre-identity version
+  keeps the legacy replay for that one resume.
+- **Orphaned-agent recovery (P2.5 / TH-D5 consumer side).** When a worker is
+  confirmed dead with nothing recoverable, the coordinator applies
+  `recovery_policy` (new coordinator-side config, NOT part of the wire
+  snapshot; default `drain`, one shared `recovery_drain_timeout_s` deadline,
+  default 600s) to agent processes the dead worker's harness run left behind,
+  via team-harness's process reaper: drained agents finish and their repo
+  edits survive; a `salvage.json` in the interrupted iteration directory
+  records what was handled; the history entry is `abandoned_after_<policy>`
+  when anything settled. Recovery runs OUTSIDE the state lock (`loopy
+  status`/`stop` stay usable while draining), validates that each discovered
+  run record actually belongs to the iteration, is same-host-only (a worker
+  identity from another hostname skips reaping), and refuses to dispatch
+  replacement work (HTTP 409) when any orphan may still be running or when
+  team-harness's parent-liveness guard reports the run's owner alive.
+  Requires team-harness with the process reaper (> 0.2.10); older versions
+  skip orphan recovery gracefully.
+- A stale `/finished` from a **different identified worker** now gets HTTP 409
+  instead of a second copy of the live task; unknown identities keep the
+  pre-existing stale-retry behavior. State-lock contention surfaces as a clean
+  HTTP 503 (and friendly CLI errors) instead of raw tracebacks.
+- The bundled worker uses an unbounded read timeout on `/register` only
+  (recovery can legitimately block registration up to the drain deadline),
+  keeps the bounded timeout on `/finished`, and exits with code 3 on a 409.
+
 ## 0.2.1
 
 - Improve README onboarding, install, initialization, configuration, and logging docs.

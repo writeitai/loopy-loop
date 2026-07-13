@@ -46,8 +46,12 @@ def _make_stop_response(*, stop_reason: str = "goal_met") -> dict[str, object]:
 
 
 class FakeResponse:
-    def __init__(self, payload: dict[str, object]) -> None:
+    def __init__(
+        self, payload: dict[str, object], status_code: int = 200, text: str = ""
+    ) -> None:
         self._payload = payload
+        self.status_code = status_code
+        self.text = text
 
     def raise_for_status(self) -> None:
         return None
@@ -67,7 +71,9 @@ class FakeClient:
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         return None
 
-    def post(self, url: str, json: dict[str, object]) -> FakeResponse:
+    def post(
+        self, url: str, json: dict[str, object], timeout: object = None
+    ) -> FakeResponse:
         self._posted_payloads.append({"url": url, "json": json})
         item = self._responses.pop(0)
         if isinstance(item, Exception):

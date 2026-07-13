@@ -45,12 +45,33 @@ class RootConfigSnapshot(BaseModel):
     team_harness_system_prompt_extension: str = Field(...)
 
 
+class WorkerIdentity(BaseModel):
+    """Durable identity of the worker process holding an assignment.
+
+    Lets the coordinator *verify* whether that worker is still alive before
+    reclaiming its task (instead of assuming abandonment), closing the
+    duplicate-work window on a second /register. ``starttime`` is the
+    team-harness process-identity token (pid-reuse-proof); verification is
+    only possible on the coordinator's own host — remote workers fall back
+    to the old assume-abandoned behavior.
+    """
+
+    hostname: str = Field(...)
+    pid: int = Field(...)
+    starttime: str | None = Field(default=None)
+
+
+class RegisterRequest(BaseModel):
+    worker: WorkerIdentity | None = Field(default=None)
+
+
 class CurrentTask(BaseModel):
     workflow_set: str = Field(...)
     workflow_id: str = Field(...)
     session_id: str = Field(...)
     iteration: int = Field(...)
     started_at: datetime = Field(...)
+    worker: WorkerIdentity | None = Field(default=None)
 
 
 class TaskResponse(BaseModel):
@@ -101,6 +122,9 @@ class FinishedRequest(BaseModel):
     success: bool = Field(...)
     text: str | None = Field(default=None)
     error: str | None = Field(default=None)
+    # Identity of the calling worker — the same worker will run the NEXT task
+    # this response dispatches, so it is stamped onto that CurrentTask.
+    worker: WorkerIdentity | None = Field(default=None)
 
 
 class ControlSignal(BaseModel):

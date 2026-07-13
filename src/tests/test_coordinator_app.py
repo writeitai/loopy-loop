@@ -15,13 +15,15 @@ from loopy_loop.sessions import result_path
 from loopy_loop.sessions import session_dir_path
 from loopy_loop.state_store import StateStore
 
+REGISTER_BODY = {"worker": {"hostname": "test-host", "pid": 999983, "starttime": None}}
+
 
 def test_register_returns_run_response(repo_builder: Any, monkeypatch: Any) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    response = client.post("/register", json={}).json()
+    response = client.post("/register", json=REGISTER_BODY).json()
 
     assert response["action"] == "run"
 
@@ -33,7 +35,7 @@ def test_register_response_has_correct_fields(
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    response = client.post("/register", json={}).json()
+    response = client.post("/register", json=REGISTER_BODY).json()
 
     assert response["action"] == "run"
     assert response["workflow_id"] == "planner"
@@ -51,7 +53,7 @@ def test_register_sets_current_task(repo_builder: Any, monkeypatch: Any) -> None
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     store = StateStore(repo_root=repo_root)
 
-    response = client.post("/register", json={}).json()
+    response = client.post("/register", json=REGISTER_BODY).json()
     state = store.read_state()
 
     assert state is not None
@@ -67,7 +69,7 @@ def test_finished_records_history(repo_builder: Any, monkeypatch: Any) -> None:
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     store = StateStore(repo_root=repo_root)
 
-    reg = client.post("/register", json={}).json()
+    reg = client.post("/register", json=REGISTER_BODY).json()
     client.post(
         "/finished",
         json={
@@ -97,7 +99,7 @@ def test_finished_returns_next_run(repo_builder: Any, monkeypatch: Any) -> None:
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    reg = client.post("/register", json={}).json()
+    reg = client.post("/register", json=REGISTER_BODY).json()
     finished = client.post(
         "/finished",
         json={
@@ -147,7 +149,7 @@ def test_child_session_runs_inside_parent_and_resumes_parent(
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     store = StateStore(repo_root=repo_root)
 
-    parent_task = client.post("/register", json={}).json()
+    parent_task = client.post("/register", json=REGISTER_BODY).json()
     request_dir = child_requests_dir_path(
         repo_root=repo_root, session_id=parent_task["session_id"]
     )
@@ -250,7 +252,7 @@ def test_failed_parent_iteration_does_not_dispatch_child_request(
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    parent_task = client.post("/register", json={}).json()
+    parent_task = client.post("/register", json=REGISTER_BODY).json()
     request_path = (
         child_requests_dir_path(
             repo_root=repo_root, session_id=parent_task["session_id"]
@@ -294,11 +296,13 @@ def test_finished_stale_mismatch_does_not_mutate(
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     store = StateStore(repo_root=repo_root)
 
-    reg = client.post("/register", json={}).json()
-    # Send /finished with wrong session_id — stale mismatch.
+    reg = client.post("/register", json=REGISTER_BODY).json()
+    # Send /finished with wrong session_id — stale mismatch FROM THE OWNER
+    # (the live-task replay is only served to the task's recorded worker).
     stale = client.post(
         "/finished",
         json={
+            "worker": REGISTER_BODY["worker"],
             "workflow_id": reg["workflow_id"],
             "session_id": "wrong-session-id",
             "iteration": reg["iteration"],
@@ -422,7 +426,7 @@ def test_register_recovers_abandoned_task(
     state.current_task = orphaned
     store.write_state(state=state)
 
-    response = client.post("/register", json={}).json()
+    response = client.post("/register", json=REGISTER_BODY).json()
     updated = store.read_state()
 
     # Abandoned task should be recorded in history.
@@ -472,7 +476,7 @@ def test_register_recovers_completed_task_from_pending_finished_request(
         encoding="utf-8",
     )
 
-    response = client.post("/register", json={}).json()
+    response = client.post("/register", json=REGISTER_BODY).json()
     updated = store.read_state()
 
     assert response["action"] == "stop"
@@ -523,7 +527,7 @@ def test_register_recovers_completed_task_from_result_json(
         encoding="utf-8",
     )
 
-    response = client.post("/register", json={}).json()
+    response = client.post("/register", json=REGISTER_BODY).json()
     updated = store.read_state()
 
     assert response["action"] == "stop"
@@ -560,7 +564,7 @@ def test_register_terminal_plus_abandoned_task_cleanup_first(
     state.current_task = orphaned
     store.write_state(state=state)
 
-    response = client.post("/register", json={}).json()
+    response = client.post("/register", json=REGISTER_BODY).json()
     updated = store.read_state()
 
     # Abandoned entry must be recorded even though state was terminal.
@@ -582,7 +586,7 @@ def test_register_stop_when_terminal(repo_builder: Any, monkeypatch: Any) -> Non
     state.goal_met = True
     store.write_state(state=state)
 
-    response = client.post("/register", json={}).json()
+    response = client.post("/register", json=REGISTER_BODY).json()
 
     assert response["action"] == "stop"
     assert response["stop_reason"] == "goal_met"
@@ -594,7 +598,7 @@ def test_finished_stop_after_max_turns(repo_builder: Any, monkeypatch: Any) -> N
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     store = StateStore(repo_root=repo_root)
 
-    reg = client.post("/register", json={}).json()
+    reg = client.post("/register", json=REGISTER_BODY).json()
     response = client.post(
         "/finished",
         json={
@@ -625,7 +629,7 @@ def test_stop_precedence_goal_met(repo_builder: Any, monkeypatch: Any) -> None:
     state.stop_requested = True
     store.write_state(state=state)
 
-    response = client.post("/register", json={}).json()
+    response = client.post("/register", json=REGISTER_BODY).json()
 
     assert response["action"] == "stop"
     assert response["stop_reason"] == "goal_met"
@@ -698,7 +702,7 @@ def test_session_control_signal_sets_goal_met(
         encoding="utf-8",
     )
 
-    response = client.post("/register", json={}).json()
+    response = client.post("/register", json=REGISTER_BODY).json()
     updated = store.read_state()
 
     assert response["action"] == "stop"
@@ -723,7 +727,7 @@ def test_invalid_session_control_signal_stops(
         encoding="utf-8",
     )
 
-    response = client.post("/register", json={}).json()
+    response = client.post("/register", json=REGISTER_BODY).json()
     updated = store.read_state()
 
     assert response["action"] == "stop"
@@ -966,7 +970,7 @@ def test_no_eligible_workflow_stops(repo_builder: Any, monkeypatch: Any) -> None
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    response = client.post("/register", json={}).json()
+    response = client.post("/register", json=REGISTER_BODY).json()
 
     assert response["action"] == "stop"
     assert response["stop_reason"] == "no_eligible_workflow"
@@ -1018,7 +1022,7 @@ def test_stop_precedence_matrix(
         setattr(state, key, value)
     store.write_state(state=state)
 
-    response = client.post("/register", json={}).json()
+    response = client.post("/register", json=REGISTER_BODY).json()
 
     assert response["action"] == "stop"
     assert response["stop_reason"] == expected_stop_reason
@@ -1037,7 +1041,7 @@ def test_resume_reuses_in_progress_session(repo_builder: Any, monkeypatch: Any) 
     resumed_client = TestClient(resumed_app)
     resumed_store = StateStore(repo_root=repo_root)
     resumed_state = resumed_store.read_state()
-    register_response = resumed_client.post("/register", json={}).json()
+    register_response = resumed_client.post("/register", json=REGISTER_BODY).json()
 
     assert first_app is not None
     assert resumed_state is not None

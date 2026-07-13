@@ -16,8 +16,10 @@ from loopy_loop.harness_runner import run_harness_iteration
 from loopy_loop.harness_runner import write_iteration_artifacts
 from loopy_loop.models import FinishedRequest
 from loopy_loop.models import IterationResult
+from loopy_loop.models import RegisterRequest
 from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.models import TaskResponse
+from loopy_loop.models import WorkerIdentity
 from loopy_loop.sessions import child_requests_dir_path
 from loopy_loop.sessions import control_path
 from loopy_loop.sessions import ensure_iteration_dir
@@ -31,6 +33,7 @@ from loopy_loop.sessions import project_state_dir_path
 from loopy_loop.sessions import session_dir_path
 from loopy_loop.sessions import session_goal_path
 from loopy_loop.sessions import updates_from_user_path
+from loopy_loop.worker_identity import current_worker_identity
 
 # Internal retry constants for /finished — not configurable externally.
 # If all retries fail, the exception propagates and the process exits;
@@ -55,11 +58,16 @@ class FinishedAssignment:
 
 def run_worker_loop(*, repo_root: Path, coordinator_url: str) -> None:
     base_url = coordinator_url.rstrip("/")
+    identity = current_worker_identity()
     with httpx.Client(timeout=30.0) as client:
-        task = _post_register(client=client, coordinator_url=base_url)
+        task = _post_register(
+            client=client, coordinator_url=base_url, identity=identity
+        )
         while task.action == "run":
             try:
-                finished_assignment = _run_task(repo_root=repo_root, task=task)
+                finished_assignment = _run_task(
+                    repo_root=repo_root, task=task, identity=identity
+                )
             except FatalAssignmentError as exc:
                 print(str(exc), file=sys.stderr)
                 _post_finished(
@@ -79,10 +87,34 @@ def run_worker_loop(*, repo_root: Path, coordinator_url: str) -> None:
             _clear_pending_finished_request(path=finished_assignment.pending_path)
 
 
-def _post_register(*, client: httpx.Client, coordinator_url: str) -> TaskResponse:
-    response = client.post(f"{coordinator_url}/register", json={})
+def _post_register(
+    *, client: httpx.Client, coordinator_url: str, identity: WorkerIdentity
+) -> TaskResponse:
+    request = RegisterRequest(worker=identity)
+    # Unbounded read for /register ONLY: registration may legitimately block
+    # while the coordinator drains a crashed predecessor's orphaned agents.
+    # /finished keeps the bounded default so a wedged response cannot leave
+    # this worker alive-but-stuck forever (which would 409 all reclaims).
+    response = client.post(
+        f"{coordinator_url}/register",
+        json=request.model_dump(),
+        timeout=httpx.Timeout(30.0, read=None),
+    )
+    _exit_if_busy(response)
     response.raise_for_status()
     return TaskResponse.model_validate(response.json())
+
+
+def _exit_if_busy(response: httpx.Response) -> None:
+    """409 means another worker verifiably holds the current task (D7)."""
+    if response.status_code != 409:
+        return
+    try:
+        detail = response.json().get("detail", response.text)
+    except ValueError:
+        detail = response.text
+    print(f"Coordinator refused this worker: {detail}", file=sys.stderr)
+    sys.exit(3)
 
 
 def _post_finished(
@@ -103,7 +135,9 @@ def _post_finished(
     raise RuntimeError("unreachable")
 
 
-def _run_task(*, repo_root: Path, task: TaskResponse) -> FinishedAssignment:
+def _run_task(
+    *, repo_root: Path, task: TaskResponse, identity: WorkerIdentity | None = None
+) -> FinishedAssignment:
     if (
         task.session_id is None
         or task.workflow_set is None
@@ -178,6 +212,7 @@ def _run_task(*, repo_root: Path, task: TaskResponse) -> FinishedAssignment:
         success=iteration_result.success,
         text=iteration_result.text,
         error=iteration_result.error,
+        worker=identity,
     )
     pending_path = _write_pending_finished_request(
         repo_root=repo_root, request=finished_request

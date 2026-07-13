@@ -4,10 +4,13 @@ from datetime import datetime
 import json
 import logging
 from pathlib import Path
+import socket
 from typing import Any
 from typing import TypeVar
 
 from fastapi import FastAPI
+from fastapi import HTTPException
+from filelock import Timeout as FileLockTimeout
 from pydantic import BaseModel
 
 from loopy_loop.config import ConfigError
@@ -24,10 +27,16 @@ from loopy_loop.models import GoalCheckSignal
 from loopy_loop.models import HistoryEntry
 from loopy_loop.models import IterationResult
 from loopy_loop.models import LoopState
+from loopy_loop.models import RegisterRequest
 from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.models import STOP_ACTION
 from loopy_loop.models import TaskResponse
 from loopy_loop.models import utc_now
+from loopy_loop.models import WorkerIdentity
+from loopy_loop.recovery import recover_interrupted_iteration
+from loopy_loop.recovery import RecoveryIncompleteError
+from loopy_loop.recovery import RecoveryOutcome
+from loopy_loop.recovery import RecoveryRefusedError
 from loopy_loop.scheduler import choose_next_workflow
 from loopy_loop.sessions import child_requests_dir_path
 from loopy_loop.sessions import children_path
@@ -39,8 +48,18 @@ from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.sessions import result_path
 from loopy_loop.sessions import state_path
 from loopy_loop.state_store import StateStore
+from loopy_loop.worker_identity import is_worker_alive
 
 logger = logging.getLogger(__name__)
+
+# Coordinator-operational settings that must never enter the wire config
+# snapshot: released workers validate the snapshot with extra="forbid", so any
+# new response field would crash them at parse time (protocol compatibility).
+_COORDINATOR_ONLY_FIELDS = {"recovery_policy", "recovery_drain_timeout_s"}
+
+
+class WorkerBusyError(RuntimeError):
+    """The current task's worker is verifiably still alive — do not reclaim."""
 
 
 def create_coordinator_app(
@@ -61,12 +80,40 @@ def create_coordinator_app(
     app.state.service = service
 
     @app.post("/register", response_model=TaskResponse)
-    def register_worker() -> TaskResponse:
-        return service.register_worker()
+    def register_worker(request: RegisterRequest | None = None) -> TaskResponse:
+        # Breaking change (0.3): identity is required. It guarantees every
+        # dispatched task has a recorded owner, so liveness verification and
+        # the stale-/finished owner check are always possible. Old workers
+        # fail fast here with a clear message instead of degrading silently.
+        if request is None or request.worker is None:
+            raise HTTPException(
+                status_code=400,
+                detail="worker identity is required; upgrade the worker CLI "
+                "(loopy-loop >= 0.3)",
+            )
+        try:
+            return service.register_worker(request=request)
+        except (WorkerBusyError, RecoveryRefusedError, RecoveryIncompleteError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except FileLockTimeout as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="coordinator state is briefly locked (crash recovery "
+                "or a concurrent request); retry shortly",
+            ) from exc
 
     @app.post("/finished", response_model=TaskResponse)
     def finish_assignment(request: FinishedRequest) -> TaskResponse:
-        return service.finish_assignment(request=request)
+        try:
+            return service.finish_assignment(request=request)
+        except WorkerBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except FileLockTimeout as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="coordinator state is briefly locked (crash recovery "
+                "or a concurrent request); retry shortly",
+            ) from exc
 
     return app
 
@@ -88,10 +135,53 @@ class CoordinatorService:
         self.state_store = state_store
         self._prepare_state(resume=resume)
 
-    def register_worker(self) -> TaskResponse:
+    def register_worker(
+        self, *, request: RegisterRequest | None = None
+    ) -> TaskResponse:
+        caller = request.worker if request is not None else None
+        # Two-phase recovery: the potentially long drain of a dead worker's
+        # orphaned agents (up to recovery_drain_timeout_s) runs in phase A,
+        # OUTSIDE the state lock, so `loopy status`/`stop` and /finished stay
+        # responsive. Phase B re-validates under the lock and retries from
+        # phase A when the state moved in between.
+        for _ in range(3):
+            recovery = self._plan_orphan_recovery()
+            response = self._register_attempt(caller=caller, recovery=recovery)
+            if response is not None:
+                return response
+        raise WorkerBusyError(
+            "crash recovery is contended (state changed repeatedly while "
+            "recovering); retry shortly"
+        )
+
+    def _plan_orphan_recovery(self) -> tuple[CurrentTask, RecoveryOutcome] | None:
+        """Phase A: inspect state and, if needed, drain/reap OUTSIDE the lock.
+
+        Raises WorkerBusyError when the current task's worker is verifiably
+        alive, and RecoveryRefusedError when team-harness's parent guard finds
+        the interrupted run's owner still living (both -> HTTP 409).
+        """
+        state = self.state_store.read_state()
+        if state is None or state.current_task is None:
+            return None
+        orphaned = state.current_task
+        self._raise_if_worker_alive(current_task=orphaned)
+        if self._read_recoverable_finished_request(current_task=orphaned) is not None:
+            # A completed result exists: phase B recovers it under the lock;
+            # nothing to reap (the worker finished its harness run).
+            return None
+        return orphaned, self._recover_orphaned_agents(current_task=orphaned)
+
+    def _register_attempt(
+        self,
+        *,
+        caller: WorkerIdentity | None,
+        recovery: tuple[CurrentTask, RecoveryOutcome] | None,
+    ) -> TaskResponse | None:
+        """Phase B: commit under the state lock; None means retry from phase A."""
         recovered_pending_paths: list[Path] = []
 
-        def mutator(state: LoopState | None) -> tuple[LoopState, TaskResponse]:
+        def mutator(state: LoopState | None) -> tuple[LoopState, TaskResponse | None]:
             current = _require_state(state=state)
             now = utc_now()
 
@@ -101,25 +191,14 @@ class CoordinatorService:
             # behaviour. The stop check (step 4) will catch it immediately after.
             if current.current_task is not None:
                 orphaned = current.current_task
+                # Verified-alive worker: its task is NOT abandoned. Refuse this
+                # register instead of dispatching duplicate work (D7). Unknown
+                # (None) falls through to the pre-existing recovery behavior.
+                self._raise_if_worker_alive(current_task=orphaned)
                 recovered = self._read_recoverable_finished_request(
                     current_task=orphaned
                 )
-                if recovered is None:
-                    current.history.append(
-                        HistoryEntry(
-                            iteration=orphaned.iteration,
-                            workflow_set=orphaned.workflow_set,
-                            workflow_id=orphaned.workflow_id,
-                            session_id=orphaned.session_id,
-                            success=False,
-                            error="abandoned",
-                            started_at=orphaned.started_at,
-                            finished_at=now,
-                        )
-                    )
-                    current.iteration_count += 1
-                    current.current_task = None
-                else:
+                if recovered is not None:
                     recovered_request, pending_path = recovered
                     if pending_path is not None:
                         recovered_pending_paths.append(pending_path)
@@ -129,13 +208,41 @@ class CoordinatorService:
                         request=recovered_request,
                         now=now,
                     )
+                elif recovery is not None and _same_task(orphaned, recovery[0]):
+                    # The dead worker's orphans were handled in phase A
+                    # (outside the lock); commit the abandonment.
+                    outcome = recovery[1]
+                    error = "abandoned"
+                    if outcome.salvaged:
+                        error = f"abandoned_after_{outcome.policy or 'drain'}"
+                    current.history.append(
+                        HistoryEntry(
+                            iteration=orphaned.iteration,
+                            workflow_set=orphaned.workflow_set,
+                            workflow_id=orphaned.workflow_id,
+                            session_id=orphaned.session_id,
+                            success=False,
+                            error=error,
+                            started_at=orphaned.started_at,
+                            finished_at=now,
+                        )
+                    )
+                    current.iteration_count += 1
+                    current.current_task = None
+                else:
+                    # The state moved between phase A and phase B (a stale
+                    # /finished landed, or another register recovered first):
+                    # do not act on a stale plan — replan.
+                    return current, None
 
             # Step 4: Check stop conditions after abandoned-task cleanup.
             stop_response = self._stop_response_if_needed(state=current)
             if stop_response is not None:
                 return current, stop_response
 
-            child_response = self._dispatch_child_session_after_success(state=current)
+            child_response = self._dispatch_child_session_after_success(
+                state=current, caller=caller
+            )
             if child_response is not None:
                 return current, child_response
 
@@ -160,6 +267,7 @@ class CoordinatorService:
                 session_id=current.active_session_id,
                 iteration=current.iteration_count + 1,
                 started_at=now,
+                worker=caller,
             )
             return current, _build_run_response(
                 current_task=current.current_task,
@@ -171,7 +279,21 @@ class CoordinatorService:
             path.unlink(missing_ok=True)
         return response
 
+    def _raise_if_worker_alive(self, *, current_task: CurrentTask) -> None:
+        if is_worker_alive(current_task.worker) is not True:
+            return
+        worker = current_task.worker
+        assert worker is not None
+        raise WorkerBusyError(
+            f"worker pid={worker.pid} on {worker.hostname} is still running "
+            f"iteration {current_task.iteration} ({current_task.workflow_id}); "
+            "refusing to dispatch duplicate work. If that worker is hung, "
+            "kill the process and register again."
+        )
+
     def finish_assignment(self, *, request: FinishedRequest) -> TaskResponse:
+        caller = request.worker
+
         def mutator(state: LoopState | None) -> tuple[LoopState, TaskResponse]:
             current = _require_state(state=state)
             now = utc_now()
@@ -184,7 +306,7 @@ class CoordinatorService:
                 if stop_response is not None:
                     return current, stop_response
                 child_response = self._dispatch_child_session_after_success(
-                    state=current
+                    state=current, caller=caller
                 )
                 if child_response is not None:
                     return current, child_response
@@ -206,6 +328,7 @@ class CoordinatorService:
                     session_id=current.active_session_id,
                     iteration=current.iteration_count + 1,
                     started_at=now,
+                    worker=caller,
                 )
                 return current, _build_run_response(
                     current_task=current.current_task,
@@ -223,6 +346,29 @@ class CoordinatorService:
                 or request.workflow_id != active.workflow_id
                 or request.iteration != active.iteration
             ):
+                # Replaying the live task is only safe to its recorded owner:
+                # handing it to anyone else would start a second executor of
+                # the same task. Identity is required at /register, so every
+                # task dispatched by this version has an owner; a None owner
+                # can only come from pre-upgrade persisted state and keeps
+                # the legacy replay behavior for that one resume.
+                if active.worker is not None and (
+                    caller is None
+                    or caller.hostname != active.worker.hostname
+                    or caller.pid != active.worker.pid
+                    or caller.starttime != active.worker.starttime
+                ):
+                    caller_desc = (
+                        f"pid={caller.pid} on {caller.hostname}"
+                        if caller is not None
+                        else "an unidentified caller"
+                    )
+                    raise WorkerBusyError(
+                        f"stale /finished from {caller_desc}: iteration "
+                        f"{active.iteration} ({active.workflow_id}) belongs "
+                        f"to worker pid={active.worker.pid} on "
+                        f"{active.worker.hostname}"
+                    )
                 return current, _build_run_response(
                     current_task=active, config_snapshot=current.config_snapshot
                 )
@@ -244,7 +390,9 @@ class CoordinatorService:
                 return current, stop_response
 
             # Step 8: Dispatch next workflow.
-            child_response = self._dispatch_child_session_after_success(state=current)
+            child_response = self._dispatch_child_session_after_success(
+                state=current, caller=caller
+            )
             if child_response is not None:
                 return current, child_response
 
@@ -268,6 +416,7 @@ class CoordinatorService:
                 session_id=current.active_session_id,
                 iteration=current.iteration_count + 1,
                 started_at=now,
+                worker=caller,
             )
             return current, _build_run_response(
                 current_task=current.current_task,
@@ -276,7 +425,9 @@ class CoordinatorService:
 
         response = self.state_store.mutate(mutator)
         if response.action == STOP_ACTION:
-            parent_response = self._resume_parent_if_active_child_completed()
+            parent_response = self._resume_parent_if_active_child_completed(
+                caller=caller
+            )
             if parent_response is not None:
                 return parent_response
         return response
@@ -329,6 +480,38 @@ class CoordinatorService:
         )
         state.iteration_count += 1
         state.current_task = None
+
+    def _recover_orphaned_agents(self, *, current_task: CurrentTask) -> RecoveryOutcome:
+        """Apply the configured recovery policy to a dead worker's orphans.
+
+        Runs in phase A, OUTSIDE the state lock — draining can take up to the
+        configured timeout without blocking status/stop or /finished.
+
+        Host gate: process signals only reach this host. When the recorded
+        worker ran elsewhere (shared-filesystem deployments), reaping here
+        would probe/kill the wrong host's pids and could falsely report the
+        orphans handled — skip instead and leave a plain abandonment.
+        """
+        config = self.preflight.root_config
+        worker = current_task.worker
+        if worker is not None and worker.hostname != socket.gethostname():
+            logger.warning(
+                "worker for iteration %04d_%s ran on %s (not this host); "
+                "skipping orphan recovery — its agent processes cannot be "
+                "reached from here",
+                current_task.iteration,
+                current_task.workflow_id,
+                worker.hostname,
+            )
+            return RecoveryOutcome(policy=config.recovery_policy)
+        return recover_interrupted_iteration(
+            repo_root=self.repo_root,
+            session_id=current_task.session_id,
+            iteration=current_task.iteration,
+            workflow_id=current_task.workflow_id,
+            policy=config.recovery_policy,
+            drain_timeout_s=config.recovery_drain_timeout_s,
+        )
 
     def _read_recoverable_finished_request(
         self, *, current_task: CurrentTask
@@ -405,7 +588,7 @@ class CoordinatorService:
             state_path=state_path(repo_root=self.repo_root, session_id=session_id),
         )
         snapshot = RootConfigSnapshot.model_validate(
-            self.preflight.root_config.model_dump()
+            self.preflight.root_config.model_dump(exclude=_COORDINATOR_ONLY_FIELDS)
         )
         state = LoopState(
             status="running",
@@ -449,7 +632,7 @@ class CoordinatorService:
         }
 
     def _dispatch_child_session_if_requested(
-        self, *, state: LoopState
+        self, *, state: LoopState, caller: WorkerIdentity | None = None
     ) -> TaskResponse | None:
         if state.parent_session_id is not None:
             return None
@@ -482,7 +665,7 @@ class CoordinatorService:
                 parent_session_id=state.active_session_id,
             )
             snapshot = RootConfigSnapshot.model_validate(
-                preflight.root_config.model_dump()
+                preflight.root_config.model_dump(exclude=_COORDINATOR_ONLY_FIELDS)
             )
             now = utc_now()
             child_state = LoopState(
@@ -499,6 +682,7 @@ class CoordinatorService:
                     session_id=child_session_id,
                     iteration=1,
                     started_at=now,
+                    worker=caller,
                 ),
             )
             child_store = StateStore(
@@ -529,13 +713,15 @@ class CoordinatorService:
         return None
 
     def _dispatch_child_session_after_success(
-        self, *, state: LoopState
+        self, *, state: LoopState, caller: WorkerIdentity | None = None
     ) -> TaskResponse | None:
         if not state.history or not state.history[-1].success:
             return None
-        return self._dispatch_child_session_if_requested(state=state)
+        return self._dispatch_child_session_if_requested(state=state, caller=caller)
 
-    def _resume_parent_if_active_child_completed(self) -> TaskResponse | None:
+    def _resume_parent_if_active_child_completed(
+        self, *, caller: WorkerIdentity | None = None
+    ) -> TaskResponse | None:
         child_state = self.state_store.read_state()
         if child_state is None or child_state.parent_session_id is None:
             return None
@@ -549,7 +735,7 @@ class CoordinatorService:
             ),
         )
         self.state_store = parent_store
-        return self.register_worker()
+        return self.register_worker(request=RegisterRequest(worker=caller))
 
     def _append_child_record(
         self, *, parent_session_id: str, record: ChildSessionRecord
@@ -659,6 +845,14 @@ def _require_state(*, state: LoopState | None) -> LoopState:
     if state is None:
         raise RuntimeError("Coordinator state is not initialized")
     return state
+
+
+def _same_task(a: CurrentTask, b: CurrentTask) -> bool:
+    return (
+        a.session_id == b.session_id
+        and a.workflow_id == b.workflow_id
+        and a.iteration == b.iteration
+    )
 
 
 def _matches_current_task(
