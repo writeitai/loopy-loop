@@ -1,24 +1,29 @@
 ---
 name: loopy-loop
-description: Set up and run loopy-loop, an automation loop inside a repository that drives AI agents toward a goal across many iterations via a FastAPI coordinator and one or more workers. Use this skill when the user wants to install loopy-loop in a target repo, scaffold its config, define workflows, configure workflow scheduling/cadence, use session-scoped project_state or eval checks, or operate the coordinator/worker pair (start, monitor, stop, resume).
+description: Set up and run loopy-loop, an automation loop inside a repository that drives AI agents toward a goal across many iterations via a FastAPI coordinator and a single identity-verified worker. Use this skill when the user wants to install loopy-loop in a target repo, scaffold a workflow-set template, define workflows, configure workflow scheduling/cadence, use session-scoped project_state or eval checks, spawn child sessions (planner/dispatcher double loop), or operate the coordinator/worker pair (start, monitor, stop, resume, crash recovery).
 ---
 
 # loopy-loop
 
 `loopy-loop` runs an AI-agent improvement loop inside a target repository. Each
-iteration runs one workflow via `team-harness`. A FastAPI coordinator owns loop
-state in `.loopy_loop/state.json`; one or more blocking workers poll it over
-HTTP and execute the assigned workflow.
+iteration runs one workflow via `team-harness`. A FastAPI coordinator owns all
+loop state in files under `.loopy_loop/sessions/<session_id>/`; exactly **one**
+worker executes assignments in a ping-pong over two endpoints: `POST /register`
+gets the first task, `POST /finished` reports a result and receives the next
+task. The worker does not poll. A second worker is refused (HTTP 409) while the
+first is verifiably alive. Continuity lives in files and git state, never in a
+chat transcript.
 
 Use this skill when the user asks to:
 
-- Install loopy-loop or scaffold it in a repo (`loopy init`)
-- Configure a goal, completion criteria, model, or workflow
+- Install loopy-loop or scaffold it in a repo (`loopy init`, templates)
+- Configure a goal file, completion criteria, model, or workflow set
 - Configure workflow cadence (`priority`, `must_follow`, `run_on_start`,
   `run_after_successes`) or eval-driven stopping (`emits_goal_check`)
 - Design workflow prompts that use session-scoped `project_state/` and
   `eval_checks/`
-- Start, monitor, stop, or resume the loop
+- Run a planner/dispatcher parent loop that spawns child sessions
+- Start, monitor, stop, resume, or crash-recover the loop
 
 ## Install
 
@@ -31,44 +36,58 @@ uv tool install loopy-loop
 For development against a checkout of the loopy-loop repo:
 
 ```bash
-uv sync --extra dev
-# or
-uv pip install .
+uv sync --all-extras
 ```
 
-The CLI exposes both `loopy` and `loopy-loop` — prefer `loopy`.
+The CLI exposes both `loopy` and `loopy-loop` — prefer `loopy`. The
+`eval-banana` CLI (used by the packaged eval workflows) installs automatically
+as a loopy-loop dependency; the worker makes it visible to spawned agents even
+under `uv tool install`.
 
 ## Initialize the Target Repo
 
-`cd` into the target repo, then:
+`cd` into the target repo, then pick a template:
 
 ```bash
-loopy init
-# or
-loopy init --template inner_outer_eval
+loopy init                                    # minimal: goal_check only
+loopy init --template inner_outer_eval        # recommended single loop
+loopy init --template pm_planner_dispatcher   # double loop (parent + child sessions)
 ```
 
-Idempotent. Creates:
+Idempotent — existing files are never overwritten. Creates:
 
 - `loopy_loop_config.yaml` — root config, edit this
-- `.loopy_loop/workflows/goal_check/{prompt.txt,config.yaml}` — reserved workflow
-- `.gitignore` entries for `.loopy_loop/sessions/` and `.loopy_loop/state.json*`
+- `loopy_loop_goal.txt` — the goal text (referenced by `goal_file` in config)
+- `.loopy_loop/workflow_sets/<set>/workflows/<id>/{prompt.txt,config.yaml}`
+  — one directory per workflow, grouped into named workflow sets
+- `.gitignore` entry for `.loopy_loop/sessions/`
 
-Use `--template inner_outer_eval` to scaffold the packaged outer/inner/eval
-workflow set named `inner_outer_eval` instead of the default `goal_check`
-workflow.
+Templates:
 
-`goal_check` is reserved. Don't rename or delete it — it runs from iteration 1
-onward and writes the per-iteration `goal_check.json` eval artifact. Advanced
-workflows can also emit `goal_check.json` by setting `emits_goal_check: true`.
-Workflows stop the loop by updating the session-scoped `control.json`.
+- **default**: a single `goal_check` workflow in workflow set `main`. A
+  starting point for fully custom workflow sets.
+- **inner_outer_eval**: `outer` (plan/review), `inner` (implement),
+  `eval_reviewer` (author session-scoped eval-banana checks), `eval_runner`
+  (run checks, write `goal_check.json`). The recommended general-purpose loop.
+- **pm_planner_dispatcher**: `planner` (maintain PM state, pick work items,
+  review evidence) and `dispatcher` (spawn one child session per work item,
+  import evidence back). Ships the `inner_outer_eval` set too — child sessions
+  run it. This is the "double loop."
+
+`goal_check` is a reserved workflow id. Don't rename or delete it in the
+default template, and don't reuse the id for new workflows. It writes the
+per-iteration `goal_check.json` eval artifact. Other workflows can also emit
+`goal_check.json` by setting `emits_goal_check: true`. Note `goal_check.json`
+is an eval artifact only — workflows stop the loop by updating the session
+`control.json`.
 
 ## Configure
 
 ### Root config — `loopy_loop_config.yaml`
 
 ```yaml
-goal: "Ship a minimal working landing page"
+goal_file: "loopy_loop_goal.txt"
+workflow_set: "main"
 completion_criteria:
   - "Homepage renders without errors"
 stop_criteria:
@@ -86,83 +105,68 @@ team_harness_agent_models:
   claude: "claude-opus-4-8"
   gemini: "gemini-3.5-flash"
 team_harness_agent_reasoning_efforts: {}
+# Optional coordinator retry controls. Omit to use team-harness defaults.
+# team_harness_max_retries: 8
+# team_harness_retry_base_delay_s: 2.0
+# team_harness_retry_max_delay_s: 60.0
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
 team_harness_system_prompt_extension: ""
+# Coordinator-side crash recovery (not sent to workers):
+# recovery_policy: "drain"          # or "reap"; drain is the default
+# recovery_drain_timeout_s: 600.0
 ```
 
 Constraints:
 
-- `goal_hash` is derived from `goal` and used in session ids and session metadata.
-- `team_harness_model` controls the coordinator. Use `team_harness_agent_models`
-  to pin default worker subprocess models by agent type.
-- `team_harness_api_base` is normalized: trailing slash stripped, `/v1` appended
-  when missing — write whichever form you prefer.
+- **`goal_file` is required; an inline `goal:` key is rejected** with a config
+  error. The goal text lives in the referenced file (default
+  `loopy_loop_goal.txt`). The resolved text — never the path — is what
+  workflows and workers receive.
+- **`workflow_set` is required** and must name a directory under
+  `.loopy_loop/workflow_sets/`. `max_turns` is also required.
+- `goal_hash` is derived from the goal text and used in session ids and session
+  metadata; changing the goal starts a different session lineage.
+- `team_harness_model` controls the harness coordinator agent. Use
+  `team_harness_agent_models` to pin per-agent-type models.
+- `team_harness_api_base` is normalized: trailing slash stripped, `/v1`
+  appended when missing — write whichever form you prefer.
+- `team_harness_system_prompt_extension` applies to **every** harness run in
+  the repo — including child sessions spawned by a parent workflow set. Keep it
+  empty or strictly workflow-set-neutral; a parent-only instruction (e.g. "do
+  not implement directly") would reach child implementers at system-prompt
+  level and contradict their job.
+- `recovery_policy` / `recovery_drain_timeout_s` are coordinator-side only:
+  they control what happens to agent processes a crashed worker left behind
+  (`drain` = wait bounded, let them finish; `reap` = kill). They are not part
+  of the config snapshot sent to workers.
 - Unknown config keys are rejected. All `team_harness_*` field names are exact.
 - The env var named in `team_harness_api_key_env` must be exported in the shell
-  that starts the coordinator AND in the shell that starts each worker.
-- Some providers (e.g. `codex`) skip the API-key check.
+  that starts the coordinator AND the shell that starts the worker.
+- Some providers (e.g. `codex`) skip the API-key preflight check.
 
-## Session State Files
+### Workflows — `.loopy_loop/workflow_sets/<set>/workflows/<id>/`
 
-Each session has:
-
-- `project_state/` for workflow-owned durable markdown state
-- `eval_checks/` for session-scoped eval-banana checks
-- `eval_results/` for session-scoped eval-banana run output
-- `updates_from_user.md` for user requests that arrive during a run
-- `project_state/finished.md` for outer-verified completed work
-- `harness_outputs/<NNNN>_<workflow_id>/<team_harness_run_id>/` for
-  team-harness coordinator and worker artifacts
-
-Outer workflows should read `updates_from_user.md` every run. If it contains
-content, they should reflect it into `project_state/` first and clear the file
-only after doing so. Inner workflows should not append final entries to
-`finished.md`; the outer workflow owns verified completion tracking.
-
-Eval workflows should run eval-banana with `--output-dir` pointed at the
-session `eval_results/` directory, then summarize and link the resulting
-`report.json` / `report.md` from `project_state/eval_results.md`.
-
-## PR, Branch, and Merge Policy
-
-For implementation work that changes repo files, the default delivery path is:
-create a branch, open a PR, wait for checks, and merge it.
-
-Default to `PR expected: yes` and `Merge expected: yes` for implementation
-tasks. Default both to `no` only for session-state-only, eval-only,
-research-only, planning-only, or no-usable-remote/auth tasks.
-
-For multi-repo work, create and merge one PR per changed repo when possible.
-Record delivery evidence for each changed repo from `finished.md`: repo path or
-remote, branch, PR URL, merge status, merge commit when merged, and checks/CI
-status.
-
-Do not wait for a human for ordinary branch creation, PR creation, GitHub CLI
-use, browser use, write permissions, or available auth. Do not merge when
-checks fail, required review rules block merge, the merge would be destructive
-or monetary, or the task explicitly says not to merge. If PR creation or merge
-is blocked, record the exact blocker and remaining action in
-`project_state/current_state.md`.
-
-### Custom workflows — `.loopy_loop/workflows/<id>/`
-
+Workflows are grouped into named **workflow sets**; the root config's
+`workflow_set` (or `loopy coordinator --workflow-set`) selects which set runs.
 Each workflow is a folder; the folder name is the workflow id.
 
-```
-.loopy_loop/workflows/<id>/
-├── prompt.txt        # the prompt the workflow runs
-└── config.yaml       # scheduling
+```text
+.loopy_loop/workflow_sets/<set>/
+└── workflows/
+    └── <id>/
+        ├── prompt.txt        # the prompt the workflow runs
+        └── config.yaml       # scheduling
 ```
 
-`config.yaml`:
+`config.yaml` (all fields optional; defaults shown):
 
 ```yaml
 enabled: true
-priority: 0
 run_every: 1
 must_follow: null
 not_before_iteration: 0
+priority: 0
 run_on_start: false
 run_after_successes: null
 emits_goal_check: false
@@ -171,7 +175,8 @@ description: ""
 
 Rules:
 
-- `must_follow` must resolve to an existing workflow during coordinator preflight.
+- `must_follow` must resolve to an existing workflow in the same set during
+  coordinator preflight.
 - `run_every` counts completed iterations, not wall-clock time.
 - `priority` breaks ties among eligible workflows; higher values run first.
 - `run_on_start: true` makes a workflow eligible before any successful workflow
@@ -185,10 +190,12 @@ run_after_successes:
   every: 10
 ```
 
-- `emits_goal_check: true` tells the worker to include a `goal_check.json`
-  output path in that workflow's prompt. The workflow must update session
+- `emits_goal_check: true` adds a `goal_check.json` output path to that
+  workflow's rendered prompt. The workflow must still update session
   `control.json` if it wants the loop to stop.
-- `goal_check` is reserved — pick a different id for new workflows.
+- An iteration counts as **successful when the harness run completed**, not
+  when its work was good — quality judgment belongs to eval workflows (a
+  deliberate design decision; see `design/decisions.md` D3 in the source repo).
 
 Example cadence for an outer/inner loop with periodic evals:
 
@@ -234,61 +241,120 @@ description: "Implement the next planned leaf task."
 This sequence starts with `eval_reviewer`, then repeats `outer -> inner`. After
 10 successful `inner` runs, `eval_reviewer -> eval_runner` becomes eligible.
 
-## Session-Scoped Project State and Eval Checks
+## Session-Scoped State
 
-Every rendered workflow prompt includes these paths:
+Every rendered workflow prompt includes these paths (plus the goal text,
+completion criteria, and stop criteria):
 
 ```text
 Session directory: .loopy_loop/sessions/<session_id>
+Session goal path: .loopy_loop/sessions/<session_id>/goal.md
 Session project_state directory: .loopy_loop/sessions/<session_id>/project_state
 Session eval_checks directory: .loopy_loop/sessions/<session_id>/eval_checks
+Session updates_from_user path: .loopy_loop/sessions/<session_id>/updates_from_user.md
+Session child_requests directory: .loopy_loop/sessions/<session_id>/child_requests
+Session control path: .loopy_loop/sessions/<session_id>/control.json
+Session finished ledger path: .loopy_loop/sessions/<session_id>/project_state/finished.md
+Session harness outputs directory: .loopy_loop/sessions/<session_id>/harness_outputs
 Iteration directory: .loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>
+Iteration harness output root: .loopy_loop/sessions/<session_id>/harness_outputs/<NNNN>_<workflow_id>
 ```
 
-The runtime only provides the paths; it does not parse markdown state. Put the
-ownership rules in each workflow prompt. A common reusable pattern is:
+**Prompts must treat the rendered Goal and the Session goal path as canonical**
+— never the repo-root goal file. In a child session the repo-root
+`loopy_loop_goal.txt` holds the PARENT's goal, not the session's.
 
-- `outer` owns high-level planning, status transitions, and
-  `project_state/what_we_should_do/plan.md`
+The runtime only provides the paths; it does not parse markdown state. Put the
+ownership rules in each workflow prompt. The packaged templates use:
+
+- `outer` owns high-level planning, status transitions, and plan files
 - `inner` implements exactly one available leaf task and marks it waiting for
   outer review
-- `eval_reviewer` writes high-level eval-banana YAML checks under the session
+- `eval_reviewer` writes session-scoped eval-banana YAML checks under
   `eval_checks/`
 - `eval_runner` runs only the session checks and writes `goal_check.json`
 
-Useful `project_state/` files:
-
-`loopy_loop_goal.txt` is the source of truth for the target, constraints, and
-completion intent. Do not copy or restate the goal into `project_state/`.
-
-`project_state/README.md` should explain the state files and ownership rules:
-`memory.md` is essential durable facts only, `finished.md` is outer-owned
-accepted completions only, `eval_results.md` owns eval detail, and
-`current_state.md` carries only live status, the latest eval headline, and the
-next action.
+Useful `project_state/` conventions (workflow-owned, coordinator never parses):
 
 ```text
 project_state/
-├── README.md
-├── memory.md
-├── what_we_have.md
-├── current_state.md
-├── decisions.md
-├── eval_results.md
-├── finished.md
+├── README.md          # explains the state contract and file ownership
+├── memory.md          # essential durable facts only
+├── current_state.md   # live status, latest eval headline, next action
+├── decisions.md       # accepted decisions with rationale
+├── eval_results.md    # eval command/run/report index (owns eval detail)
+├── finished.md        # outer-verified accepted completions only
 └── what_we_should_do/
-    ├── plan.md
-    └── tasks/<task-id>/README.md
+    └── plan.md
 ```
 
-Session eval checks work well with eval-banana's explicit directory option:
+Outer workflows should read `updates_from_user.md` every run: it is the
+human-writable inbox for requests that arrive mid-session. Reflect non-empty
+content into `project_state/` first, then clear the file. Inner workflows must
+not append to `finished.md`; the outer workflow owns verified completion.
+
+Eval workflows run eval-banana against session-scoped checks:
 
 ```bash
+eval-banana validate --cwd . --check-dir .loopy_loop/sessions/<session_id>/eval_checks
 eval-banana run \
   --cwd . \
   --check-dir .loopy_loop/sessions/<session_id>/eval_checks \
   --output-dir .loopy_loop/sessions/<session_id>/eval_results
 ```
+
+then summarize and link the resulting `report.json` / `report.md` from
+`project_state/eval_results.md`.
+
+### Workflow-written control files must be published atomically
+
+`control.json`, `goal_check.json`, and child request files are state-machine
+inputs. Prompts should instruct agents to write a temp file in the same
+directory and `mv` it over the final path — a truncated half-written file is
+read as invalid output and can terminate the session.
+
+## Child Sessions (double loop)
+
+A parent workflow requests a depth-first child loop by writing a JSON file
+under the active session's `child_requests/` directory:
+
+```json
+{
+  "schema_version": 1,
+  "workflow_set": "inner_outer_eval",
+  "goal": "One concrete work item, phrased as a complete child goal"
+}
+```
+
+The coordinator then suspends the parent, creates the child session (nested
+under the parent's session directory), runs the child workflow set to a
+terminal state, and resumes the parent with the child recorded in
+`children.json`. One child at a time, depth-first. The `pm_planner_dispatcher`
+template packages this pattern: the **dispatcher** workflow owns
+`child_requests/` (the planner never writes there), and the planner reviews
+child evidence after the child terminates.
+
+The session stack is durable: while a child runs, the parent's `state.json`
+records `active_child_session_id`, and a restarted coordinator (`--resume`)
+walks parent→child pointers to the deepest live session instead of orphaning a
+running child.
+
+## PR, Branch, and Merge Policy (for implementation workflows)
+
+For implementation work that changes repo files, the default delivery path is:
+create a branch, open a PR, wait for checks, and merge it.
+
+Default to `PR expected: yes` and `Merge expected: yes` for implementation
+tasks. Default both to `no` only for session-state-only, eval-only,
+research-only, planning-only, or no-usable-remote/auth tasks.
+
+Do not wait for a human for ordinary branch creation, PR creation, GitHub CLI
+use, write permissions, or available auth. Do not merge when checks fail,
+required review rules block merge, the merge would be destructive or monetary,
+or the task explicitly says not to merge. If PR creation or merge is blocked,
+record the exact blocker and remaining action in
+`project_state/current_state.md`. Record delivery evidence (repo, branch, PR
+URL, merge status, checks) in `project_state/finished.md`.
 
 ## Run
 
@@ -301,79 +367,127 @@ loopy coordinator --host 127.0.0.1 --port 8080
 ```
 
 ```bash
-# terminal 2 — worker (multiple workers may share one coordinator)
+# terminal 2 — the single worker
 export OPENROUTER_API_KEY=...
 loopy worker --coordinator http://127.0.0.1:8080
 ```
 
-The worker calls `/register` once for its first task, then loops on `/finished`
-until it receives `action=stop`.
+- The coordinator accepts `--workflow-set` (override the config's set) and
+  `--goal-file` (copy a different goal into the new session).
+- **Exactly one worker.** The worker sends its process identity (hostname, pid,
+  start-time token) on `/register`; while a registered worker is verifiably
+  alive, a second `/register` is refused with HTTP 409 (the worker prints the
+  refusal and exits with code 3). Identity is captured automatically — nothing
+  to configure.
+- `/register` may legitimately block for minutes after a crash: the coordinator
+  first recovers the previous worker's interrupted iteration (see Crash
+  recovery below) before dispatching fresh work.
 
 ### Fresh start vs resume
 
-On startup, the coordinator inspects `.loopy_loop/state.json`:
+On startup the coordinator inspects the latest session's state:
 
-- Terminal state → archived to `state.json.archive_<timestamp>.json`, fresh start.
-- Already `running` → startup fails unless `--resume` is passed.
+- Terminal state → archived to `state.json.archive_<timestamp>`, fresh session.
+- Still `running` → startup fails unless `--resume` is passed.
 
 ```bash
 loopy coordinator --resume
 ```
 
-Use `--resume` when reattaching to a live state file (coordinator was killed
-without setting a terminal state).
+Use `--resume` when reattaching after the coordinator died without reaching a
+terminal state. Resume reconstructs the session stack: a running child session
+continues where it was; a child found terminal is finalized and its parent
+resumed.
+
+### Crash recovery (worker died mid-iteration)
+
+When a new worker registers while a task is still marked live, the coordinator:
+
+1. **Liveness check** — refuses (409) if the recorded worker is verifiably
+   still alive on this host.
+2. **Result recovery** — if the dead worker already produced
+   `pending_finished_request.json` or `result.json`, the completed task is
+   recorded; no work is lost.
+3. **Orphan recovery** — otherwise the recovery policy is applied to agent
+   processes the dead worker's harness run left behind: `drain` (default)
+   waits up to `recovery_drain_timeout_s` for them to finish; `reap` kills
+   them. A `salvage.json` in the interrupted iteration directory records what
+   happened to each orphan, and the iteration is recorded as failed with
+   `error="abandoned_after_<policy>"`, then re-dispatched. If any orphan may
+   still be running, the coordinator refuses to dispatch (409) rather than risk
+   duplicate work.
+
+A hung-but-alive worker keeps its task (409 names its pid); the escape hatch is
+to kill that process and register again.
 
 ## Monitor and Stop
 
 ```bash
-loopy status   # session id, iteration count, current task, stop reason
-loopy stop     # sets stop_requested=true under the file lock; workers exit after
-               # their next /finished
+loopy status   # status, session id, iteration count, current task, stop reason
+loopy stop     # sets stop_requested=true; the worker stops after its next /finished
 ```
 
-Per-iteration artifacts live at:
+Both commands print a friendly error and exit if the coordinator holds the
+state lock mid-request — retry shortly.
 
+Per-iteration artifacts live at
+`.loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>/`
+(`prompt.txt`, `result.json`, `result_text.txt`, `harness_run_id.txt`, plus
+`goal_check.json` for emitting workflows). The workflow stop switch is the
+session-root `control.json`:
+
+```json
+{"state": "stopped", "reason": "...", "stop_reason": "goal_met", "schema_version": 1}
 ```
-.loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>/
-```
 
-The workflow stop switch lives at the session root:
-
-- `control.json` — `{"state": "stopped", "reason": "...", "stop_reason": "goal_met", "schema_version": 1}`
-
-Per-iteration eval artifacts live inside the current iteration directory:
-
-- `goal_check.json` (inside `*_goal_check` iterations or workflows configured
-  with `emits_goal_check: true`) —
-  `{"goal_met": false, "reason": "...", "schema_version": 1}`
+`stop_reason` must be `goal_met` or `unresolvable_error`. `unresolvable_error`
+is the loop's **last-resort** autonomous escape hatch: workflows should exhaust
+re-scoping, retries, and routing around a blocker before using it, and must
+record the exact blocker in `project_state/current_state.md`.
 
 If `goal_check.json` is repeatedly missing or invalid, the coordinator stops
-with `stop_reason="goal_check_broken"` after `goal_check_consecutive_failures_cap`.
+with `stop_reason="goal_check_broken"` after
+`goal_check_consecutive_failures_cap` consecutive failures.
 
 ## Common Pitfalls
 
+- **Inline `goal:` in the root config** → rejected. Use `goal_file:` pointing
+  at a text file (default `loopy_loop_goal.txt`).
+- **Missing `workflow_set` or `max_turns`** → both are required root-config
+  fields.
 - **API key not exported** → coordinator preflight fails. Export the env var
-  named in `team_harness_api_key_env` in both the coordinator and worker shells.
+  named in `team_harness_api_key_env` in both shells.
 - **Unknown config field** → parser rejects it. `team_harness_*` field names
   are exact; check spelling.
+- **Starting a second worker** → HTTP 409 / exit code 3 while the first is
+  verifiably alive. One worker per coordinator, by design.
+- **Old workflows layout** → `.loopy_loop/workflows/<id>/` is not loaded.
+  Workflows live under `.loopy_loop/workflow_sets/<set>/workflows/<id>/`.
 - **Workflow id collision with `goal_check`** → reserved; pick a different id.
-- **`must_follow` references a missing workflow** → preflight fails. The id
-  must match a folder under `.loopy_loop/workflows/`.
-- **`run_after_successes.workflow_id` references a missing workflow** →
-  preflight fails. The id must also match a workflow folder.
+- **`must_follow` / `run_after_successes.workflow_id` references a missing
+  workflow** → preflight fails; the id must match a folder in the same set.
 - **Eval runner does not stop the loop** → confirm the workflow has
   `emits_goal_check: true`, writes valid JSON to the exact `goal_check.json`
   output path, and updates session `control.json` when the goal is met.
-- **Workflow ignores project state** → loopy-loop only injects state paths.
-  The workflow prompt must explicitly say which `project_state/` files to read
-  and update.
-- **Re-running `loopy coordinator` against a still-running state file** →
+- **Child workflow prompts reading the repo-root goal file** → in a child
+  session that file holds the parent's goal. Prompts must use the rendered
+  Goal / Session goal path.
+- **A PM-only `team_harness_system_prompt_extension`** → it leaks into child
+  sessions' system prompts. Keep it empty or set-neutral.
+- **Non-atomic `control.json`/`goal_check.json` writes** → a torn file is
+  invalid output; publish via temp file + rename.
+- **Re-running `loopy coordinator` against a still-running state** →
   intentionally fatal. Pass `--resume` to attach.
 - **Killing only the coordinator** → state stays `running`. Either pass
   `--resume` next time or `loopy stop` first to reach a terminal state.
+- **Custom worker implementations** must send worker identity on `/register`
+  (required since 0.3) and echo the task's `attempt_id` on `/finished`
+  (required since 0.4) — otherwise registration is rejected (400) or the
+  completion is treated as stale.
 
 ## Reference
 
 - HTTP contract: `docs/http-contract.md`
 - Session layout: `docs/session-layout.md`
+- Deliberate design decisions (do not "fix"): `design/decisions.md`
 - Source: https://github.com/writeitai/loopy-loop

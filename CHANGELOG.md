@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Agent Skill rewritten for the current API (P1.3).** `skills/loopy-loop/SKILL.md`
+  still described the removed pre-0.2.0 surface (top-level `.loopy_loop/state.json`,
+  polling multi-worker model, inline `goal`, `.loopy_loop/workflows/<id>/` layout) and
+  would have taught agents to generate broken setups. It now documents the 0.4.0
+  reality: `goal_file`, workflow sets, all three templates, the single
+  identity-verified worker, child sessions, crash recovery, and resume semantics —
+  validated against clean `loopy init` runs of every template. Remaining plural
+  "workers" wording in the README corrected to the single-worker model.
 - **eval-banana is now a hard dependency.** The recommended
   `inner_outer_eval` template (and the PM template's child sessions) shell
   out to the `eval-banana` CLI; previously it had to be installed

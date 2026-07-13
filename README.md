@@ -18,7 +18,7 @@ and PRs.
 
 Under the hood, loopy-loop runs a small FastAPI coordinator and a single
 worker. The coordinator owns the loop state and chooses the next workflow. The
-workers run assignments through
+worker runs assignments through
 [`team-harness`](https://github.com/writeitai/team-harness), which can delegate
 to agent CLIs such as Codex, Claude Code, and Gemini. The packaged
 `inner_outer_eval` template also uses
@@ -239,7 +239,7 @@ Important rules:
   processes a dead worker left running: drain lets them finish (one shared
   bounded deadline) before the iteration is re-run; reap kills them
   immediately. These are coordinator-side settings and are not part of the
-  config snapshot sent to workers.
+  config snapshot sent to the worker.
 
 Workflow config lives beside each workflow prompt:
 
@@ -472,7 +472,7 @@ the latest session-local state.
 ## Related Projects
 
 - [`team-harness`](https://github.com/writeitai/team-harness): the model and
-  agent-CLI orchestration layer used by loopy-loop workers.
+  agent-CLI orchestration layer used by the loopy-loop worker.
 - [`eval-banana`](https://github.com/writeitai/eval-banana): a lightweight YAML
   evaluation framework used by the packaged eval workflows. Installed
   automatically as a loopy-loop dependency.
