@@ -34,7 +34,9 @@ Dispatcher responsibilities:
 4. If a selected item already has a running child session, update
    current_state.md and finish. Do not create a duplicate request.
 5. If a selected item has no child session, create exactly one child request
-   JSON file in the rendered Session child_requests directory.
+   file in the rendered Session child_requests directory. The final filename
+   must be unique and must end in `.json` — the coordinator scans only
+   `*.json` files; any other name is never dispatched.
 6. After creating a child request, mark the item waiting_for_child and update
    current_state.md.
 
@@ -76,3 +78,12 @@ Guardrails:
   useful.
 
 Use Codex.
+
+Atomic file publication (important):
+- Never write the final child request path directly. Write the full JSON to a
+  temporary name in the same directory that does NOT end in .json (e.g.
+  item_042.json.tmp), then rename it over the final .json path
+  (mv item_042.json.tmp item_042.json). The coordinator dispatches any
+  *.json file it sees; a half-written request gets renamed to *.json.rejected
+  and skipped, silently losing the dispatch while the PM item is already
+  marked waiting_for_child.

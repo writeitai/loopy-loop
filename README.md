@@ -18,7 +18,7 @@ and PRs.
 
 Under the hood, loopy-loop runs a small FastAPI coordinator and a single
 worker. The coordinator owns the loop state and chooses the next workflow. The
-workers run assignments through
+worker runs assignments through
 [`team-harness`](https://github.com/writeitai/team-harness), which can delegate
 to agent CLIs such as Codex, Claude Code, and Gemini. The packaged
 `inner_outer_eval` template also uses
@@ -79,7 +79,8 @@ This is the recommended starting template. It creates:
 - a `.gitignore` entry for `.loopy_loop/sessions/`
 
 `loopy init` is idempotent. It creates missing files and leaves existing files
-alone.
+alone — except `.gitignore`, which is updated in place to ensure the sessions
+ignore rule.
 
 ## Write the Goal
 
@@ -239,7 +240,7 @@ Important rules:
   processes a dead worker left running: drain lets them finish (one shared
   bounded deadline) before the iteration is re-run; reap kills them
   immediately. These are coordinator-side settings and are not part of the
-  config snapshot sent to workers.
+  config snapshot sent to the worker.
 
 Workflow config lives beside each workflow prompt:
 
@@ -392,8 +393,11 @@ Workflow sets are mandatory. Even a single-loop repo uses:
 
 The older `.loopy_loop/workflows/...` layout is not loaded.
 
-A workflow can request one sequential child session by writing a JSON file under
-the active session's `child_requests/` directory:
+A top-level session's workflow can request one sequential child session by
+writing a uniquely named `*.json` file under the active session's
+`child_requests/` directory (only `*.json` filenames are scanned; publish via
+a non-`.json` temp name plus rename — invalid requests are renamed to
+`*.json.rejected` and skipped):
 
 ```json
 {
@@ -467,12 +471,14 @@ loopy stop
 ```
 
 `status` prints the latest session state. `stop` sets `stop_requested=true` in
-the latest session-local state.
+the latest session-local state. Both operate on the latest **top-level**
+session: while a child session runs they show/flag the suspended parent, and a
+requested stop takes effect only after the child reaches a terminal state.
 
 ## Related Projects
 
 - [`team-harness`](https://github.com/writeitai/team-harness): the model and
-  agent-CLI orchestration layer used by loopy-loop workers.
+  agent-CLI orchestration layer used by the loopy-loop worker.
 - [`eval-banana`](https://github.com/writeitai/eval-banana): a lightweight YAML
   evaluation framework used by the packaged eval workflows. Installed
   automatically as a loopy-loop dependency.
