@@ -17,6 +17,18 @@ GOAL_CHECK_SCHEMA_VERSION = 1
 RUN_ACTION = "run"
 STOP_ACTION = "stop"
 
+# Failure taxonomy (P2.3). Derived from team-harness's structured failure
+# detail where available:
+# - "transient": the provider said retry (429/5xx/network) and team-harness's
+#   own retries were already exhausted — a later iteration may succeed.
+# - "deterministic": retrying the same thing cannot help (auth failure,
+#   invalid config, 4xx).
+# - "crash": the coordinator observed the worker die mid-iteration
+#   (abandoned / abandoned_after_<policy> entries).
+# - "unknown": no classification signal (agent-process failures, unexpected
+#   exceptions, results from pre-taxonomy versions).
+FailureKind = Literal["transient", "deterministic", "crash", "unknown"]
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC).replace(microsecond=0)
@@ -96,6 +108,7 @@ class HistoryEntry(BaseModel):
     session_id: str = Field(...)
     success: bool = Field(...)
     error: str | None = Field(default=None)
+    failure_kind: FailureKind | None = Field(default=None)
     started_at: datetime = Field(...)
     finished_at: datetime = Field(...)
 
@@ -115,6 +128,12 @@ class LoopState(BaseModel):
     stop_reason: str | None = Field(default=None)
     iteration_count: int = Field(default=0)
     goal_check_consecutive_failures: int = Field(default=0)
+    # Per-workflow circuit breaker (P2.3): consecutive failed iterations per
+    # workflow id; reset by that workflow's next success. When any counter
+    # reaches the coordinator's workflow_consecutive_failures_cap the loop
+    # stops with stop_reason="workflow_failure_cap" instead of burning the
+    # remaining turn budget on a wedged workflow.
+    workflow_consecutive_failures: dict[str, int] = Field(default_factory=dict)
     # The durable session-stack pointer: while a child session is active, the
     # parent records WHICH child, so a restarted coordinator can walk the
     # chain to the deepest non-terminal session instead of silently resuming
@@ -138,6 +157,7 @@ class FinishedRequest(BaseModel):
     # Echo of TaskResponse.attempt_id; lets the coordinator reject a late
     # /finished from a superseded attempt of the same coordinates.
     attempt_id: str | None = Field(default=None)
+    failure_kind: FailureKind | None = Field(default=None)
 
 
 class ControlSignal(BaseModel):
@@ -173,6 +193,7 @@ class IterationResult(BaseModel):
     text: str | None = Field(default=None)
     error: str | None = Field(default=None)
     error_detail: dict[str, object] | None = Field(default=None)
+    failure_kind: FailureKind | None = Field(default=None)
     harness_run_id: str = Field(default="")
     harness_output_dir: str = Field(default="")
     # Attempt provenance: without it, a stale result.json could complete a

@@ -206,6 +206,7 @@ goal_file: loopy_loop_goal.txt
 workflow_set: inner_outer_eval
 max_turns: 160
 goal_check_consecutive_failures_cap: 3
+# workflow_consecutive_failures_cap: 5
 team_harness_provider: "codex"
 team_harness_model: "gpt-5.5"
 team_harness_agents:
@@ -241,6 +242,12 @@ Important rules:
   bounded deadline) before the iteration is re-run; reap kills them
   immediately. These are coordinator-side settings and are not part of the
   config snapshot sent to the worker.
+- `workflow_consecutive_failures_cap` (default 5) is a per-workflow circuit
+  breaker: that many consecutive failed iterations of the same workflow stop
+  the loop with `stop_reason="workflow_failure_cap"` instead of retrying a
+  wedged workflow until `max_turns`. Any success of the workflow resets its
+  counter. Coordinator-side only; not part of the config snapshot sent to
+  the worker.
 
 Workflow config lives beside each workflow prompt:
 
@@ -381,7 +388,13 @@ To stop because the loop cannot continue:
 A valid `goal_check.json` does not stop the loop by itself. It is evidence.
 Stopping is controlled by session `control.json`. If goal-check output is
 missing or invalid repeatedly, the coordinator stops with
-`stop_reason="goal_check_broken"` after the configured failure cap.
+`stop_reason="goal_check_broken"` after the configured failure cap. Similarly,
+consecutive failed iterations of any single workflow stop the loop with
+`stop_reason="workflow_failure_cap"` after `workflow_consecutive_failures_cap`.
+Failed iterations record a `failure_kind` in history — `transient` (provider
+said retry; team-harness's own retries were exhausted), `deterministic`
+(auth/config errors retries cannot fix), `crash` (worker died mid-iteration),
+or `unknown` — so a stopped run is legible without reading harness logs.
 
 ## Workflow Sets and Child Sessions
 

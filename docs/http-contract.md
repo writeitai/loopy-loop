@@ -136,6 +136,7 @@ Request:
   "success": true,
   "text": "done",
   "error": null,
+  "failure_kind": null,
   "attempt_id": "a1b2c3d4e5f6",
   "worker": {
     "hostname": "buildbox",
@@ -147,6 +148,14 @@ Request:
 
 `worker` is optional (same semantics as `/register`): the calling worker will
 run the next dispatched task, so its identity is stamped onto that task.
+`failure_kind` is optional and classifies a failed iteration for the history
+record: `transient` (provider said retry — the harness's own retries were
+already exhausted), `deterministic` (auth/config error retries cannot fix), or
+`unknown`. The coordinator itself records `crash` for iterations abandoned by
+a dead worker. Consecutive failures of the same workflow are counted
+(coordinator-side `workflow_consecutive_failures_cap`, default 5; any success
+of that workflow resets its counter) and stop the loop terminally with
+`stop_reason="workflow_failure_cap"` at the cap.
 
 Response: same shape as `/register` response (`action` is either `"run"` or `"stop"`).
 

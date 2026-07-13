@@ -58,7 +58,11 @@ logger = logging.getLogger(__name__)
 # Coordinator-operational settings that must never enter the wire config
 # snapshot: released workers validate the snapshot with extra="forbid", so any
 # new response field would crash them at parse time (protocol compatibility).
-_COORDINATOR_ONLY_FIELDS = {"recovery_policy", "recovery_drain_timeout_s"}
+_COORDINATOR_ONLY_FIELDS = {
+    "recovery_policy",
+    "recovery_drain_timeout_s",
+    "workflow_consecutive_failures_cap",
+}
 
 
 class WorkerBusyError(RuntimeError):
@@ -159,6 +163,19 @@ class CoordinatorService:
             recovery = self._plan_orphan_recovery()
             with self._transition_lock:
                 response = self._register_attempt(caller=caller, recovery=recovery)
+                if response is not None and response.action == STOP_ACTION:
+                    # Recovery can make the ACTIVE CHILD terminal (an
+                    # abandoned iteration tripping the failure cap or
+                    # max_turns). Without this, the parent's pointer and
+                    # children.json stay pointing at a finished child until a
+                    # coordinator restart, and every register keeps returning
+                    # the child's stop instead of resuming the parent — the
+                    # exact finalize/resume step /finished already performs.
+                    parent_response = self._resume_parent_if_active_child_completed(
+                        caller=caller
+                    )
+                    if parent_response is not None:
+                        return parent_response
             if response is not None:
                 return response
         raise WorkerBusyError(
@@ -235,9 +252,13 @@ class CoordinatorService:
                             session_id=orphaned.session_id,
                             success=False,
                             error=error,
+                            failure_kind="crash",
                             started_at=orphaned.started_at,
                             finished_at=now,
                         )
+                    )
+                    self._track_workflow_failure_cap(
+                        state=current, workflow_id=orphaned.workflow_id, success=False
                     )
                     current.iteration_count += 1
                     current.current_task = None
@@ -443,6 +464,10 @@ class CoordinatorService:
     ) -> None:
         success = request.success
         error = request.error
+        # The taxonomy must describe the FINAL recorded failure: when the
+        # coordinator flips a harness success to a protocol failure below,
+        # an incoming harness kind (or None) would misattribute the cause.
+        failure_kind = request.failure_kind if not success else None
 
         if self._workflow_expects_goal_check_signal(
             workflow_set=active.workflow_set, workflow_id=active.workflow_id
@@ -451,6 +476,7 @@ class CoordinatorService:
             if goal_signal is None:
                 success = False
                 error = "invalid_goal_check_output"
+                failure_kind = "unknown"
                 state.goal_check_consecutive_failures += 1
                 if (
                     state.goal_check_consecutive_failures
@@ -466,6 +492,7 @@ class CoordinatorService:
             if state.stop_reason == "invalid_control_output":
                 success = False
                 error = "invalid_control_output"
+                failure_kind = "unknown"
 
         state.history.append(
             HistoryEntry(
@@ -475,12 +502,38 @@ class CoordinatorService:
                 session_id=active.session_id,
                 success=success,
                 error=error,
+                failure_kind=failure_kind,
                 started_at=active.started_at,
                 finished_at=now,
             )
         )
+        self._track_workflow_failure_cap(
+            state=state, workflow_id=active.workflow_id, success=success
+        )
         state.iteration_count += 1
         state.current_task = None
+
+    def _track_workflow_failure_cap(
+        self, *, state: LoopState, workflow_id: str, success: bool
+    ) -> None:
+        """Per-workflow circuit breaker (P2.3).
+
+        Counts consecutive failed iterations per workflow id (including
+        crash-abandoned iterations recorded during /register recovery); any
+        success of that workflow resets its counter. At the cap the loop
+        stops terminally instead of retrying a wedged workflow until
+        max_turns. Does not overwrite a stop decision already made in this
+        mutation (e.g. goal_check_broken).
+        """
+        if success:
+            state.workflow_consecutive_failures.pop(workflow_id, None)
+            return
+        count = state.workflow_consecutive_failures.get(workflow_id, 0) + 1
+        state.workflow_consecutive_failures[workflow_id] = count
+        cap = self.preflight.root_config.workflow_consecutive_failures_cap
+        if count >= cap and state.status == "running" and state.stop_reason is None:
+            state.status = "failed"
+            state.stop_reason = "workflow_failure_cap"
 
     def _recover_orphaned_agents(self, *, current_task: CurrentTask) -> RecoveryOutcome:
         """Apply the configured recovery policy to a dead worker's orphans.
@@ -557,6 +610,7 @@ class CoordinatorService:
                 text=result.text,
                 error=result.error,
                 attempt_id=result.attempt_id,
+                failure_kind=result.failure_kind,
             ),
             None,
         )
@@ -1021,7 +1075,10 @@ class CoordinatorService:
             state.status = "failed"
             state.stop_reason = "unresolvable_error"
             return "unresolvable_error"
-        if state.iteration_count >= state.max_turns:
+        if state.iteration_count >= state.max_turns and state.status == "running":
+            # Only label a still-running loop: a stop decided in the same
+            # mutation (workflow_failure_cap, goal_check_broken) is the more
+            # specific diagnosis and must not be rewritten to max_turns.
             state.status = "max_turns"
             state.stop_reason = "max_turns"
             return "max_turns"

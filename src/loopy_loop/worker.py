@@ -117,15 +117,13 @@ def run_worker_loop(*, repo_root: Path, coordinator_url: str) -> None:
                     repo_root=repo_root, task=task, identity=identity
                 )
             except FatalAssignmentError as exc:
+                # Exit WITHOUT posting /finished: posting would make the
+                # coordinator dispatch the next task to this about-to-exit
+                # worker, and the replacement worker's /register would then
+                # record that never-started assignment as a second (phantom)
+                # crash failure. The pending file stays in place; the next
+                # /register recovers this completion exactly once.
                 print(str(exc), file=sys.stderr)
-                _post_finished(
-                    client=client,
-                    coordinator_url=base_url,
-                    request=exc.finished_assignment.request,
-                )
-                _clear_pending_finished_request(
-                    path=exc.finished_assignment.pending_path
-                )
                 sys.exit(2)
             task = _post_finished(
                 client=client,
@@ -241,12 +239,20 @@ def _run_task(
     except ConfigError as exc:
         fatal_error = str(exc)
         iteration_result = IterationResult(
-            success=False, text=None, error=fatal_error, harness_run_id=""
+            success=False,
+            text=None,
+            error=fatal_error,
+            failure_kind="deterministic",
+            harness_run_id="",
         )
     except Exception as exc:
         traceback.print_exc()
         iteration_result = IterationResult(
-            success=False, text=None, error=str(exc), harness_run_id=""
+            success=False,
+            text=None,
+            error=str(exc),
+            failure_kind="unknown",
+            harness_run_id="",
         )
     iteration_result = iteration_result.model_copy(
         update={"attempt_id": task.attempt_id}
@@ -263,6 +269,7 @@ def _run_task(
         success=iteration_result.success,
         text=iteration_result.text,
         error=iteration_result.error,
+        failure_kind=iteration_result.failure_kind,
         worker=identity,
         attempt_id=task.attempt_id,
     )
