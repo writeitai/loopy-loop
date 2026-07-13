@@ -41,6 +41,12 @@
   terminally rejected instead of wedging every completion; packaged prompts
   instruct atomic control/goal_check publication; the crash model (process
   crash, no fsync) is documented.
+- **The `pm_planner_dispatcher` template is executable from a clean init
+  (P0.4).** `loopy init --template pm_planner_dispatcher` now also ships the
+  `inner_outer_eval` child workflow set its dispatcher spawns — previously a
+  clean init could not execute a single child session. The child set is
+  sourced from the `inner_outer_eval` template itself, so the two copies can
+  never drift apart.
 
 ## 0.3.0 (breaking)
 

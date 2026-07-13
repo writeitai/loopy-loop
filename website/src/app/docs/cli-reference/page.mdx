@@ -25,7 +25,7 @@ Scaffolds loopy-loop's files into the current repository. It is idempotent: it c
 | --- | --- | --- |
 | `--template` | `default` | Which workflow template to scaffold. One of `default`, `inner_outer_eval`, or `pm_planner_dispatcher`. |
 
-The `default` template creates only the reserved `goal_check` workflow in a set named `main`. `inner_outer_eval` creates the recommended `outer`/`inner`/`eval_reviewer`/`eval_runner` set. `pm_planner_dispatcher` creates `planner`/`dispatcher` workflows for child-session orchestration. See [Workflows](/docs/workflows) for how to choose.
+The `default` template creates only the reserved `goal_check` workflow in a set named `main`. `inner_outer_eval` creates the recommended `outer`/`inner`/`eval_reviewer`/`eval_runner` set. `pm_planner_dispatcher` creates `planner`/`dispatcher` workflows for child-session orchestration, and also ships the `inner_outer_eval` child set its dispatcher spawns — a clean init is executable end to end. See [Workflows](/docs/workflows) for how to choose.
 
 ```bash
 loopy init --template inner_outer_eval

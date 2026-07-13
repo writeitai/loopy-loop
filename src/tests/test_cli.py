@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from click.testing import CliRunner
@@ -238,3 +239,106 @@ def test_coordinator_requires_resume_for_running_state(
 
     assert result.exit_code != 0
     assert "--resume" in result.output
+
+
+def test_init_pm_template_ships_the_child_workflow_set(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    # The dispatcher spawns child sessions running inner_outer_eval: a clean
+    # init that lacked that set could not execute a single child (P0.4).
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["init", "--template", "pm_planner_dispatcher"])
+    assert result.exit_code == 0, result.output
+    for workflow_id in ("outer", "inner", "eval_reviewer", "eval_runner"):
+        prompt = tmp_path.joinpath(
+            ".loopy_loop/workflow_sets/inner_outer_eval/workflows",
+            workflow_id,
+            "prompt.txt",
+        )
+        config = prompt.with_name("config.yaml")
+        assert prompt.exists(), f"missing child workflow prompt: {workflow_id}"
+        assert config.exists(), f"missing child workflow config: {workflow_id}"
+
+
+def test_clean_pm_init_can_dispatch_an_inner_outer_eval_child(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    # End-to-end proof for P0.4: from a clean `loopy init`, the PM parent can
+    # actually dispatch its documented child workflow set.
+    import json as json_module
+
+    from fastapi.testclient import TestClient
+
+    from loopy_loop.coordinator_app import create_coordinator_app
+    from loopy_loop.sessions import child_requests_dir_path
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["init", "--template", "pm_planner_dispatcher"])
+    assert result.exit_code == 0, result.output
+
+    register_body = {
+        "worker": {"hostname": "test-host", "pid": 999983, "starttime": None}
+    }
+    client = TestClient(create_coordinator_app(repo_root=tmp_path, resume=False))
+    parent_task = client.post("/register", json=register_body).json()
+    assert parent_task["action"] == "run"
+    assert parent_task["workflow_set"] == "pm_planner_dispatcher"
+
+    request_dir = child_requests_dir_path(
+        repo_root=tmp_path, session_id=parent_task["session_id"]
+    )
+    request_dir.mkdir(parents=True, exist_ok=True)
+    request_dir.joinpath("wp.json").write_text(
+        json_module.dumps(
+            {
+                "workflow_set": "inner_outer_eval",
+                "goal": "Implement the selected planner item.",
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    child_task = client.post(
+        "/finished",
+        json={
+            "workflow_id": parent_task["workflow_id"],
+            "session_id": parent_task["session_id"],
+            "iteration": parent_task["iteration"],
+            "success": True,
+            "text": "planner selected an item",
+            "worker": register_body["worker"],
+        },
+    ).json()
+    assert child_task["action"] == "run"
+    assert child_task["workflow_set"] == "inner_outer_eval"
+    assert child_task["session_id"] != parent_task["session_id"]
+
+    # Run the dispatched child assignment through the real worker path (fake
+    # harness) and verify the SEMANTICS, not just the dispatch: the child works
+    # on ITS goal, and nothing tells its implementer not to implement.
+    from loopy_loop.models import IterationResult
+    from loopy_loop.models import TaskResponse
+    from loopy_loop.worker import _run_task
+
+    captured: dict[str, Any] = {}
+
+    def fake_run_harness_iteration(**kwargs: Any) -> IterationResult:
+        captured.update(kwargs)
+        return IterationResult(success=True, text="ok", harness_run_id="r1")
+
+    monkeypatch.setattr(
+        "loopy_loop.worker.run_harness_iteration", fake_run_harness_iteration
+    )
+    _run_task(repo_root=tmp_path, task=TaskResponse.model_validate(child_task))
+
+    rendered = captured["rendered_prompt"]
+    assert "Implement the selected planner item." in rendered  # the CHILD goal
+    # The child prompts treat the SESSION goal as canonical — never the
+    # repo-root goal file, which in a child session is the PARENT's goal.
+    assert "loopy_loop_goal" not in rendered
+    # The PM template's system-prompt extension must not leak a
+    # "do not implement" instruction into the child's implementer.
+    snapshot = captured["config_snapshot"]
+    assert "not implement" not in snapshot.team_harness_system_prompt_extension

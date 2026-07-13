@@ -18,7 +18,10 @@ team_harness_agent_reasoning_efforts:
 # team_harness_retry_max_delay_s: 60.0
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
-team_harness_system_prompt_extension: |
-  This session is a PM orchestration loop. It should manage work and dispatch
-  concrete implementation goals to child sessions. It should not implement the
-  child work directly.
+# NOTE: team_harness_system_prompt_extension applies to EVERY harness run in
+# this repo — including child inner_outer_eval sessions the dispatcher spawns.
+# Keep it empty (or strictly workflow-set-neutral): a PM-only instruction like
+# "do not implement directly" would reach the child's implementer at
+# system-prompt level and contradict its job. The planner/dispatcher prompt
+# bodies already carry the parent-role boundary.
+team_harness_system_prompt_extension: ""
