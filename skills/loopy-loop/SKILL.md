@@ -121,6 +121,8 @@ team_harness_system_prompt_extension: ""
 # Coordinator-side crash recovery (not sent to workers):
 # recovery_policy: "drain"          # or "reap"; drain is the default
 # recovery_drain_timeout_s: 600.0
+# Per-workflow circuit breaker (coordinator-side, not sent to workers):
+# workflow_consecutive_failures_cap: 5
 ```
 
 Constraints:
@@ -146,6 +148,12 @@ Constraints:
   they control what happens to agent processes a crashed worker left behind
   (`drain` = wait bounded, let them finish; `reap` = kill). They are not part
   of the config snapshot sent to workers.
+- `workflow_consecutive_failures_cap` (default 5, coordinator-side only): that
+  many consecutive failed iterations of the same workflow stop the loop with
+  `stop_reason="workflow_failure_cap"` instead of retrying a wedged workflow
+  until `max_turns`; any success of that workflow resets its counter. Failed
+  iterations carry a `failure_kind` in history (`transient` / `deterministic`
+  / `crash` / `unknown`) so a stopped run is legible.
 - Unknown config keys are rejected. All `team_harness_*` field names are exact.
 - The env var named in `team_harness_api_key_env` must be exported in the shell
   that starts the coordinator AND the shell that starts the worker.
@@ -495,7 +503,10 @@ what autonomous alternatives were tried. A generic reason breaks the repo's
 
 If `goal_check.json` is repeatedly missing or invalid, the coordinator stops
 with `stop_reason="goal_check_broken"` after
-`goal_check_consecutive_failures_cap` consecutive failures.
+`goal_check_consecutive_failures_cap` consecutive failures. Consecutive failed
+iterations of any single workflow similarly stop the loop with
+`stop_reason="workflow_failure_cap"` after
+`workflow_consecutive_failures_cap` (default 5).
 
 ## Common Pitfalls
 
