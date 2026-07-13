@@ -5,8 +5,8 @@
 **Relationship to other docs:** Companion to
 [`success-semantics-and-evaluation.md`](./success-semantics-and-evaluation.md)
 (which records decisions that are *already made* and should not be reverted). This
-doc is the opposite: forward-looking changes we are *considering*. It is derived
-from the July 2026 review under [`../analysis/`](../analysis/), curated and
+doc is a tracked ledger of changes we are considering or have since shipped. It is
+derived from the July 2026 review under [`../analysis/`](../analysis/), curated and
 re-prioritized.
 
 **Framing decision that drives priority:** we intend to drive a large, multi-phase
@@ -16,7 +16,10 @@ not after a single-loop pilot. That decision moves the parent/child machinery fr
 flagship use case. The ordering below reflects that.
 
 Each proposal has: **what**, **why**, **sketch**, **effort** (S≈1–2 days, M≈1 week,
-L≈multi-week), and **status**. Nothing here is committed until we accept it.
+L≈multi-week), and **status**. The **Status** line is authoritative — read it first.
+For proposals marked implemented, the What/Why text is preserved as the *original
+problem statement*: it describes the pre-implementation state that motivated the
+work, not the current behavior.
 
 ---
 
@@ -266,9 +269,10 @@ use.
 **Effort.** M. **Status.** **Partially resolved (2026-07-13)** — the eval-banana
 piece landed the simple way: it is now a plain hard dependency (chosen over the
 optional-extra design; one less install mode to document), and the worker appends
-its interpreter's scripts directory to `PATH` so the CLI resolves for spawned
-agents under every install mode (`uv tool install` exposes only the primary
-package's entry points). Named profiles and trio pinning remain **Proposed**.
+the scripts directory that actually holds the installed `eval-banana` script
+(derived from the package's install record, `sysconfig` as fallback) to `PATH` so
+the CLI resolves for spawned agents across supported install modes (`uv tool
+install` and pipx expose only the primary package's entry points). Named profiles and trio pinning remain **Proposed**.
 
 ### P2.2 — `_advance()` refactor, folded into the P0.1 state-machine work
 

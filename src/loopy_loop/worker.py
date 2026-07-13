@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import MutableMapping
 from dataclasses import dataclass
+import importlib.metadata
 import os
 from pathlib import Path
 import sys
@@ -59,21 +60,45 @@ class FinishedAssignment:
     pending_path: Path
 
 
+def _bundled_cli_scripts_dir() -> str:
+    """Directory holding the console scripts of loopy-loop's bundled CLI deps.
+
+    Derived from where eval-banana's script was actually installed (the
+    package RECORD), because sysconfig's default scheme is wrong whenever the
+    install used another scheme — e.g. `pip install --user` under a system
+    interpreter puts scripts in the user scheme's bin while the default
+    scheme points at the prefix bin. sysconfig is only the fallback for
+    installs that ship no file record.
+    """
+    try:
+        dist = importlib.metadata.distribution("eval-banana")
+    except importlib.metadata.PackageNotFoundError:
+        dist = None
+    if dist is not None:
+        for file in dist.files or []:
+            if file.name in ("eval-banana", "eval-banana.exe"):
+                located = str(dist.locate_file(file))
+                return os.path.dirname(os.path.normpath(located))
+    # Not Path(sys.executable).resolve(): resolving follows the venv symlink
+    # to the base interpreter's bin, which does not hold the scripts.
+    return sysconfig.get_path("scripts")
+
+
 def ensure_interpreter_scripts_on_path(environ: MutableMapping[str, str]) -> None:
-    """Make console scripts installed next to this interpreter findable by agents.
+    """Make loopy-loop's bundled dependency CLIs findable by harness agents.
 
     Harness agent processes inherit this worker's environment. CLIs shipped as
-    loopy-loop dependencies (e.g. eval-banana) install into this interpreter's
+    loopy-loop dependencies (e.g. eval-banana) install into the environment's
     scripts directory, which is not on PATH under `uv tool install` or `pipx`
     (those expose only the primary package's entry points). Appending — not
-    prepending — keeps existing resolution intact (agents running `python` in
-    the target repo must not pick up loopy-loop's interpreter) while making
-    dependency CLIs resolvable in every install mode.
+    prepending — keeps existing resolution intact: agents running `python` in
+    the target repo must not pick up loopy-loop's interpreter, and an
+    eval-banana already on PATH keeps winning. Existing entries are preserved
+    verbatim (an empty entry is a valid "current directory" component); a
+    missing PATH starts from the platform default search path.
     """
-    # sysconfig, not Path(sys.executable).resolve(): resolving follows the venv
-    # symlink to the base interpreter's bin, which does not hold the scripts.
-    scripts_dir = sysconfig.get_path("scripts")
-    entries = [entry for entry in environ.get("PATH", "").split(os.pathsep) if entry]
+    scripts_dir = _bundled_cli_scripts_dir()
+    entries = environ.get("PATH", os.defpath).split(os.pathsep)
     if scripts_dir not in entries:
         environ["PATH"] = os.pathsep.join([*entries, scripts_dir])
 
