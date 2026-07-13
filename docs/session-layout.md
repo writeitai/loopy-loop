@@ -165,6 +165,20 @@ eval-banana run \
 - If the file is missing but `result.json` exists for the active task, the
   coordinator can reconstruct the finished request from `result.json`
 
+`salvage.json`
+
+- Written into the interrupted iteration's directory during crash recovery,
+  when the coordinator applied the recovery policy (`recovery_policy`, default
+  bounded drain) to agent processes a dead worker's harness run left behind
+- Records the reap reports: which orphaned agents were drained (allowed to
+  finish), reaped (killed), or skipped, so the provenance of any surviving
+  working-tree edits is auditable rather than a mystery diff
+- The iteration is still re-run — its `result.json` never existed and is never
+  fabricated; the corresponding history entry carries
+  `error="abandoned_after_drain"` instead of plain `"abandoned"`
+- Schema: `{"schema_version": 1, "recorded_at": ..., "policy": ...,
+  "reaped_runs": N, "settled_workers": N, "reports": [...]}`
+
 ## Control Contracts
 
 `control.json`

@@ -175,6 +175,14 @@ task instead of marking it `abandoned`; if it is missing but `result.json` exist
 for the active task, the coordinator reconstructs the finished request from
 `result.json`. See [HTTP Contract](/docs/http-contract) for the recovery rules.
 
+**`salvage.json`** — Written into the interrupted iteration's directory during
+crash recovery, when the coordinator drained or reaped agent processes a dead
+worker's harness run left behind (per `recovery_policy`). It records the reap
+reports so the provenance of any surviving working-tree edits is auditable rather
+than a mystery diff. The iteration is still re-run — its `result.json` never
+existed and is never fabricated — and its history entry carries
+`error="abandoned_after_drain"` instead of plain `"abandoned"`.
+
 **`goal_check.json`** — A per-iteration eval artifact, present only for the
 reserved `goal_check` workflow or a workflow configured with
 `emits_goal_check: true`. Its schema in v1:

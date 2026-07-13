@@ -28,7 +28,18 @@ Every response from either endpoint is a `TaskResponse` whose `action` is either
 A worker calls `/register` to receive its first assignment. The request body is
 empty.
 
-Request: `{}`
+Request: `{}` — or, optionally, the worker's process identity:
+
+```json
+{
+  "worker": { "hostname": "buildbox", "pid": 4242, "starttime": "lstart:..." }
+}
+```
+
+When present, the coordinator stamps the identity onto the dispatched task so a
+later `/register` can verify whether that worker is still alive before reclaiming
+its task. The same optional `worker` field exists on `/finished` (the caller runs
+the next dispatched task). Old workers that post `{}` keep working unchanged.
 
 Run response:
 
@@ -86,11 +97,17 @@ Rules for `/register`:
   `.loopy_loop/workflow_sets/<workflow_set>/workflows/<workflow_id>/` directory to
   load.
 - If a task is already current — meaning the previous worker crashed without calling
-  `/finished` — `/register` first checks that iteration directory for
+  `/finished` — `/register` first verifies whether the recorded worker is *actually
+  dead*: a verifiably-alive worker (same host, matching pid + start-time token) gets
+  **HTTP 409** instead of having its task reclaimed. For a confirmed-dead or
+  unverifiable worker, the coordinator checks that iteration directory for
   `pending_finished_request.json` or `result.json`. If either proves the task
   completed, the coordinator records the completed task in history before checking
-  stop conditions. Only a task with no recoverable local completion is recorded as
-  failed with `error="abandoned"`. See [Crash recovery](#crash-recovery-and-stale-retries).
+  stop conditions. A task with no recoverable local completion has its orphaned
+  agent processes drained or reaped per `recovery_policy` (a `salvage.json` records
+  what was handled) and is recorded as failed with `error="abandoned_after_drain"`
+  (or plain `"abandoned"` when nothing was reaped). See
+  [Crash recovery](#crash-recovery-and-stale-retries).
 - If the loop is already in a terminal state, `/register` immediately returns
   `action: "stop"`.
 
@@ -170,3 +187,15 @@ window, the next `/register` recovers the completed result from
 pending file is missing) and records the task as completed — rather than marking it
 `abandoned`. A locally written result is treated as authoritative. The per-iteration
 files behind this are described in [Session Layout](/docs/session-layout).
+
+**Worker crash mid-run.** With nothing recoverable, `/register` applies the
+configured recovery policy to any agent processes the dead worker's harness run
+left behind — by default **bounded drain**: let in-flight agents finish (their
+completed repo edits survive in the working tree; git is the source of truth),
+then re-run the iteration from that better starting point. A `salvage.json` in the
+interrupted iteration directory records what was drained or reaped, so surviving
+edits are auditable rather than a mystery diff. The iteration's own result is never
+fabricated. Draining can block `/register` for up to `recovery_drain_timeout_s`;
+the bundled worker uses an unbounded read timeout for exactly this reason. This
+requires a team-harness version with the process reaper — older versions skip
+orphan recovery and fall back to plain abandonment.

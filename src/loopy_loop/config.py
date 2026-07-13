@@ -4,6 +4,7 @@ import hashlib
 import os
 from pathlib import Path
 from typing import Any
+from typing import Literal
 
 from pydantic import BaseModel
 from pydantic import computed_field
@@ -130,6 +131,23 @@ class RootConfig(BaseModel):
     team_harness_system_prompt_extension: str = Field(
         default=DEFAULT_SYSTEM_PROMPT_EXTENSION,
         description="Additional system prompt text appended for every harness run.",
+    )
+    recovery_policy: Literal["drain", "reap"] = Field(
+        default="drain",
+        description=(
+            "What to do with agent processes orphaned by a crashed worker: "
+            "'drain' lets in-flight agents finish (bounded by "
+            "recovery_drain_timeout_s) before re-running the iteration; "
+            "'reap' kills them immediately."
+        ),
+    )
+    recovery_drain_timeout_s: float = Field(
+        default=600.0,
+        ge=0,
+        description=(
+            "Shared deadline (seconds) for draining orphaned agents during "
+            "crash recovery before they are killed."
+        ),
     )
 
     @computed_field

@@ -229,6 +229,10 @@ Important rules:
 - `team_harness_max_retries`, `team_harness_retry_base_delay_s`, and
   `team_harness_retry_max_delay_s` are optional retry controls for transient
   team-harness API/network errors.
+- `recovery_policy` (`drain` by default, or `reap`) and
+  `recovery_drain_timeout_s` control what crash recovery does with agent
+  processes a dead worker left running: drain lets them finish (bounded)
+  before the iteration is re-run; reap kills them immediately.
 
 Workflow config lives beside each workflow prompt:
 

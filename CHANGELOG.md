@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- **Worker liveness verification (D7).** The worker now sends its process
+  identity (hostname + pid + a pid-reuse-proof start-time token) with
+  `/register` and `/finished`; the coordinator stamps it onto the dispatched
+  task. A `/register` while the recorded worker is *verifiably still alive*
+  returns HTTP 409 instead of abandoning live work — closing the
+  duplicate-work window. Unverifiable identities (old workers, remote hosts)
+  keep the pre-existing behavior; the wire change is backward compatible.
+- **Orphaned-agent recovery (P2.5 / TH-D5 consumer side).** When a worker is
+  confirmed dead with nothing recoverable, the coordinator applies
+  `recovery_policy` (new config; default `drain`, bounded by
+  `recovery_drain_timeout_s`, default 600s) to agent processes the dead
+  worker's harness run left behind, via team-harness's process reaper: drained
+  agents finish and their repo edits survive; a `salvage.json` in the
+  interrupted iteration directory records what was handled; the history entry
+  is `abandoned_after_drain` instead of `abandoned`. Requires team-harness
+  with the process reaper (> 0.2.10); older versions skip orphan recovery
+  gracefully. team-harness's own parent-liveness guard surfaces as HTTP 409.
+- The bundled worker uses an unbounded read timeout (recovery can legitimately
+  block `/register` up to the drain deadline) and exits with code 3 on a 409.
+
 ## 0.2.1
 
 - Improve README onboarding, install, initialization, configuration, and logging docs.

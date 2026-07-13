@@ -46,8 +46,12 @@ def _make_stop_response(*, stop_reason: str = "goal_met") -> dict[str, object]:
 
 
 class FakeResponse:
-    def __init__(self, payload: dict[str, object]) -> None:
+    def __init__(
+        self, payload: dict[str, object], status_code: int = 200, text: str = ""
+    ) -> None:
         self._payload = payload
+        self.status_code = status_code
+        self.text = text
 
     def raise_for_status(self) -> None:
         return None
