@@ -231,8 +231,10 @@ Important rules:
   team-harness API/network errors.
 - `recovery_policy` (`drain` by default, or `reap`) and
   `recovery_drain_timeout_s` control what crash recovery does with agent
-  processes a dead worker left running: drain lets them finish (bounded)
-  before the iteration is re-run; reap kills them immediately.
+  processes a dead worker left running: drain lets them finish (one shared
+  bounded deadline) before the iteration is re-run; reap kills them
+  immediately. These are coordinator-side settings and are not part of the
+  config snapshot sent to workers.
 
 Workflow config lives beside each workflow prompt:
 

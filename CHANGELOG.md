@@ -11,16 +11,27 @@
   keep the pre-existing behavior; the wire change is backward compatible.
 - **Orphaned-agent recovery (P2.5 / TH-D5 consumer side).** When a worker is
   confirmed dead with nothing recoverable, the coordinator applies
-  `recovery_policy` (new config; default `drain`, bounded by
-  `recovery_drain_timeout_s`, default 600s) to agent processes the dead
-  worker's harness run left behind, via team-harness's process reaper: drained
-  agents finish and their repo edits survive; a `salvage.json` in the
-  interrupted iteration directory records what was handled; the history entry
-  is `abandoned_after_drain` instead of `abandoned`. Requires team-harness
-  with the process reaper (> 0.2.10); older versions skip orphan recovery
-  gracefully. team-harness's own parent-liveness guard surfaces as HTTP 409.
-- The bundled worker uses an unbounded read timeout (recovery can legitimately
-  block `/register` up to the drain deadline) and exits with code 3 on a 409.
+  `recovery_policy` (new coordinator-side config, NOT part of the wire
+  snapshot; default `drain`, one shared `recovery_drain_timeout_s` deadline,
+  default 600s) to agent processes the dead worker's harness run left behind,
+  via team-harness's process reaper: drained agents finish and their repo
+  edits survive; a `salvage.json` in the interrupted iteration directory
+  records what was handled; the history entry is `abandoned_after_<policy>`
+  when anything settled. Recovery runs OUTSIDE the state lock (`loopy
+  status`/`stop` stay usable while draining), validates that each discovered
+  run record actually belongs to the iteration, is same-host-only (a worker
+  identity from another hostname skips reaping), and refuses to dispatch
+  replacement work (HTTP 409) when any orphan may still be running or when
+  team-harness's parent-liveness guard reports the run's owner alive.
+  Requires team-harness with the process reaper (> 0.2.10); older versions
+  skip orphan recovery gracefully.
+- A stale `/finished` from a **different identified worker** now gets HTTP 409
+  instead of a second copy of the live task; unknown identities keep the
+  pre-existing stale-retry behavior. State-lock contention surfaces as a clean
+  HTTP 503 (and friendly CLI errors) instead of raw tracebacks.
+- The bundled worker uses an unbounded read timeout on `/register` only
+  (recovery can legitimately block registration up to the drain deadline),
+  keeps the bounded timeout on `/finished`, and exits with code 3 on a 409.
 
 ## 0.2.1
 

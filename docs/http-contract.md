@@ -49,9 +49,7 @@ Run response:
     "team_harness_retry_max_delay_s": null,
     "team_harness_api_base": "https://openrouter.ai/api/v1",
     "team_harness_api_key_env": "OPENROUTER_API_KEY",
-    "team_harness_system_prompt_extension": "",
-    "recovery_policy": "drain",
-    "recovery_drain_timeout_s": 600.0
+    "team_harness_system_prompt_extension": ""
   },
   "stop_reason": null
 }
@@ -91,16 +89,29 @@ Rules:
      file proves the task completed, the completed task is recorded in history
      before checking stop conditions.
   3. **Orphan recovery.** With nothing recoverable, the coordinator applies the
-     configured recovery policy (`recovery_policy`, default `drain` bounded by
-     `recovery_drain_timeout_s`) to any agent processes the dead worker's
-     harness run left behind, writes a `salvage.json` into the interrupted
-     iteration directory when something was handled, and records the iteration
-     as failed with `error="abandoned_after_drain"` (or plain `"abandoned"`
-     when nothing was reaped). Requires team-harness with the process reaper;
-     older versions skip this step. If team-harness's own guard reports the
-     run's owning process still alive, `/register` returns **HTTP 409**.
-  Note: draining can block `/register` for up to `recovery_drain_timeout_s`;
-  the bundled worker uses an unbounded read timeout for this reason.
+     configured recovery policy (`recovery_policy`, default `drain`; ONE
+     `recovery_drain_timeout_s` deadline shared across all of the iteration's
+     interrupted runs) to any agent processes the dead worker's harness run
+     left behind, writes a `salvage.json` into the interrupted iteration
+     directory when something was handled, and records the iteration as failed
+     with `error="abandoned_after_<policy>"` (or plain `"abandoned"` when
+     nothing settled). Requires team-harness with the process reaper; older
+     versions skip this step. Recovery refuses to dispatch replacement work —
+     **HTTP 409** — when team-harness's guard reports the run's owner still
+     alive, or when any orphan's state after recovery is "may still be
+     running" (unverifiable identity, probe failure, or a kill that did not
+     land); the salvage record documents the unresolved processes.
+  The recovery settings are coordinator-side configuration only — they are
+  **not** part of the wire `config_snapshot` (released workers reject unknown
+  snapshot fields).
+  Notes: recovery runs outside the state lock, so `loopy status`/`stop` stay
+  usable while it drains; `/register` can still block roughly up to the drain
+  deadline (plus kill grace periods), and the bundled worker uses an unbounded
+  read timeout on `/register` only. Process recovery is same-host: a worker
+  identity from another hostname skips reaping (its processes cannot be
+  reached from here). A **hung-but-alive** worker keeps its task (409); the
+  escape hatch is to kill that process and register again — the 409 message
+  names its pid.
 - If the loop is in a terminal state, `/register` immediately returns `action=stop`.
 
 ## POST /finished
@@ -131,8 +142,11 @@ Response: same shape as `/register` response (`action` is either `"run"` or `"st
 Rules:
 
 - If `session_id` + `workflow_id` + `iteration` does not match `current_task`,
-  the call is treated as stale: state is not mutated, `current_task` is not
-  changed, and the current task's run response is returned to the caller.
+  the call is treated as stale: state is not mutated and `current_task` is not
+  changed. The current task's run response is returned only when the caller's
+  identity matches the task's recorded owner (or either identity is unknown —
+  the pre-identity behavior); a stale call from a **different identified
+  worker** gets **HTTP 409** instead of a second copy of the live task.
 - If `current_task` is `None` (no task is active), the coordinator dispatches the next
   available task as if `/register` had been called. If the state is terminal, it returns
   `action=stop`.

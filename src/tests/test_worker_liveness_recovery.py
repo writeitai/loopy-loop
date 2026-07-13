@@ -60,6 +60,8 @@ def test_is_worker_alive_unknown_cases() -> None:
 
 def test_is_worker_alive_verified_true_and_false(monkeypatch: Any) -> None:
     identity = WorkerIdentity(**LOCAL_IDENTITY)
+    monkeypatch.setattr(worker_identity_module, "_identity_module", lambda: object())
+    monkeypatch.setattr(worker_identity_module, "_is_zombie", lambda pid: False)
     monkeypatch.setattr(
         worker_identity_module,
         "capture_starttime",
@@ -72,6 +74,29 @@ def test_is_worker_alive_verified_true_and_false(monkeypatch: Any) -> None:
         worker_identity_module, "capture_starttime", lambda pid: "lstart:other"
     )
     assert is_worker_alive(identity) is False  # pid recycled
+
+
+def test_is_worker_alive_unknown_when_capture_unavailable(monkeypatch: Any) -> None:
+    # Version skew: a coordinator whose team-harness cannot capture start
+    # times must NOT interpret its own None-capture as "the pid is gone" —
+    # that would declare a live worker verifiably dead (duplicate work).
+    identity = WorkerIdentity(**LOCAL_IDENTITY)
+    monkeypatch.setattr(worker_identity_module, "_identity_module", lambda: None)
+    assert is_worker_alive(identity) is None
+
+
+def test_is_worker_alive_zombie_counts_as_dead(monkeypatch: Any) -> None:
+    # An exited-but-unreaped worker still matches its start time, but it will
+    # never call /finished: it must not hold the task hostage via 409.
+    identity = WorkerIdentity(**LOCAL_IDENTITY)
+    monkeypatch.setattr(worker_identity_module, "_identity_module", lambda: object())
+    monkeypatch.setattr(
+        worker_identity_module,
+        "capture_starttime",
+        lambda pid: LOCAL_IDENTITY["starttime"],
+    )
+    monkeypatch.setattr(worker_identity_module, "_is_zombie", lambda pid: True)
+    assert is_worker_alive(identity) is False
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +368,12 @@ def _build_interrupted_iteration(
     for run_id in run_ids:
         run_dir = runs_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "run.json").write_text("{}", encoding="utf-8")
+        (run_dir / "run.json").write_text(
+            json.dumps(
+                {"run_id": run_id, "session_output_dir": str(output_root / run_id)}
+            ),
+            encoding="utf-8",
+        )
     return tmp_path, session_id, runs_dir
 
 
@@ -369,7 +399,10 @@ def test_recover_interrupted_iteration_reaps_and_writes_salvage(
     assert outcome.settled_workers == 2  # one drained per fake report
     assert outcome.salvaged
     assert [call["policy"] for call in reaper.calls] == ["drain", "drain"]
-    assert [call["drain_timeout_s"] for call in reaper.calls] == [5, 5]
+    # One SHARED deadline across runs: each call gets the remaining budget.
+    budgets = [call["drain_timeout_s"] for call in reaper.calls]
+    assert budgets[0] == pytest.approx(5, abs=1.0)
+    assert budgets[1] <= budgets[0]
     salvage_path = (
         repo_root
         / ".loopy_loop"
@@ -484,7 +517,7 @@ class _Client:
     def __exit__(self, *args: Any) -> None:
         return None
 
-    def post(self, url: str, json: dict[str, Any]) -> _Response:
+    def post(self, url: str, json: dict[str, Any], timeout: Any = None) -> _Response:
         self.posted.append((url, json))
         return self._responses.pop(0)
 
@@ -538,3 +571,110 @@ def test_recovery_config_overrides_and_validation(
     preflight = run_preflight(repo_root=repo_root, workflow_set=None, goal_file=None)
     assert preflight.root_config.recovery_policy == "reap"
     assert preflight.root_config.recovery_drain_timeout_s == 30.0
+
+
+def test_recover_skips_stray_directory_names(tmp_path: Path, monkeypatch: Any) -> None:
+    # A directory under harness_outputs whose run.json does not point back at
+    # this iteration must not be reaped (it may belong to another run).
+    repo_root, session_id, runs_dir = _build_interrupted_iteration(
+        tmp_path, run_ids=["run_real"]
+    )
+    stray = runs_dir / "run_real" / "run.json"
+    stray.write_text(
+        json.dumps({"run_id": "run_real", "session_output_dir": "/elsewhere"}),
+        encoding="utf-8",
+    )
+    reaper = _FakeReaperModule(["drained"])
+    monkeypatch.setattr(
+        recovery_module, "_load_reaper", lambda: (reaper, _FakeThConfig(runs_dir))
+    )
+    outcome = recover_interrupted_iteration(
+        repo_root=repo_root,
+        session_id=session_id,
+        iteration=1,
+        workflow_id="implement",
+        policy="drain",
+        drain_timeout_s=5,
+    )
+    assert outcome.reaped_runs == 0
+    assert reaper.calls == []
+
+
+def test_recover_raises_when_orphans_may_still_run(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    # An unsettled outcome (agent may still be running) must block dispatch:
+    # two writers on one checkout is exactly what recovery exists to prevent.
+    from loopy_loop.recovery import RecoveryIncompleteError
+
+    repo_root, session_id, runs_dir = _build_interrupted_iteration(
+        tmp_path, run_ids=["run_a"]
+    )
+    reaper = _FakeReaperModule(["kill_failed_still_running", "drained"])
+    monkeypatch.setattr(
+        recovery_module, "_load_reaper", lambda: (reaper, _FakeThConfig(runs_dir))
+    )
+    with pytest.raises(RecoveryIncompleteError, match="may still be running"):
+        recover_interrupted_iteration(
+            repo_root=repo_root,
+            session_id=session_id,
+            iteration=1,
+            workflow_id="implement",
+            policy="drain",
+            drain_timeout_s=5,
+        )
+    # The salvage record still documents what WAS handled before the refusal.
+    salvage_path = (
+        repo_root
+        / ".loopy_loop"
+        / "sessions"
+        / session_id
+        / "iterations"
+        / "0001_implement"
+        / SALVAGE_FILENAME
+    )
+    payload = json.loads(salvage_path.read_text())
+    assert payload["settled_workers"] == 1
+    assert payload["unsettled_workers"] == 1
+
+
+def test_stale_finished_from_other_identified_worker_is_refused(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    # M8: a stale /finished from a DIFFERENT identified worker must not be
+    # handed the live task (that would start a second executor).
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    body = RegisterRequest(worker=WorkerIdentity(**LOCAL_IDENTITY)).model_dump()
+    task = client.post("/register", json=body).json()
+    other = {"hostname": socket.gethostname(), "pid": 777, "starttime": "lstart:x"}
+    stale = {
+        "workflow_id": task["workflow_id"],
+        "session_id": task["session_id"],
+        "iteration": 999,  # mismatch -> stale path
+        "success": True,
+        "worker": other,
+    }
+    response = client.post("/finished", json=stale)
+    assert response.status_code == 409
+    assert "belongs to worker" in response.json()["detail"]
+    # Unknown identity keeps the legacy stale-retry behavior:
+    stale_legacy = {**stale}
+    del stale_legacy["worker"]
+    response = client.post("/finished", json=stale_legacy)
+    assert response.status_code == 200
+    assert response.json()["iteration"] == task["iteration"]
+
+
+def test_config_snapshot_on_the_wire_has_no_recovery_fields(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    # M7: released workers validate the snapshot with extra="forbid"; new
+    # response fields would crash them. Recovery settings stay coordinator-only.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder(root_config={"recovery_policy": "reap"})
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task = client.post("/register", json={}).json()
+    assert "recovery_policy" not in task["config_snapshot"]
+    assert "recovery_drain_timeout_s" not in task["config_snapshot"]

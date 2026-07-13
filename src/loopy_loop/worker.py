@@ -58,12 +58,8 @@ class FinishedAssignment:
 
 def run_worker_loop(*, repo_root: Path, coordinator_url: str) -> None:
     base_url = coordinator_url.rstrip("/")
-    # The read timeout is unbounded because /register may legitimately block
-    # while the coordinator drains a crashed predecessor's orphaned agents
-    # (bounded by the coordinator's recovery_drain_timeout_s, not by us).
-    timeout = httpx.Timeout(30.0, read=None)
     identity = current_worker_identity()
-    with httpx.Client(timeout=timeout) as client:
+    with httpx.Client(timeout=30.0) as client:
         task = _post_register(
             client=client, coordinator_url=base_url, identity=identity
         )
@@ -95,7 +91,15 @@ def _post_register(
     *, client: httpx.Client, coordinator_url: str, identity: WorkerIdentity
 ) -> TaskResponse:
     request = RegisterRequest(worker=identity)
-    response = client.post(f"{coordinator_url}/register", json=request.model_dump())
+    # Unbounded read for /register ONLY: registration may legitimately block
+    # while the coordinator drains a crashed predecessor's orphaned agents.
+    # /finished keeps the bounded default so a wedged response cannot leave
+    # this worker alive-but-stuck forever (which would 409 all reclaims).
+    response = client.post(
+        f"{coordinator_url}/register",
+        json=request.model_dump(),
+        timeout=httpx.Timeout(30.0, read=None),
+    )
     _exit_if_busy(response)
     response.raise_for_status()
     return TaskResponse.model_validate(response.json())

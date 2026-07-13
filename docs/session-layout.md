@@ -174,10 +174,14 @@ eval-banana run \
   finish), reaped (killed), or skipped, so the provenance of any surviving
   working-tree edits is auditable rather than a mystery diff
 - The iteration is still re-run — its `result.json` never existed and is never
-  fabricated; the corresponding history entry carries
-  `error="abandoned_after_drain"` instead of plain `"abandoned"`
+  fabricated; when any orphan actually settled, the corresponding history entry
+  carries `error="abandoned_after_<policy>"` (e.g. `abandoned_after_drain`)
+  instead of plain `"abandoned"`
 - Schema: `{"schema_version": 1, "recorded_at": ..., "policy": ...,
-  "reaped_runs": N, "settled_workers": N, "reports": [...]}`
+  "reaped_runs": N, "settled_workers": N, "unsettled_workers": N,
+  "reports": [...]}`. A non-zero `unsettled_workers` means some orphan may
+  still be running — the coordinator refuses to dispatch replacement work
+  (HTTP 409) until it is resolved
 
 ## Control Contracts
 

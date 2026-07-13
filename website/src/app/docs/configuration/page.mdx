@@ -72,8 +72,8 @@ These optional fields tune how team-harness retries transient API and network er
 | `team_harness_max_retries` | integer | unset | Coordinator retry budget. Must be `0` or greater. |
 | `team_harness_retry_base_delay_s` | number | unset | Base delay in seconds for retry backoff. Must be greater than `0`. |
 | `team_harness_retry_max_delay_s` | number | unset | Maximum delay in seconds for retry backoff. Must be greater than `0`, and no less than `team_harness_retry_base_delay_s`. |
-| `recovery_policy` | string | `drain` | What crash recovery does with agent processes a dead worker left running: `drain` lets them finish (bounded by `recovery_drain_timeout_s`) before the iteration is re-run; `reap` kills them immediately. |
-| `recovery_drain_timeout_s` | number | `600` | Shared deadline in seconds for draining orphaned agents during crash recovery. Must be `0` or greater. |
+| `recovery_policy` | string | `drain` | Coordinator-side (not sent to workers). What crash recovery does with agent processes a dead worker left running: `drain` lets them finish (one shared `recovery_drain_timeout_s` deadline) before the iteration is re-run; `reap` kills them immediately. |
+| `recovery_drain_timeout_s` | number | `600` | Coordinator-side. Shared deadline in seconds for draining ALL of an iteration's orphaned agents during crash recovery. Must be `0` or greater. |
 
 The `inner_outer_eval` template ships these as commented-out examples so you can see the shape before enabling them.
 

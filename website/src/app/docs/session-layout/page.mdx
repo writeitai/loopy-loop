@@ -180,8 +180,11 @@ crash recovery, when the coordinator drained or reaped agent processes a dead
 worker's harness run left behind (per `recovery_policy`). It records the reap
 reports so the provenance of any surviving working-tree edits is auditable rather
 than a mystery diff. The iteration is still re-run — its `result.json` never
-existed and is never fabricated — and its history entry carries
-`error="abandoned_after_drain"` instead of plain `"abandoned"`.
+existed and is never fabricated — and when any orphan actually settled, its
+history entry carries `error="abandoned_after_<policy>"` (e.g.
+`abandoned_after_drain`) instead of plain `"abandoned"`. A non-zero
+`unsettled_workers` in the record means some orphan may still be running; the
+coordinator refuses to dispatch replacement work (HTTP 409) until it is resolved.
 
 **`goal_check.json`** — A per-iteration eval artifact, present only for the
 reserved `goal_check` workflow or a workflow configured with

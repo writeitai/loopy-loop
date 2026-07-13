@@ -71,7 +71,9 @@ class FakeClient:
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         return None
 
-    def post(self, url: str, json: dict[str, object]) -> FakeResponse:
+    def post(
+        self, url: str, json: dict[str, object], timeout: object = None
+    ) -> FakeResponse:
         self._posted_payloads.append({"url": url, "json": json})
         item = self._responses.pop(0)
         if isinstance(item, Exception):

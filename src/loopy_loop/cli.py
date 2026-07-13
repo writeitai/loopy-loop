@@ -5,6 +5,7 @@ from importlib.resources.abc import Traversable
 from pathlib import Path
 
 import click
+from filelock import Timeout as FileLockTimeout
 import uvicorn
 
 from loopy_loop.config import ConfigError
@@ -235,7 +236,12 @@ def worker(coordinator_url: str) -> None:
 def status() -> None:
     """Show loop status."""
     repo_root = Path.cwd()
-    state = StateStore(repo_root=repo_root).read_state()
+    try:
+        state = StateStore(repo_root=repo_root).read_state()
+    except FileLockTimeout:
+        raise click.ClickException(
+            "coordinator state is locked (likely mid-request); retry shortly"
+        ) from None
     if state is None:
         click.echo("No loopy-loop state found.")
         return
@@ -266,7 +272,12 @@ def stop() -> None:
         state.stop_requested = True
         return state, None
 
-    store.mutate(mutator)
+    try:
+        store.mutate(mutator)
+    except FileLockTimeout:
+        raise click.ClickException(
+            "coordinator state is locked (likely mid-request); retry shortly"
+        ) from None
     click.echo("stop requested")
 
 

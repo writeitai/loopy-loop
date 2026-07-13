@@ -98,15 +98,18 @@ Rules for `/register`:
   load.
 - If a task is already current — meaning the previous worker crashed without calling
   `/finished` — `/register` first verifies whether the recorded worker is *actually
-  dead*: a verifiably-alive worker (same host, matching pid + start-time token) gets
-  **HTTP 409** instead of having its task reclaimed. For a confirmed-dead or
-  unverifiable worker, the coordinator checks that iteration directory for
-  `pending_finished_request.json` or `result.json`. If either proves the task
-  completed, the coordinator records the completed task in history before checking
-  stop conditions. A task with no recoverable local completion has its orphaned
-  agent processes drained or reaped per `recovery_policy` (a `salvage.json` records
-  what was handled) and is recorded as failed with `error="abandoned_after_drain"`
-  (or plain `"abandoned"` when nothing was reaped). See
+  dead*: a verifiably-alive worker (same host, matching pid + start-time token, and
+  not a zombie) gets **HTTP 409** instead of having its task reclaimed. If that
+  worker is hung, kill its process (the 409 names the pid) and register again. For a
+  confirmed-dead or unverifiable worker, the coordinator checks that iteration
+  directory for `pending_finished_request.json` or `result.json`. If either proves
+  the task completed, the coordinator records the completed task in history before
+  checking stop conditions. A task with no recoverable local completion has its
+  orphaned agent processes drained or reaped per `recovery_policy` (a `salvage.json`
+  records what was handled) and is recorded as failed with
+  `error="abandoned_after_<policy>"` (or plain `"abandoned"` when nothing settled).
+  If any orphan may still be running after recovery, `/register` returns **HTTP
+  409** rather than dispatching a second writer. See
   [Crash recovery](#crash-recovery-and-stale-retries).
 - If the loop is already in a terminal state, `/register` immediately returns
   `action: "stop"`.
@@ -192,10 +195,18 @@ files behind this are described in [Session Layout](/docs/session-layout).
 configured recovery policy to any agent processes the dead worker's harness run
 left behind — by default **bounded drain**: let in-flight agents finish (their
 completed repo edits survive in the working tree; git is the source of truth),
-then re-run the iteration from that better starting point. A `salvage.json` in the
-interrupted iteration directory records what was drained or reaped, so surviving
-edits are auditable rather than a mystery diff. The iteration's own result is never
-fabricated. Draining can block `/register` for up to `recovery_drain_timeout_s`;
-the bundled worker uses an unbounded read timeout for exactly this reason. This
-requires a team-harness version with the process reaper — older versions skip
-orphan recovery and fall back to plain abandonment.
+then re-run the iteration from that better starting point. One
+`recovery_drain_timeout_s` deadline is shared across all of the iteration's
+interrupted runs. A `salvage.json` in the interrupted iteration directory records
+what was drained or reaped, so surviving edits are auditable rather than a mystery
+diff. The iteration's own result is never fabricated. Recovery runs outside the
+state lock (`loopy status`/`stop` stay usable), but `/register` itself can block
+roughly up to the drain deadline plus kill grace periods — the bundled worker uses
+an unbounded read timeout on `/register` only. Process recovery is same-host-only:
+a worker identity from another hostname skips reaping. If any orphan may still be
+running afterwards (unverifiable identity, probe failure, or a kill that did not
+land), the coordinator refuses to dispatch replacement work (HTTP 409) and the
+salvage record names the unresolved processes. This requires a team-harness version
+with the process reaper — older versions skip orphan recovery and fall back to
+plain abandonment. The recovery settings are coordinator-side only; they are not
+part of the wire `config_snapshot`.

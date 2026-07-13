@@ -43,8 +43,6 @@ class RootConfigSnapshot(BaseModel):
     team_harness_api_base: str = Field(...)
     team_harness_api_key_env: str = Field(...)
     team_harness_system_prompt_extension: str = Field(...)
-    recovery_policy: Literal["drain", "reap"] = Field(default="drain")
-    recovery_drain_timeout_s: float = Field(default=600.0)
 
 
 class WorkerIdentity(BaseModel):

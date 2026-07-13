@@ -33,6 +33,7 @@ import importlib
 import json
 import logging
 from pathlib import Path
+import time
 from typing import Any
 
 from loopy_loop.models import utc_now
@@ -52,6 +53,26 @@ _SETTLED_OUTCOMES = {
     "reaped",
     "drain_timed_out_then_reaped",
 }
+
+# Outcomes that mean an orphan MAY STILL BE RUNNING after recovery: the
+# coordinator must not dispatch replacement work on top of a possibly-live
+# writer. (identity_mismatch_skipped means OUR group is gone — settled-safe;
+# no_process_identity is a pre-identity record and keeps the legacy
+# redispatch behavior; left_running only occurs under the ignore policy.)
+_UNSETTLED_OUTCOMES = {
+    "identity_unverifiable_skipped",
+    "probe_failed",
+    "kill_failed_still_running",
+}
+
+
+class RecoveryIncompleteError(RuntimeError):
+    """Recovery ran but orphaned agents may still be running.
+
+    Dispatching replacement work now could put two writers on the checkout.
+    The salvage record documents exactly which orphans are unresolved; an
+    operator can kill them (or wait for them to exit) and register again.
+    """
 
 
 class RecoveryRefusedError(RuntimeError):
@@ -82,6 +103,8 @@ class RecoveryOutcome:
 
     reaped_runs: int = 0
     settled_workers: int = 0
+    unsettled_workers: int = 0
+    policy: str = ""
     reports: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -104,7 +127,7 @@ def recover_interrupted_iteration(
     finds the run's owning process still alive — the caller should treat that
     as "the previous worker is still running".
     """
-    outcome = RecoveryOutcome()
+    outcome = RecoveryOutcome(policy=policy)
     loaded = _load_reaper()
     if loaded is None:
         logger.warning(
@@ -121,32 +144,79 @@ def recover_interrupted_iteration(
         iteration=iteration,
         workflow_id=workflow_id,
     )
-    for run_id in _discover_run_ids(output_root):
-        run_json = Path(th_config.RUNS_DIR) / run_id / "run.json"
-        if not run_json.exists():
-            logger.warning("no run.json for interrupted harness run %s", run_id)
-            continue
-        try:
-            report = reaper.reap_run(
-                run_json, policy=policy, drain_timeout_s=drain_timeout_s
+    # ONE deadline shared across every discovered run — the advertised
+    # timeout bounds the whole recovery, not each run separately.
+    deadline = time.monotonic() + drain_timeout_s
+    try:
+        for run_id in _discover_run_ids(output_root):
+            run_json = Path(th_config.RUNS_DIR) / run_id / "run.json"
+            if not run_json.exists():
+                logger.warning("no run.json for interrupted harness run %s", run_id)
+                continue
+            if not _run_record_matches(
+                run_json=run_json, output_root=output_root, run_id=run_id
+            ):
+                logger.warning(
+                    "run.json for %s does not reference this iteration's "
+                    "output directory; skipping (stray directory name?)",
+                    run_id,
+                )
+                continue
+            try:
+                report = reaper.reap_run(
+                    run_json,
+                    policy=policy,
+                    drain_timeout_s=max(0.0, deadline - time.monotonic()),
+                )
+            except reaper.ReapRefusedError as exc:
+                raise RecoveryRefusedError(str(exc)) from exc
+            outcome.reaped_runs += 1
+            outcome.settled_workers += sum(
+                1 for worker in report.workers if worker.outcome in _SETTLED_OUTCOMES
             )
-        except reaper.ReapRefusedError as exc:
-            raise RecoveryRefusedError(str(exc)) from exc
-        outcome.reaped_runs += 1
-        outcome.settled_workers += sum(
-            1 for worker in report.workers if worker.outcome in _SETTLED_OUTCOMES
-        )
-        outcome.reports.append(report.model_dump(mode="json"))
-    if outcome.reaped_runs:
-        _write_salvage_record(
-            repo_root=repo_root,
-            session_id=session_id,
-            iteration=iteration,
-            workflow_id=workflow_id,
-            outcome=outcome,
-            policy=policy,
+            outcome.unsettled_workers += sum(
+                1 for worker in report.workers if worker.outcome in _UNSETTLED_OUTCOMES
+            )
+            outcome.reports.append(report.model_dump(mode="json"))
+    finally:
+        # The salvage record survives a mid-loop refusal: whatever was already
+        # reaped/drained stays auditable even when this call raises.
+        if outcome.reaped_runs:
+            _write_salvage_record(
+                repo_root=repo_root,
+                session_id=session_id,
+                iteration=iteration,
+                workflow_id=workflow_id,
+                outcome=outcome,
+                policy=policy,
+            )
+    if outcome.unsettled_workers:
+        raise RecoveryIncompleteError(
+            f"{outcome.unsettled_workers} orphaned agent(s) of iteration "
+            f"{iteration:04d}_{workflow_id} may still be running "
+            "(unverifiable identity, probe failure, or a kill that did not "
+            "land); refusing to dispatch replacement work. See salvage.json "
+            "in the iteration directory, resolve the leftover processes, "
+            "and register again."
         )
     return outcome
+
+
+def _run_record_matches(*, run_json: Path, output_root: Path, run_id: str) -> bool:
+    """Guard against stray directory names: the run record must point back at
+    this iteration's output directory before we act on it."""
+    try:
+        payload = json.loads(run_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if payload.get("run_id") != run_id:
+        return False
+    recorded = payload.get("session_output_dir")
+    if recorded is None:
+        # Older team-harness run records don't carry it; fall back to the
+        # directory-name match already established.
+        return True
+    return Path(recorded).resolve() == (output_root / run_id).resolve()
 
 
 def _discover_run_ids(output_root: Path) -> list[str]:
@@ -184,6 +254,7 @@ def _write_salvage_record(
         "policy": policy,
         "reaped_runs": outcome.reaped_runs,
         "settled_workers": outcome.settled_workers,
+        "unsettled_workers": outcome.unsettled_workers,
         "reports": outcome.reports,
     }
     (iteration_dir / SALVAGE_FILENAME).write_text(
