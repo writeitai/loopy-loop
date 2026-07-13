@@ -117,15 +117,13 @@ def run_worker_loop(*, repo_root: Path, coordinator_url: str) -> None:
                     repo_root=repo_root, task=task, identity=identity
                 )
             except FatalAssignmentError as exc:
+                # Exit WITHOUT posting /finished: posting would make the
+                # coordinator dispatch the next task to this about-to-exit
+                # worker, and the replacement worker's /register would then
+                # record that never-started assignment as a second (phantom)
+                # crash failure. The pending file stays in place; the next
+                # /register recovers this completion exactly once.
                 print(str(exc), file=sys.stderr)
-                _post_finished(
-                    client=client,
-                    coordinator_url=base_url,
-                    request=exc.finished_assignment.request,
-                )
-                _clear_pending_finished_request(
-                    path=exc.finished_assignment.pending_path
-                )
                 sys.exit(2)
             task = _post_finished(
                 client=client,

@@ -347,10 +347,19 @@ def test_worker_exits_on_fatal_config_error(
     stderr = capsys.readouterr().err
     assert exc_info.value.code == 2
     assert "Missing required environment variable: OPENROUTER_API_KEY" in stderr
-    # /finished must have been posted with success=False.
+    # NO /finished: posting would make the coordinator dispatch a next task to
+    # this exiting worker, which the next /register would then record as a
+    # phantom crash failure (P2.3 review M2). The durable pending file stays
+    # for the next /register to recover the failure exactly once.
     finished_calls = [p for p in posted if "/finished" in p["url"]]
-    assert len(finished_calls) == 1
-    assert finished_calls[0]["json"]["success"] is False
+    assert finished_calls == []
+    pending = pending_finished_request_path(
+        repo_root=repo_root,
+        session_id="goal_20260419_143022_ab12cd34",
+        iteration=1,
+        workflow_id="planner",
+    )
+    assert pending.exists()
 
 
 def test_worker_retries_finished_on_transient_error(

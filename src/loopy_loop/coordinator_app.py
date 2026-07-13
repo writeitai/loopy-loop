@@ -163,6 +163,19 @@ class CoordinatorService:
             recovery = self._plan_orphan_recovery()
             with self._transition_lock:
                 response = self._register_attempt(caller=caller, recovery=recovery)
+                if response is not None and response.action == STOP_ACTION:
+                    # Recovery can make the ACTIVE CHILD terminal (an
+                    # abandoned iteration tripping the failure cap or
+                    # max_turns). Without this, the parent's pointer and
+                    # children.json stay pointing at a finished child until a
+                    # coordinator restart, and every register keeps returning
+                    # the child's stop instead of resuming the parent — the
+                    # exact finalize/resume step /finished already performs.
+                    parent_response = self._resume_parent_if_active_child_completed(
+                        caller=caller
+                    )
+                    if parent_response is not None:
+                        return parent_response
             if response is not None:
                 return response
         raise WorkerBusyError(
@@ -451,6 +464,10 @@ class CoordinatorService:
     ) -> None:
         success = request.success
         error = request.error
+        # The taxonomy must describe the FINAL recorded failure: when the
+        # coordinator flips a harness success to a protocol failure below,
+        # an incoming harness kind (or None) would misattribute the cause.
+        failure_kind = request.failure_kind if not success else None
 
         if self._workflow_expects_goal_check_signal(
             workflow_set=active.workflow_set, workflow_id=active.workflow_id
@@ -459,6 +476,7 @@ class CoordinatorService:
             if goal_signal is None:
                 success = False
                 error = "invalid_goal_check_output"
+                failure_kind = "unknown"
                 state.goal_check_consecutive_failures += 1
                 if (
                     state.goal_check_consecutive_failures
@@ -474,6 +492,7 @@ class CoordinatorService:
             if state.stop_reason == "invalid_control_output":
                 success = False
                 error = "invalid_control_output"
+                failure_kind = "unknown"
 
         state.history.append(
             HistoryEntry(
@@ -483,7 +502,7 @@ class CoordinatorService:
                 session_id=active.session_id,
                 success=success,
                 error=error,
-                failure_kind=request.failure_kind,
+                failure_kind=failure_kind,
                 started_at=active.started_at,
                 finished_at=now,
             )
@@ -1056,7 +1075,10 @@ class CoordinatorService:
             state.status = "failed"
             state.stop_reason = "unresolvable_error"
             return "unresolvable_error"
-        if state.iteration_count >= state.max_turns:
+        if state.iteration_count >= state.max_turns and state.status == "running":
+            # Only label a still-running loop: a stop decided in the same
+            # mutation (workflow_failure_cap, goal_check_broken) is the more
+            # specific diagnosis and must not be rewritten to max_turns.
             state.status = "max_turns"
             state.stop_reason = "max_turns"
             return "max_turns"

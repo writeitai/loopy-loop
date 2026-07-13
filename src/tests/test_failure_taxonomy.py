@@ -289,3 +289,200 @@ def test_cap_below_one_is_rejected(repo_builder: Any, monkeypatch: Any) -> None:
     )
     with pytest.raises(ConfigError):
         create_coordinator_app(repo_root=repo_root, resume=False)
+
+
+def test_register_resumes_parent_when_child_trips_cap(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    """Review M1: a child terminalized during /register recovery must be
+    finalized and its parent resumed — without a coordinator restart."""
+    import json as _json
+
+    from loopy_loop.sessions import child_requests_dir_path
+    from loopy_loop.sessions import children_path
+    from loopy_loop.sessions import state_path
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder(root_config={"workflow_consecutive_failures_cap": 1})
+    child_dir = (
+        repo_root
+        / ".loopy_loop"
+        / "workflow_sets"
+        / "child_set"
+        / "workflows"
+        / "child_work"
+    )
+    child_dir.mkdir(parents=True)
+    child_dir.joinpath("prompt.txt").write_text("Child work.", encoding="utf-8")
+    child_dir.joinpath("config.yaml").write_text(
+        "enabled: true\nrun_every: 1\n", encoding="utf-8"
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+
+    parent_task = client.post("/register", json=REGISTER_BODY).json()
+    request_dir = child_requests_dir_path(
+        repo_root=repo_root, session_id=parent_task["session_id"]
+    )
+    request_dir.mkdir(parents=True, exist_ok=True)
+    request_dir.joinpath("child.json").write_text(
+        _json.dumps(
+            {"workflow_set": "child_set", "goal": "Child goal.", "schema_version": 1}
+        ),
+        encoding="utf-8",
+    )
+    child_task = client.post(
+        "/finished", json=_finished_body(parent_task, success=True)
+    ).json()
+    assert child_task["workflow_set"] == "child_set"
+
+    # The child's worker dies; the recorded worker ran on another host, so the
+    # replacement /register records a crash-abandoned iteration — the child's
+    # first and (cap=1) final failure. The register must come back with the
+    # PARENT's next work, not the dead child's stop.
+    response = client.post("/register", json=REGISTER_BODY).json()
+
+    assert response["session_id"] == parent_task["session_id"]
+    child_state = StateStore(
+        repo_root=repo_root,
+        state_path=state_path(repo_root=repo_root, session_id=child_task["session_id"]),
+    ).read_state()
+    assert child_state is not None
+    assert child_state.status == "failed"
+    assert child_state.stop_reason == "workflow_failure_cap"
+    payload = _json.loads(
+        children_path(
+            repo_root=repo_root, session_id=parent_task["session_id"]
+        ).read_text()
+    )
+    assert payload["children"][0]["status"] == "failed"
+    assert payload["children"][0]["stop_reason"] == "workflow_failure_cap"
+    parent_state = StateStore(
+        repo_root=repo_root,
+        state_path=state_path(
+            repo_root=repo_root, session_id=parent_task["session_id"]
+        ),
+    ).read_state()
+    assert parent_state is not None
+    assert parent_state.active_child_session_id is None
+
+
+def test_coordinator_flip_overrides_stale_failure_kind(
+    repo_builder: Any,
+    monkeypatch: Any,
+    current_task_factory: Any,
+    history_entry_factory: Any,
+) -> None:
+    """Review M3: when the coordinator flips a result to a protocol failure,
+    the recorded kind must describe that flip, not the harness outcome."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    store = StateStore(repo_root=repo_root)
+    state = store.read_state()
+    assert state is not None
+    state.history.append(history_entry_factory(workflow_id="planner", success=True))
+    state.iteration_count = 1
+    state.current_task = current_task_factory(
+        workflow_id="goal_check", session_id=state.active_session_id, iteration=2
+    )
+    store.write_state(state=state)
+
+    # Harness "succeeded" but no goal_check.json exists -> flipped to failure.
+    client.post(
+        "/finished",
+        json={
+            "workflow_id": "goal_check",
+            "session_id": state.active_session_id,
+            "iteration": 2,
+            "success": True,
+            "text": "done",
+            "error": None,
+            "failure_kind": "transient",
+        },
+    )
+
+    updated = store.read_state()
+    assert updated is not None
+    entry = updated.history[-1]
+    assert entry.error == "invalid_goal_check_output"
+    assert entry.failure_kind == "unknown"
+
+
+def test_workflow_cap_wins_over_simultaneous_max_turns(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    """Review minor-1: the more specific diagnosis must not be relabeled."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder(
+        root_config={"workflow_consecutive_failures_cap": 1, "max_turns": 1},
+        workflows=PLANNER_ONLY,
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+
+    task = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/finished", json=_finished_body(task, success=False)).json()
+
+    assert response["action"] == "stop"
+    assert response["stop_reason"] == "workflow_failure_cap"
+    state = StateStore(repo_root=repo_root).read_state()
+    assert state is not None
+    assert state.status == "failed"
+    assert state.stop_reason == "workflow_failure_cap"
+
+
+def test_classify_unconfirmed_retryable_false_is_unknown() -> None:
+    """Review M4: protocol/stream failures default retryable=False; without
+    corroboration they must not be called deterministic."""
+    assert (
+        classify_failure_detail(
+            detail={"kind": "coordinator_api", "retryable": False, "status_code": None}
+        )
+        == "unknown"
+    )
+    assert (
+        classify_failure_detail(
+            detail={"kind": "coordinator_api", "retryable": False, "status_code": 500}
+        )
+        == "unknown"
+    )
+    assert (
+        classify_failure_detail(
+            detail={"kind": "coordinator_api", "retryable": False, "status_code": 404}
+        )
+        == "deterministic"
+    )
+    assert (
+        classify_failure_detail(
+            detail={"kind": "coordinator_auth", "retryable": False, "status_code": 401}
+        )
+        == "deterministic"
+    )
+
+
+def test_run_harness_iteration_normalizes_systemexit(
+    repo_builder: Any, monkeypatch: Any, snapshot_factory: Any
+) -> None:
+    """Review M4: SDK-side sys.exit must become a deterministic failed result,
+    not kill the worker (which would later read as a crash)."""
+    from loopy_loop.harness_runner import run_harness_iteration
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder(workflows=PLANNER_ONLY)
+
+    class ExitingHarness:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def run(self, task: str) -> Any:
+            raise SystemExit(2)
+
+    result = run_harness_iteration(
+        repo_root=repo_root,
+        config_snapshot=snapshot_factory(),
+        rendered_prompt="prompt",
+        harness_factory=ExitingHarness,
+    )
+
+    assert result.success is False
+    assert result.failure_kind == "deterministic"
+    assert "exited during run" in (result.error or "")

@@ -69,13 +69,32 @@ def run_harness_iteration(
             harness_run_id=harness_run_id,
             harness_output_dir=harness_output_dir,
         )
+    except SystemExit as exc:
+        # Installed team-harness config validation can sys.exit() from SDK
+        # code; without this a worker dies silently and the coordinator later
+        # misclassifies a deterministic config failure as a crash.
+        traceback.print_exc()
+        return IterationResult(
+            success=False,
+            text=None,
+            error=f"team-harness exited during run: {exc}",
+            failure_kind="deterministic",
+            harness_run_id="",
+        )
     except Exception as exc:
         traceback.print_exc()
         return IterationResult(
             success=False,
             text=None,
             error=str(exc),
-            failure_kind="unknown",
+            # Errors escaping before team-harness builds its run log (e.g. a
+            # pre-flight auth failure) still carry status/retryable
+            # attributes worth classifying.
+            failure_kind=_classify(
+                kind=None,
+                status_code=getattr(exc, "status_code", None),
+                retryable=getattr(exc, "retryable", None),
+            ),
             harness_run_id="",
         )
     return _normalize_harness_result(
@@ -86,18 +105,36 @@ def run_harness_iteration(
 def classify_failure_detail(*, detail: dict[str, object] | None) -> FailureKind:
     """Map team-harness failure detail onto the loopy failure taxonomy.
 
-    team-harness coordinator failures carry a structured `retryable` bool
-    (True for 429/5xx/network — already retried up to its max_retries;
-    False for auth/other 4xx). Agent-process failure details carry no
+    team-harness coordinator failures carry a structured `retryable` bool.
+    True means the provider said retry (429/5xx/network) and team-harness's
+    own retries were already exhausted. False is only trusted as
+    deterministic with corroboration (an auth kind, or a non-429 4xx status):
+    several protocol/stream failures default to retryable=False even though
+    the same request may work later. Agent-process failure details carry no
     retryability signal, so they classify as "unknown".
     """
     if not detail:
         return "unknown"
-    retryable = detail.get("retryable")
+    return _classify(
+        kind=detail.get("kind"),
+        status_code=detail.get("status_code"),
+        retryable=detail.get("retryable"),
+    )
+
+
+def _classify(*, kind: object, status_code: object, retryable: object) -> FailureKind:
     if retryable is True:
         return "transient"
     if retryable is False:
-        return "deterministic"
+        if kind == "coordinator_auth":
+            return "deterministic"
+        if (
+            isinstance(status_code, int)
+            and 400 <= status_code < 500
+            and status_code != 429
+        ):
+            return "deterministic"
+        return "unknown"
     return "unknown"
 
 
