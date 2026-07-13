@@ -22,6 +22,7 @@ WORKFLOWS_DIRNAME = "workflows"
 WORKFLOW_SETS_DIRNAME = "workflow_sets"
 GOAL_HASH_LENGTH = 12
 DEFAULT_GOAL_CHECK_FAILURE_CAP = 3
+DEFAULT_WORKFLOW_FAILURE_CAP = 5
 DEFAULT_PROVIDER = "openai_compat"
 PROVIDERS_WITHOUT_API_KEY: frozenset[str] = frozenset({"codex"})
 DEFAULT_MODEL = "gpt-5.5"
@@ -70,6 +71,15 @@ class RootConfig(BaseModel):
         default=DEFAULT_GOAL_CHECK_FAILURE_CAP,
         ge=1,
         description="Consecutive invalid goal-check outputs allowed before failure.",
+    )
+    workflow_consecutive_failures_cap: int = Field(
+        default=DEFAULT_WORKFLOW_FAILURE_CAP,
+        ge=1,
+        description=(
+            "Consecutive failed iterations of the same workflow before the "
+            "loop stops with stop_reason=workflow_failure_cap. Coordinator-"
+            "side only; not part of the wire config snapshot."
+        ),
     )
     team_harness_provider: str = Field(
         default=DEFAULT_PROVIDER,

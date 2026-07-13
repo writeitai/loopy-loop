@@ -303,7 +303,15 @@ becomes a failed iteration the scheduler can retry until `max_turns` — spendin
 without distinguishing a transient 429 from a deterministic test failure. A wedged
 `inner` shouldn't be able to burn the whole turn budget.
 
-**Effort.** S–M. **Status.** Proposed.
+**Effort.** S–M. **Status.** **Implemented (unreleased)** — `failure_kind`
+(`transient`/`deterministic`/`crash`/`unknown`, derived from team-harness's
+structured `retryable` signal) recorded on results, `/finished`, and history;
+per-workflow consecutive-failure counter in `LoopState` with coordinator-side
+`workflow_consecutive_failures_cap` (default 5) stopping the loop with
+`stop_reason="workflow_failure_cap"`. Retry/backoff at the loopy level was
+deliberately NOT added: team-harness already retries transient API errors with
+backoff (`team_harness_max_retries` etc.); a second retry layer would multiply
+delays without new information.
 
 ### P2.4 — Operator experience: `doctor`, `validate`, session-aware `status`/`stop`
 

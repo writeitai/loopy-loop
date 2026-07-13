@@ -16,6 +16,7 @@ from loopy_loop.config import ConfigError
 from loopy_loop.config import normalize_api_base
 from loopy_loop.config import resolve_api_key
 from loopy_loop.config import RootConfig
+from loopy_loop.models import FailureKind
 from loopy_loop.models import IterationResult
 from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.sessions import HARNESS_RUN_ID_FILENAME
@@ -64,17 +65,40 @@ def run_harness_iteration(
             text=None,
             error=str(exc),
             error_detail=exc.detail,
+            failure_kind=classify_failure_detail(detail=exc.detail),
             harness_run_id=harness_run_id,
             harness_output_dir=harness_output_dir,
         )
     except Exception as exc:
         traceback.print_exc()
         return IterationResult(
-            success=False, text=None, error=str(exc), harness_run_id=""
+            success=False,
+            text=None,
+            error=str(exc),
+            failure_kind="unknown",
+            harness_run_id="",
         )
     return _normalize_harness_result(
         result=result, harness_output_root=harness_output_root
     )
+
+
+def classify_failure_detail(*, detail: dict[str, object] | None) -> FailureKind:
+    """Map team-harness failure detail onto the loopy failure taxonomy.
+
+    team-harness coordinator failures carry a structured `retryable` bool
+    (True for 429/5xx/network — already retried up to its max_retries;
+    False for auth/other 4xx). Agent-process failure details carry no
+    retryability signal, so they classify as "unknown".
+    """
+    if not detail:
+        return "unknown"
+    retryable = detail.get("retryable")
+    if retryable is True:
+        return "transient"
+    if retryable is False:
+        return "deterministic"
+    return "unknown"
 
 
 def _build_harness_kwargs(

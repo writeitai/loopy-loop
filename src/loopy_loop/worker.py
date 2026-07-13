@@ -241,12 +241,20 @@ def _run_task(
     except ConfigError as exc:
         fatal_error = str(exc)
         iteration_result = IterationResult(
-            success=False, text=None, error=fatal_error, harness_run_id=""
+            success=False,
+            text=None,
+            error=fatal_error,
+            failure_kind="deterministic",
+            harness_run_id="",
         )
     except Exception as exc:
         traceback.print_exc()
         iteration_result = IterationResult(
-            success=False, text=None, error=str(exc), harness_run_id=""
+            success=False,
+            text=None,
+            error=str(exc),
+            failure_kind="unknown",
+            harness_run_id="",
         )
     iteration_result = iteration_result.model_copy(
         update={"attempt_id": task.attempt_id}
@@ -263,6 +271,7 @@ def _run_task(
         success=iteration_result.success,
         text=iteration_result.text,
         error=iteration_result.error,
+        failure_kind=iteration_result.failure_kind,
         worker=identity,
         attempt_id=task.attempt_id,
     )

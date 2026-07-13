@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Failure taxonomy + per-workflow failure cap (P2.3).** Failed iterations
+  now record a `failure_kind` — `transient` (provider said retry;
+  team-harness's own retries were exhausted), `deterministic` (auth/config
+  errors retries cannot fix), `crash` (worker died mid-iteration), or
+  `unknown` — on `result.json`, `/finished`, and session history. A new
+  coordinator-side `workflow_consecutive_failures_cap` (default 5) stops the
+  loop with `stop_reason="workflow_failure_cap"` when the same workflow fails
+  that many iterations in a row (crash-abandoned iterations included; any
+  success resets the workflow's counter) instead of burning the remaining
+  `max_turns` on a wedged workflow. The cap is not part of the wire config
+  snapshot, so released workers are unaffected.
 - **Agent Skill rewritten for the current API (P1.3).** `skills/loopy-loop/SKILL.md`
   still described the removed pre-0.2.0 surface (top-level `.loopy_loop/state.json`,
   polling multi-worker model, inline `goal`, `.loopy_loop/workflows/<id>/` layout) and
