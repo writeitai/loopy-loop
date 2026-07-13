@@ -37,9 +37,9 @@ What to do:
 1. Read project_state/memory.md, project_state/current_state.md, and
    project_state/eval_results.md if they exist.
 2. Confirm the session eval_checks directory exists and contains YAML checks.
-3. If eval-banana is available, create <session directory>/eval_results and run
-   from the repo root. Pass --cwd . so session-local checks evaluate repo-root
-   paths:
+3. Create <session directory>/eval_results and run from the repo root. The
+   eval-banana CLI ships with loopy-loop and is expected to be on PATH. Pass
+   --cwd . so session-local checks evaluate repo-root paths:
    eval-banana validate --cwd . --check-dir <session eval_checks directory>
    eval-banana run --cwd . --check-dir <session eval_checks directory> --output-dir <session directory>/eval_results
 4. Read the eval-banana console output and the latest report.json/report.md

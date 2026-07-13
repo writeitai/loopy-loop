@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- **eval-banana is now a hard dependency.** The recommended
+  `inner_outer_eval` template (and the PM template's child sessions) shell
+  out to the `eval-banana` CLI; previously it had to be installed
+  separately, so a fresh install could dispatch eval workflows against a
+  missing tool. It now installs with loopy-loop — no extra, no preflight.
+- **Worker appends its bundled-CLI scripts directory to `PATH`.** Harness
+  agents inherit the worker's environment, but under `uv tool install` /
+  `pipx` only loopy-loop's own entry points are exposed on `PATH`, so
+  dependency CLIs such as `eval-banana` were invisible to agents. The
+  directory is derived from where eval-banana's script was actually
+  installed (its package record; `sysconfig` only as fallback — the default
+  scheme is wrong for e.g. `pip install --user` under a system
+  interpreter). It is appended, never prepended, and existing `PATH`
+  entries are preserved verbatim: the target repo's own `python`/tooling
+  and any eval-banana already on `PATH` keep winning.
+
 ## 0.4.0 (breaking)
 
 **Breaking API interaction — completions must echo the dispatched

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -9,9 +11,18 @@ from loopy_loop.models import IterationResult
 from loopy_loop.models import TaskResponse
 from loopy_loop.sessions import create_session_dir
 from loopy_loop.sessions import pending_finished_request_path
+from loopy_loop.worker import _bundled_cli_scripts_dir
 from loopy_loop.worker import _render_prompt
 from loopy_loop.worker import _run_task
+from loopy_loop.worker import ensure_interpreter_scripts_on_path
 from loopy_loop.worker import run_worker_loop
+
+
+@pytest.fixture(autouse=True)
+def _restore_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    # run_worker_loop mutates os.environ["PATH"]; re-setting it through
+    # monkeypatch makes pytest restore the original value after each test.
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
 
 
 def _make_run_response(
@@ -440,3 +451,60 @@ def test_finished_payload_has_no_assignment_id(
     assert len(finished_calls) == 1
     assert "assignment_id" not in finished_calls[0]["json"]
     assert finished_calls[0]["json"]["iteration"] == 1
+
+
+def test_ensure_interpreter_scripts_appends_preserving_entries() -> None:
+    # The empty entry is a valid "current directory" component and must
+    # survive the rewrite verbatim, in place.
+    environ = {"PATH": os.pathsep.join(["", "/usr/bin", "/bin"])}
+
+    ensure_interpreter_scripts_on_path(environ)
+
+    entries = environ["PATH"].split(os.pathsep)
+    assert entries == ["", "/usr/bin", "/bin", _bundled_cli_scripts_dir()]
+
+
+def test_ensure_interpreter_scripts_noop_when_already_present() -> None:
+    original = os.pathsep.join(["/usr/bin", _bundled_cli_scripts_dir()])
+    environ = {"PATH": original}
+
+    ensure_interpreter_scripts_on_path(environ)
+
+    assert environ["PATH"] == original
+
+
+def test_ensure_interpreter_scripts_missing_path_starts_from_defpath() -> None:
+    environ: dict[str, str] = {}
+
+    ensure_interpreter_scripts_on_path(environ)
+
+    entries = environ["PATH"].split(os.pathsep)
+    assert entries == [*os.defpath.split(os.pathsep), _bundled_cli_scripts_dir()]
+
+
+def test_bundled_cli_scripts_dir_contains_eval_banana() -> None:
+    scripts_dir = Path(_bundled_cli_scripts_dir())
+
+    names = {entry.name for entry in scripts_dir.iterdir()}
+
+    assert names & {"eval-banana", "eval-banana.exe"}
+
+
+def test_run_worker_loop_prepares_path_for_agents(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    repo_root = repo_builder()
+    seen: list[object] = []
+    monkeypatch.setattr(
+        "loopy_loop.worker.ensure_interpreter_scripts_on_path", seen.append
+    )
+    monkeypatch.setattr(
+        "loopy_loop.worker.httpx.Client",
+        _make_fake_client_cls(responses=[_make_stop_response()], posted_payloads=[]),
+    )
+
+    run_worker_loop(repo_root=repo_root, coordinator_url="http://coord")
+
+    # Agents inherit os.environ, so that is the mapping that must be prepared.
+    assert len(seen) == 1
+    assert seen[0] is os.environ
