@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable
 import inspect
-import json
 from pathlib import Path
 import traceback
 from typing import Callable
@@ -23,6 +22,8 @@ from loopy_loop.sessions import HARNESS_RUN_ID_FILENAME
 from loopy_loop.sessions import PROMPT_FILENAME
 from loopy_loop.sessions import RESULT_FILENAME
 from loopy_loop.sessions import RESULT_TEXT_FILENAME
+from loopy_loop.sessions import write_json_atomic
+from loopy_loop.sessions import write_text_atomic
 
 
 class TeamHarnessLike(Protocol):
@@ -166,17 +167,20 @@ def _failure_harness_paths(
 def write_iteration_artifacts(
     *, iteration_dir: Path, rendered_prompt: str, iteration_result: IterationResult
 ) -> None:
+    # Atomic writes throughout: result.json is what post-crash recovery trusts
+    # as proof of a completed iteration, and the rest should never exist
+    # truncated either.
     iteration_dir.mkdir(parents=True, exist_ok=True)
-    (iteration_dir / PROMPT_FILENAME).write_text(rendered_prompt, encoding="utf-8")
-    (iteration_dir / RESULT_TEXT_FILENAME).write_text(
-        iteration_result.text or "", encoding="utf-8"
+    write_text_atomic(path=iteration_dir / PROMPT_FILENAME, content=rendered_prompt)
+    write_text_atomic(
+        path=iteration_dir / RESULT_TEXT_FILENAME, content=iteration_result.text or ""
     )
-    (iteration_dir / HARNESS_RUN_ID_FILENAME).write_text(
-        iteration_result.harness_run_id, encoding="utf-8"
+    write_text_atomic(
+        path=iteration_dir / HARNESS_RUN_ID_FILENAME,
+        content=iteration_result.harness_run_id,
     )
-    payload = iteration_result.model_dump()
-    (iteration_dir / RESULT_FILENAME).write_text(
-        json.dumps(payload, indent=2), encoding="utf-8"
+    write_json_atomic(
+        path=iteration_dir / RESULT_FILENAME, payload=iteration_result.model_dump()
     )
 
 

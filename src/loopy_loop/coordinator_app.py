@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 from typing import Any
 from typing import TypeVar
+import uuid
 
 from fastapi import FastAPI
 from fastapi import HTTPException
@@ -47,6 +48,7 @@ from loopy_loop.sessions import goal_check_path
 from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.sessions import result_path
 from loopy_loop.sessions import state_path
+from loopy_loop.sessions import write_json_atomic
 from loopy_loop.state_store import StateStore
 from loopy_loop.worker_identity import is_worker_alive
 
@@ -235,49 +237,54 @@ class CoordinatorService:
                     # do not act on a stale plan — replan.
                     return current, None
 
-            # Step 4: Check stop conditions after abandoned-task cleanup.
-            stop_response = self._stop_response_if_needed(state=current)
-            if stop_response is not None:
-                return current, stop_response
-
-            child_response = self._dispatch_child_session_after_success(
-                state=current, caller=caller
-            )
-            if child_response is not None:
-                return current, child_response
-
-            # Step 5: Choose next workflow.
-            workflows = self._workflows_for(workflow_set=current.workflow_set)
-            workflow = choose_next_workflow(
-                workflows=workflows,
-                history=current.history,
-                iteration_count=current.iteration_count,
-            )
-            if workflow is None:
-                current.stop_reason = "no_eligible_workflow"
-                current.status = "failed"
-                return current, TaskResponse(
-                    action=STOP_ACTION, stop_reason="no_eligible_workflow"
-                )
-
-            # Step 6: Set current_task and return run response.
-            current.current_task = CurrentTask(
-                workflow_set=current.workflow_set,
-                workflow_id=workflow.id,
-                session_id=current.active_session_id,
-                iteration=current.iteration_count + 1,
-                started_at=now,
-                worker=caller,
-            )
-            return current, _build_run_response(
-                current_task=current.current_task,
-                config_snapshot=current.config_snapshot,
-            )
+            # Step 4+: stop conditions, child dispatch, next workflow.
+            return current, self._advance(state=current, caller=caller, now=now)
 
         response = self.state_store.mutate(mutator)
         for path in recovered_pending_paths:
             path.unlink(missing_ok=True)
         return response
+
+    def _advance(
+        self, *, state: LoopState, caller: WorkerIdentity | None, now: datetime
+    ) -> TaskResponse:
+        """The single scheduling step shared by every dispatch path.
+
+        Order: stop conditions -> pending child dispatch -> next workflow ->
+        stamp a fresh CurrentTask (new attempt id, caller as owner). Extracted
+        so the three former copies (register, finished no-task, finished
+        matched) cannot drift apart.
+        """
+        stop_response = self._stop_response_if_needed(state=state)
+        if stop_response is not None:
+            return stop_response
+        child_response = self._dispatch_child_session_after_success(
+            state=state, caller=caller
+        )
+        if child_response is not None:
+            return child_response
+        workflows = self._workflows_for(workflow_set=state.workflow_set)
+        workflow = choose_next_workflow(
+            workflows=workflows,
+            history=state.history,
+            iteration_count=state.iteration_count,
+        )
+        if workflow is None:
+            state.stop_reason = "no_eligible_workflow"
+            state.status = "failed"
+            return TaskResponse(action=STOP_ACTION, stop_reason="no_eligible_workflow")
+        state.current_task = CurrentTask(
+            workflow_set=state.workflow_set,
+            workflow_id=workflow.id,
+            session_id=state.active_session_id,
+            iteration=state.iteration_count + 1,
+            started_at=now,
+            worker=caller,
+            attempt_id=_new_attempt_id(),
+        )
+        return _build_run_response(
+            current_task=state.current_task, config_snapshot=state.config_snapshot
+        )
 
     def _raise_if_worker_alive(self, *, current_task: CurrentTask) -> None:
         if is_worker_alive(current_task.worker) is not True:
@@ -301,39 +308,7 @@ class CoordinatorService:
             # Step 3: No active task — stale call. Dispatch as if /register was called.
             # This handles the post-crash stale retry scenario safely.
             if current.current_task is None:
-                # Check stop conditions first; if terminal, return stop.
-                stop_response = self._stop_response_if_needed(state=current)
-                if stop_response is not None:
-                    return current, stop_response
-                child_response = self._dispatch_child_session_after_success(
-                    state=current, caller=caller
-                )
-                if child_response is not None:
-                    return current, child_response
-                workflows = self._workflows_for(workflow_set=current.workflow_set)
-                workflow = choose_next_workflow(
-                    workflows=workflows,
-                    history=current.history,
-                    iteration_count=current.iteration_count,
-                )
-                if workflow is None:
-                    current.stop_reason = "no_eligible_workflow"
-                    current.status = "failed"
-                    return current, TaskResponse(
-                        action=STOP_ACTION, stop_reason="no_eligible_workflow"
-                    )
-                current.current_task = CurrentTask(
-                    workflow_set=current.workflow_set,
-                    workflow_id=workflow.id,
-                    session_id=current.active_session_id,
-                    iteration=current.iteration_count + 1,
-                    started_at=now,
-                    worker=caller,
-                )
-                return current, _build_run_response(
-                    current_task=current.current_task,
-                    config_snapshot=current.config_snapshot,
-                )
+                return current, self._advance(state=current, caller=caller, now=now)
 
             # Step 4: Mismatch check — stale call for a different task.
             # Do NOT mutate state; return the current task's run response so the
@@ -345,6 +320,14 @@ class CoordinatorService:
                 request.session_id != active.session_id
                 or request.workflow_id != active.workflow_id
                 or request.iteration != active.iteration
+                or (
+                    # A late /finished from a SUPERSEDED attempt of the very
+                    # same coordinates is stale too: the work was already
+                    # recovered/abandoned and redispatched under a new attempt.
+                    request.attempt_id is not None
+                    and active.attempt_id is not None
+                    and request.attempt_id != active.attempt_id
+                )
             ):
                 # Replaying the live task is only safe to its recorded owner:
                 # handing it to anyone else would start a second executor of
@@ -384,44 +367,8 @@ class CoordinatorService:
                     action=STOP_ACTION, stop_reason="goal_check_broken"
                 )
 
-            # Step 7: Check stop conditions.
-            stop_response = self._stop_response_if_needed(state=current)
-            if stop_response is not None:
-                return current, stop_response
-
-            # Step 8: Dispatch next workflow.
-            child_response = self._dispatch_child_session_after_success(
-                state=current, caller=caller
-            )
-            if child_response is not None:
-                return current, child_response
-
-            workflows = self._workflows_for(workflow_set=current.workflow_set)
-            workflow = choose_next_workflow(
-                workflows=workflows,
-                history=current.history,
-                iteration_count=current.iteration_count,
-            )
-            if workflow is None:
-                current.stop_reason = "no_eligible_workflow"
-                current.status = "failed"
-                return current, TaskResponse(
-                    action=STOP_ACTION, stop_reason="no_eligible_workflow"
-                )
-
-            # Step 9: Set new current_task and return run response.
-            current.current_task = CurrentTask(
-                workflow_set=current.workflow_set,
-                workflow_id=workflow.id,
-                session_id=current.active_session_id,
-                iteration=current.iteration_count + 1,
-                started_at=now,
-                worker=caller,
-            )
-            return current, _build_run_response(
-                current_task=current.current_task,
-                config_snapshot=current.config_snapshot,
-            )
+            # Step 7+: stop conditions, child dispatch, next workflow.
+            return current, self._advance(state=current, caller=caller, now=now)
 
         response = self.state_store.mutate(mutator)
         if response.action == STOP_ACTION:
@@ -565,14 +512,113 @@ class CoordinatorService:
                 "Found running loopy-loop state. Restart with --resume to continue "
                 "the in-progress session."
             )
+        active_state = self._reconstruct_session_stack(top_state=existing_state)
         create_session_dir(
             repo_root=self.repo_root,
-            session_id=existing_state.active_session_id,
-            goal_hash=existing_state.goal_hash,
-            goal=existing_state.config_snapshot.goal,
-            workflow_set=existing_state.workflow_set,
-            parent_session_id=existing_state.parent_session_id,
+            session_id=active_state.active_session_id,
+            goal_hash=active_state.goal_hash,
+            goal=active_state.config_snapshot.goal,
+            workflow_set=active_state.workflow_set,
+            parent_session_id=active_state.parent_session_id,
         )
+
+    def _reconstruct_session_stack(self, *, top_state: LoopState) -> LoopState:
+        """Walk the durable parent->child pointers to the deepest live session.
+
+        A restarted coordinator previously reopened the latest TOP-LEVEL
+        session, silently orphaning a running child. Now:
+
+        - a non-terminal child pointed at by its parent becomes the active
+          session (the parent stays suspended, exactly as before the crash);
+        - a terminal child is finalized (children.json completed, pointer
+          cleared) and the walk resumes the parent;
+        - a dangling pointer (child state missing — the dispatch crashed
+          between commits) is cleared so the parent redispatches cleanly;
+        - a parent with NO pointer but a running children.json record whose
+          child is live ADOPTS it (the crash window where the child was fully
+          created but the parent commit never landed).
+        """
+        state = top_state
+        while True:
+            child_id = state.active_child_session_id or self._adoptable_child_id(
+                parent_state=state
+            )
+            if child_id is None:
+                return state
+            child_store = StateStore(
+                repo_root=self.repo_root,
+                state_path=state_path(repo_root=self.repo_root, session_id=child_id),
+            )
+            child_state = child_store.read_state()
+            parent_store = self._store_for(session_id=state.active_session_id)
+            if child_state is None:
+                logger.warning(
+                    "session %s points at child %s whose state is missing; "
+                    "clearing the pointer (interrupted dispatch)",
+                    state.active_session_id,
+                    child_id,
+                )
+                state = self._set_child_pointer(
+                    store=parent_store, child_session_id=None
+                )
+                return state
+            if child_store.is_terminal_state(state=child_state):
+                self._mark_child_record_complete(child_state=child_state)
+                self._clear_child_pointer(
+                    parent_store=parent_store,
+                    parent_session_id=state.active_session_id,
+                    child_session_id=child_id,
+                )
+                refreshed = parent_store.read_state()
+                if refreshed is None:  # pragma: no cover - state just existed
+                    raise RuntimeError("parent state vanished during recovery")
+                return refreshed
+            # Ensure the adopted case is persisted as a real pointer.
+            if state.active_child_session_id != child_id:
+                state = self._set_child_pointer(
+                    store=parent_store, child_session_id=child_id
+                )
+            self.state_store = child_store
+            state = child_state
+
+    def _adoptable_child_id(self, *, parent_state: LoopState) -> str | None:
+        """The crash window where the child was fully created (state written,
+        children.json recorded) but the parent's pointer commit never landed:
+        adopt the running child instead of redispatching a duplicate."""
+        payload = _read_children_payload(
+            path=children_path(
+                repo_root=self.repo_root, session_id=parent_state.active_session_id
+            )
+        )
+        for record in reversed(payload["children"]):
+            if record.get("status") != "running":
+                continue
+            child_id = record.get("session_id")
+            if not child_id:
+                continue
+            child_state = StateStore(
+                repo_root=self.repo_root,
+                state_path=state_path(repo_root=self.repo_root, session_id=child_id),
+            ).read_state()
+            if child_state is not None and child_state.status == "running":
+                return child_id
+        return None
+
+    def _store_for(self, *, session_id: str) -> StateStore:
+        return StateStore(
+            repo_root=self.repo_root,
+            state_path=state_path(repo_root=self.repo_root, session_id=session_id),
+        )
+
+    def _set_child_pointer(
+        self, *, store: StateStore, child_session_id: str | None
+    ) -> LoopState:
+        def mutator(state: LoopState | None) -> tuple[LoopState, LoopState]:
+            current = _require_state(state=state)
+            current.active_child_session_id = child_session_id
+            return current, current
+
+        return store.mutate(mutator)
 
     def _write_fresh_state(self) -> None:
         session_id = create_session_id(goal_hash=self.preflight.root_config.goal_hash)
@@ -641,9 +687,26 @@ class CoordinatorService:
         )
         if not requests_dir.exists():
             return None
+        dispatched_request_files = self._dispatched_request_files(
+            parent_session_id=state.active_session_id
+        )
         for request_path in sorted(requests_dir.glob("*.json")):
+            if request_path.name in dispatched_request_files:
+                # Already produced a child (the crash window between recording
+                # the child and unlinking the request): never dispatch twice.
+                request_path.unlink(missing_ok=True)
+                continue
             request = _read_signal(path=request_path, model=ChildSessionRequest)
             if request is None:
+                # Terminal rejection: leave an inspectable record instead of
+                # silently re-reading a broken file on every dispatch scan.
+                rejected = request_path.with_suffix(request_path.suffix + ".rejected")
+                request_path.rename(rejected)
+                logger.warning(
+                    "rejected invalid child request %s (kept as %s)",
+                    request_path.name,
+                    rejected.name,
+                )
                 continue
             preflight = self._preflight_for(
                 workflow_set=request.workflow_set, goal=request.goal
@@ -703,8 +766,14 @@ class CoordinatorService:
                     goal_hash=goal_hash,
                     status="running",
                     created_at=now,
+                    request_file=request_path.name,
                 ),
             )
+            # The durable session-stack pointer: committed with the parent
+            # state when this mutator returns, so a restarted coordinator can
+            # walk parent -> child instead of resuming the parent and
+            # orphaning the running child.
+            state.active_child_session_id = child_session_id
             request_path.unlink(missing_ok=True)
             self.state_store = child_store
             return _build_run_response(
@@ -734,8 +803,54 @@ class CoordinatorService:
                 repo_root=self.repo_root, session_id=child_state.parent_session_id
             ),
         )
+        self._clear_child_pointer(
+            parent_store=parent_store,
+            parent_session_id=child_state.parent_session_id,
+            child_session_id=child_state.active_session_id,
+        )
         self.state_store = parent_store
         return self.register_worker(request=RegisterRequest(worker=caller))
+
+    def _clear_child_pointer(
+        self, *, parent_store: StateStore, parent_session_id: str, child_session_id: str
+    ) -> None:
+        """The child reached a terminal state: the parent's stack pointer no
+        longer points at live work. Also removes the originating request file
+        if a crash window left it behind (its children.json record already
+        prevents redispatch; this is just hygiene)."""
+
+        def mutator(state: LoopState | None) -> tuple[LoopState, None]:
+            parent = _require_state(state=state)
+            if parent.active_child_session_id == child_session_id:
+                parent.active_child_session_id = None
+            return parent, None
+
+        parent_store.mutate(mutator)
+        payload = _read_children_payload(
+            path=children_path(repo_root=self.repo_root, session_id=parent_session_id)
+        )
+        for record in payload["children"]:
+            if record.get("session_id") != child_session_id:
+                continue
+            request_file = record.get("request_file")
+            if request_file:
+                leftover = (
+                    child_requests_dir_path(
+                        repo_root=self.repo_root, session_id=parent_session_id
+                    )
+                    / request_file
+                )
+                leftover.unlink(missing_ok=True)
+            break
+
+    def _dispatched_request_files(self, *, parent_session_id: str) -> set[str]:
+        path = children_path(repo_root=self.repo_root, session_id=parent_session_id)
+        payload = _read_children_payload(path=path)
+        return {
+            record["request_file"]
+            for record in payload["children"]
+            if record.get("request_file")
+        }
 
     def _append_child_record(
         self, *, parent_session_id: str, record: ChildSessionRecord
@@ -743,7 +858,7 @@ class CoordinatorService:
         path = children_path(repo_root=self.repo_root, session_id=parent_session_id)
         payload = _read_children_payload(path=path)
         payload["children"].append(json.loads(record.model_dump_json()))
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        write_json_atomic(path=path, payload=payload)
 
     def _mark_child_record_complete(self, *, child_state: LoopState) -> None:
         assert child_state.parent_session_id is not None
@@ -757,7 +872,7 @@ class CoordinatorService:
                 record["completed_at"] = utc_now().isoformat().replace("+00:00", "Z")
                 record["stop_reason"] = child_state.stop_reason
                 break
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        write_json_atomic(path=path, payload=payload)
 
     def _apply_stop_precedence(self, *, state: LoopState) -> str | None:
         if state.goal_met:
@@ -828,6 +943,10 @@ class CoordinatorService:
         raise RuntimeError("unreachable")
 
 
+def _new_attempt_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
 def _build_run_response(
     *, current_task: CurrentTask, config_snapshot: RootConfigSnapshot
 ) -> TaskResponse:
@@ -837,6 +956,7 @@ def _build_run_response(
         workflow_id=current_task.workflow_id,
         session_id=current_task.session_id,
         iteration=current_task.iteration,
+        attempt_id=current_task.attempt_id,
         config_snapshot=config_snapshot,
     )
 
@@ -862,6 +982,11 @@ def _matches_current_task(
         request.session_id == current_task.session_id
         and request.workflow_id == current_task.workflow_id
         and request.iteration == current_task.iteration
+        and (
+            request.attempt_id is None
+            or current_task.attempt_id is None
+            or request.attempt_id == current_task.attempt_id
+        )
     )
 
 

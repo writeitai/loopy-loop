@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from pathlib import Path
 import sys
 import time
@@ -33,6 +32,7 @@ from loopy_loop.sessions import project_state_dir_path
 from loopy_loop.sessions import session_dir_path
 from loopy_loop.sessions import session_goal_path
 from loopy_loop.sessions import updates_from_user_path
+from loopy_loop.sessions import write_json_atomic
 from loopy_loop.worker_identity import current_worker_identity
 
 # Internal retry constants for /finished — not configurable externally.
@@ -213,6 +213,7 @@ def _run_task(
         text=iteration_result.text,
         error=iteration_result.error,
         worker=identity,
+        attempt_id=task.attempt_id,
     )
     pending_path = _write_pending_finished_request(
         repo_root=repo_root, request=finished_request
@@ -236,7 +237,9 @@ def _write_pending_finished_request(
         iteration=request.iteration,
         workflow_id=request.workflow_id,
     )
-    path.write_text(json.dumps(request.model_dump(), indent=2), encoding="utf-8")
+    # Crash-safe: this file is what post-crash recovery trusts as proof of a
+    # completed task — it must never exist truncated.
+    write_json_atomic(path=path, payload=request.model_dump())
     return path
 
 

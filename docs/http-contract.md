@@ -33,6 +33,7 @@ Run response:
   "workflow_id": "planner",
   "session_id": "20260419_143022_71393ee22450_ab12cd34",
   "iteration": 3,
+  "attempt_id": "a1b2c3d4e5f6",
   "config_snapshot": {
     "goal": "Ship a minimal working landing page",
     "goal_hash": "71393ee22450",
@@ -115,6 +116,13 @@ Rules:
   escape hatch is to kill that process and register again — the 409 message
   names its pid.
 - If the loop is in a terminal state, `/register` immediately returns `action=stop`.
+- On `--resume`, the coordinator walks the durable parent→child session
+  pointers to the deepest live session: a running child continues where it
+  was (previously a restart silently reopened the parent and orphaned the
+  child), a child found terminal is finalized and its parent resumed, and
+  each interrupted-dispatch crash window reconciles deterministically
+  (dangling pointers cleared, fully-created-but-unpointed children adopted,
+  leftover request files never dispatched twice).
 
 ## POST /finished
 
@@ -128,6 +136,7 @@ Request:
   "success": true,
   "text": "done",
   "error": null,
+  "attempt_id": "a1b2c3d4e5f6",
   "worker": {
     "hostname": "buildbox",
     "pid": 4242,
@@ -143,7 +152,12 @@ Response: same shape as `/register` response (`action` is either `"run"` or `"st
 
 Rules:
 
-- If `session_id` + `workflow_id` + `iteration` does not match `current_task`,
+- Every dispatched task carries a unique `attempt_id`; the worker echoes it on
+  `/finished`. A call whose attempt id differs from the live task's — even
+  with matching session/workflow/iteration — is stale: it belongs to a
+  superseded attempt whose work was already recovered or abandoned.
+- If `session_id` + `workflow_id` + `iteration` (+ `attempt_id`, when both
+  sides carry one) does not match `current_task`,
   the call is treated as stale: state is not mutated and `current_task` is not
   changed. The current task's run response is returned only when the caller's
   identity matches the task's recorded owner (or either identity is unknown —

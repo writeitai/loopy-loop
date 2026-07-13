@@ -165,6 +165,17 @@ eval-banana run \
 - If the file is missing but `result.json` exists for the active task, the
   coordinator can reconstruct the finished request from `result.json`
 
+`children.json` (parent sessions)
+
+- Index of child sessions dispatched by this session; each record carries the
+  child `session_id`, `workflow_set`, `status`, timestamps, `stop_reason`, and
+  the originating `request_file` name (which makes the dispatch scan
+  idempotent: a request whose filename already appears here is never
+  dispatched twice, even if a crash left the file behind)
+- The parent's `state.json` additionally records `active_child_session_id`
+  while a child runs — the durable session-stack pointer a restarted
+  coordinator follows to resume the child instead of orphaning it
+
 `salvage.json`
 
 - Written into the interrupted iteration's directory during crash recovery,

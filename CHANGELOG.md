@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+- **Durable session-stack recovery (P0.1).** While a child session runs, the
+  parent's `state.json` records `active_child_session_id`; on `--resume` the
+  coordinator walks the pointer chain to the deepest live session instead of
+  silently reopening the parent and orphaning the running child. Terminal
+  children found at startup are finalized (children.json completed, pointer
+  cleared) and their parent resumed. Every interrupted-dispatch crash window
+  reconciles deterministically: dangling pointers are cleared, a fully
+  created child whose parent commit never landed is adopted, and leftover
+  request files never dispatch twice (children.json records the originating
+  `request_file`). Invalid child requests are terminally rejected
+  (`*.json.rejected`) instead of being re-read forever.
+- **Attempt ids.** Every dispatched task carries a unique `attempt_id`
+  (also on the wire in `TaskResponse`, echoed in `FinishedRequest`); a late
+  `/finished` from a superseded attempt of the same coordinates is treated as
+  stale rather than recorded as the current result.
+- Iteration artifacts (`result.json`, `result_text.txt`, `prompt.txt`,
+  `harness_run_id.txt`, `pending_finished_request.json`), `children.json`,
+  and `salvage.json` are all written atomically (unique temp + rename) — a
+  crash can never leave a truncated recovery artifact.
+- Internal: the three duplicated dispatch blocks in the coordinator collapsed
+  into one `_advance()` step (stop checks → child dispatch → next workflow →
+  stamped task), so they can no longer drift apart.
+
 ## 0.3.0 (breaking)
 
 **Breaking API change — `/register` requires the worker's process identity.**

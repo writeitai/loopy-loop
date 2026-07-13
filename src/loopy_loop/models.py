@@ -72,6 +72,10 @@ class CurrentTask(BaseModel):
     iteration: int = Field(...)
     started_at: datetime = Field(...)
     worker: WorkerIdentity | None = Field(default=None)
+    # Unique per dispatch: distinguishes a legitimate retry of
+    # (session, workflow, iteration) from a late /finished of an OLD attempt
+    # of the very same coordinates. None only on pre-attempt persisted state.
+    attempt_id: str | None = Field(default=None)
 
 
 class TaskResponse(BaseModel):
@@ -80,6 +84,7 @@ class TaskResponse(BaseModel):
     workflow_id: str | None = Field(default=None)
     session_id: str | None = Field(default=None)
     iteration: int | None = Field(default=None)
+    attempt_id: str | None = Field(default=None)
     config_snapshot: RootConfigSnapshot | None = Field(default=None)
     stop_reason: str | None = Field(default=None)
 
@@ -110,6 +115,11 @@ class LoopState(BaseModel):
     stop_reason: str | None = Field(default=None)
     iteration_count: int = Field(default=0)
     goal_check_consecutive_failures: int = Field(default=0)
+    # The durable session-stack pointer: while a child session is active, the
+    # parent records WHICH child, so a restarted coordinator can walk the
+    # chain to the deepest non-terminal session instead of silently resuming
+    # the parent and orphaning the running child.
+    active_child_session_id: str | None = Field(default=None)
     current_task: CurrentTask | None = Field(default=None)
     history: list[HistoryEntry] = Field(default_factory=list)
     config_snapshot: RootConfigSnapshot = Field(...)
@@ -125,6 +135,9 @@ class FinishedRequest(BaseModel):
     # Identity of the calling worker — the same worker will run the NEXT task
     # this response dispatches, so it is stamped onto that CurrentTask.
     worker: WorkerIdentity | None = Field(default=None)
+    # Echo of TaskResponse.attempt_id; lets the coordinator reject a late
+    # /finished from a superseded attempt of the same coordinates.
+    attempt_id: str | None = Field(default=None)
 
 
 class ControlSignal(BaseModel):
@@ -185,3 +198,8 @@ class ChildSessionRecord(BaseModel):
     created_at: datetime = Field(...)
     completed_at: datetime | None = Field(default=None)
     stop_reason: str | None = Field(default=None)
+    # Name of the child_requests/ file that produced this child. Makes the
+    # dispatch scan idempotent across the crash window between recording the
+    # child and unlinking the request: a request whose filename already
+    # appears in children.json is never dispatched twice.
+    request_file: str | None = Field(default=None)

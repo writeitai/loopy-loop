@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import tempfile
 import uuid
 
 from loopy_loop.config import LOOPY_DIRNAME
@@ -29,6 +31,32 @@ HARNESS_RUN_ID_FILENAME = "harness_run_id.txt"
 PENDING_FINISHED_REQUEST_FILENAME = "pending_finished_request.json"
 CONTROL_FILENAME = "control.json"
 GOAL_CHECK_FILENAME = "goal_check.json"
+
+
+def write_text_atomic(*, path: Path, content: str) -> None:
+    """Crash-safe file write: unique temp in the same directory + rename.
+
+    Recovery decisions are made from these artifacts, so a crash mid-write
+    must never leave a truncated file behind.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def write_json_atomic(*, path: Path, payload: object) -> None:
+    write_text_atomic(path=path, content=json.dumps(payload, indent=2))
 
 
 def create_session_id(*, goal_hash: str) -> str:
