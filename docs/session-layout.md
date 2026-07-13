@@ -47,8 +47,19 @@ One session directory is created per fresh coordinator run and reused for all it
 
 `events.jsonl`
 
-- Reserved append-only event log for diagnostics
-- Created at session start in v1
+- Append-only event stream: one JSON object per line, one file per session
+- Envelope: `event_id` (unique per emission), `schema_version` (1), `ts`
+  (UTC), `session_id`, `type`, `payload`
+- Types in v1: `session_started`, `task_dispatched`, `task_finished`
+  (success/error/failure_kind/tokens/duration), `iteration_abandoned`,
+  `goal_check`, `child_started`, `child_finished`, `session_stopped`
+- Delivery is best-effort, not guaranteed: events append AFTER the
+  producing state mutation commits, so a crash or append failure in that
+  window loses the event (never the state), and a crash-replayed
+  finalization can duplicate one — consumers key on `event_id`, tolerate
+  gaps and a truncated final line, and never build correctness on this
+  stream (`state.json` history/ledger is the durable truth)
+- Tail with `loopy events --follow` (`--json` for raw lines)
 
 `control.json`
 
@@ -175,6 +186,10 @@ eval-banana run \
 - The parent's `state.json` additionally records `active_child_session_id`
   while a child runs — the durable session-stack pointer a restarted
   coordinator follows to resume the child instead of orphaning it
+- At finalization the record also captures the child's usage totals
+  (`usage`: tokens, known/unknown iteration counts, duration), which is how
+  a parent's tree-wide usage and `max_cost_usd` budget include finished
+  children without double-storing
 
 Atomicity and crash model: the coordinator- and worker-owned artifacts above
 are written atomically (same-directory temp file + rename), so a **process

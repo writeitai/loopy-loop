@@ -137,6 +137,8 @@ Request:
   "text": "done",
   "error": null,
   "failure_kind": null,
+  "usage": {"prompt_tokens": 5210, "completion_tokens": 902, "turns": 3},
+  "duration_s": 187.4,
   "attempt_id": "a1b2c3d4e5f6",
   "worker": {
     "hostname": "buildbox",
@@ -156,6 +158,12 @@ a dead worker. Consecutive failures of the same workflow are counted
 (coordinator-side `workflow_consecutive_failures_cap`, default 5; any success
 of that workflow resets its counter) and stop the loop terminally with
 `stop_reason="workflow_failure_cap"` at the cap.
+`usage` (optional) is the coordinator-model token usage the worker read from
+team-harness's `run.json`; absence means usage is UNKNOWN for the iteration,
+not zero (agent-CLI subprocess usage is never measurable). `duration_s`
+(optional) is the worker-measured harness wall-clock. Both feed the
+session's durable ledger; with configured `model_prices` the ledger drives
+the `max_cost_usd` stop condition (`stop_reason="max_cost_usd"`).
 
 Response: same shape as `/register` response (`action` is either `"run"` or `"stop"`).
 

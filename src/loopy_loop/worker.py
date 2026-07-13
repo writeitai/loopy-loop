@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 import importlib.metadata
+import json
 import os
 from pathlib import Path
 import sys
@@ -19,6 +20,7 @@ from loopy_loop.harness_runner import run_harness_iteration
 from loopy_loop.harness_runner import write_iteration_artifacts
 from loopy_loop.models import FinishedRequest
 from loopy_loop.models import IterationResult
+from loopy_loop.models import IterationUsage
 from loopy_loop.models import RegisterRequest
 from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.models import TaskResponse
@@ -229,6 +231,7 @@ def _run_task(
         repo_root=repo_root,
     )
     fatal_error: str | None = None
+    started = time.monotonic()
     try:
         iteration_result = run_harness_iteration(
             repo_root=repo_root,
@@ -255,7 +258,13 @@ def _run_task(
             harness_run_id="",
         )
     iteration_result = iteration_result.model_copy(
-        update={"attempt_id": task.attempt_id}
+        update={
+            "attempt_id": task.attempt_id,
+            "usage": _read_harness_usage(
+                harness_output_dir=iteration_result.harness_output_dir
+            ),
+            "duration_s": round(time.monotonic() - started, 3),
+        }
     )
     write_iteration_artifacts(
         iteration_dir=iteration_dir,
@@ -270,6 +279,8 @@ def _run_task(
         text=iteration_result.text,
         error=iteration_result.error,
         failure_kind=iteration_result.failure_kind,
+        usage=iteration_result.usage,
+        duration_s=iteration_result.duration_s,
         worker=identity,
         attempt_id=task.attempt_id,
     )
@@ -303,6 +314,54 @@ def _write_pending_finished_request(
 
 def _clear_pending_finished_request(*, path: Path) -> None:
     path.unlink(missing_ok=True)
+
+
+def _read_harness_usage(*, harness_output_dir: str) -> IterationUsage | None:
+    """Sum coordinator-model token usage from team-harness's run.json.
+
+    Returns None (usage UNKNOWN, distinct from zero) when the run produced no
+    record, the record is unreadable, or no turn carries usage — e.g. the
+    codex provider without usage in its responses. Agent-CLI subprocess usage
+    is never included; it is not measurable here.
+    """
+    if not harness_output_dir:
+        return None
+    path = Path(harness_output_dir) / "run.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    turns = record.get("turns")
+    if not isinstance(turns, list):
+        return None
+    prompt_tokens = 0
+    completion_tokens = 0
+    turns_with_usage = 0
+    turns_without_usage = 0
+    for turn in turns:
+        if not isinstance(turn, dict):
+            continue
+        usage = turn.get("usage")
+        if not isinstance(usage, dict) or not usage:
+            turns_without_usage += 1
+            continue
+        try:
+            prompt_tokens += int(usage.get("prompt_tokens") or 0)
+            completion_tokens += int(usage.get("completion_tokens") or 0)
+        except (TypeError, ValueError):
+            turns_without_usage += 1
+            continue
+        turns_with_usage += 1
+    if turns_with_usage == 0:
+        return None
+    return IterationUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        turns=turns_with_usage,
+        turns_without_usage=turns_without_usage,
+    )
 
 
 def _render_prompt(

@@ -248,6 +248,14 @@ Important rules:
   wedged workflow until `max_turns`. Any success of the workflow resets its
   counter. Coordinator-side only; not part of the config snapshot sent to
   the worker.
+- `model_prices` (optional, coordinator-side only) sets USD prices per 1M
+  tokens for the harness coordinator model (`prompt_usd_per_1m`,
+  `completion_usd_per_1m`); with prices set, `loopy status` derives an
+  estimated cost from the token ledger. `max_cost_usd` (optional, requires
+  `model_prices`) stops the loop with `stop_reason="max_cost_usd"` once the
+  session tree's estimated cost reaches the budget. Cost covers the harness
+  COORDINATOR model only — agent-CLI subprocesses (codex, claude, gemini)
+  bill through their own accounts and are not measurable here.
 
 Workflow config lives beside each workflow prompt:
 
@@ -301,8 +309,12 @@ Important session files:
 
 - `goal.md`: the exact goal text copied into the session.
 - `session.json`: session metadata.
-- `state.json`: coordinator-owned dispatch state.
-- `events.jsonl`: reserved append-only diagnostics log.
+- `state.json`: coordinator-owned dispatch state, including the session's
+  token/duration usage ledger.
+- `events.jsonl`: append-only event stream — one versioned JSON line per
+  significant transition (`session_started`, `task_dispatched`,
+  `task_finished`, `iteration_abandoned`, `goal_check`, `child_started`,
+  `child_finished`, `session_stopped`). Tail it with `loopy events --follow`.
 - `control.json`: workflow-owned stop switch.
 - `updates_from_user.md`: human-writable inbox for changes after the session
   starts.
@@ -479,14 +491,19 @@ loopy worker --coordinator http://127.0.0.1:8080
 Runs a blocking worker until the coordinator returns `action: "stop"`.
 
 ```bash
-loopy status
+loopy status           # session stack, usage totals, estimated cost
+loopy status --watch   # re-render every 2 seconds
+loopy events           # the active session's event stream
+loopy events --follow  # tail it live (--json for raw lines)
 loopy stop
 ```
 
-`status` prints the latest session state. `stop` sets `stop_requested=true` in
-the latest session-local state. Both operate on the latest **top-level**
-session: while a child session runs they show/flag the suspended parent, and a
-requested stop takes effect only after the child reaches a terminal state.
+`status` prints the latest session state — the whole session stack while a
+child runs (the live child is shown under its suspended parent), each
+session's subtree token usage, and (with `model_prices` configured) estimated
+cost. `stop` still flags the latest **top-level** session only: a running
+child does not see the flag, and the stop takes effect once the child reaches
+a terminal state and the parent resumes.
 
 ## Related Projects
 

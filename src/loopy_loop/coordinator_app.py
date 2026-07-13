@@ -14,12 +14,15 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from filelock import Timeout as FileLockTimeout
 from pydantic import BaseModel
+from pydantic import ValidationError
 
 from loopy_loop.config import ConfigError
 from loopy_loop.config import derive_goal_hash
+from loopy_loop.config import estimate_cost_usd
 from loopy_loop.config import PreflightResult
 from loopy_loop.config import run_preflight
 from loopy_loop.config import WorkflowDefinition
+from loopy_loop.events import append_events
 from loopy_loop.models import ChildSessionRecord
 from loopy_loop.models import ChildSessionRequest
 from loopy_loop.models import ControlSignal
@@ -31,6 +34,7 @@ from loopy_loop.models import IterationResult
 from loopy_loop.models import LoopState
 from loopy_loop.models import RegisterRequest
 from loopy_loop.models import RootConfigSnapshot
+from loopy_loop.models import SessionUsageTotals
 from loopy_loop.models import STOP_ACTION
 from loopy_loop.models import TaskResponse
 from loopy_loop.models import utc_now
@@ -62,7 +66,39 @@ _COORDINATOR_ONLY_FIELDS = {
     "recovery_policy",
     "recovery_drain_timeout_s",
     "workflow_consecutive_failures_cap",
+    "max_cost_usd",
+    "model_prices",
 }
+
+
+def session_tree_usage_totals(
+    *, repo_root: Path, state: LoopState
+) -> SessionUsageTotals:
+    """The session's own ledger plus its finalized children's recorded totals.
+
+    A RUNNING child's spend is not visible here until it finalizes — the
+    parent is suspended while a child runs, so its own budget checks are not
+    executing anyway; the child enforces the budget against its own subtree
+    in the meantime.
+    """
+    totals = state.usage_totals.model_copy(deep=True)
+    payload = _read_children_payload(
+        path=children_path(repo_root=repo_root, session_id=state.active_session_id)
+    )
+    for record in payload["children"]:
+        usage = record.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        try:
+            child_totals = SessionUsageTotals.model_validate(usage)
+        except ValidationError:
+            continue
+        totals.prompt_tokens += child_totals.prompt_tokens
+        totals.completion_tokens += child_totals.completion_tokens
+        totals.iterations_with_usage += child_totals.iterations_with_usage
+        totals.iterations_without_usage += child_totals.iterations_without_usage
+        totals.duration_s += child_totals.duration_s
+    return totals
 
 
 class WorkerBusyError(RuntimeError):
@@ -148,7 +184,13 @@ class CoordinatorService:
         # on the same thread. Phase-A recovery (the long drain) deliberately
         # runs OUTSIDE this lock on the initial register path.
         self._transition_lock = threading.RLock()
+        # Buffered (session_id, type, payload) events; appended to the
+        # session's events.jsonl AFTER the producing mutation commits
+        # (best-effort — see events.py). Guarded by _transition_lock on
+        # every request path that touches it.
+        self._pending_events: list[tuple[str, str, dict]] = []
         self._prepare_state(resume=resume)
+        self._flush_pending_events()
 
     def register_worker(
         self, *, request: RegisterRequest | None = None
@@ -183,6 +225,32 @@ class CoordinatorService:
             "recovering); retry shortly"
         )
 
+    def _emit(self, session_id: str, event_type: str, payload: dict) -> None:
+        self._pending_events.append((session_id, event_type, payload))
+
+    def _flush_pending_events(self) -> None:
+        buffered, self._pending_events = self._pending_events, []
+        by_session: dict[str, list[tuple[str, dict]]] = {}
+        for session_id, event_type, payload in buffered:
+            by_session.setdefault(session_id, []).append((event_type, payload))
+        for session_id, items in by_session.items():
+            try:
+                append_events(
+                    repo_root=self.repo_root, session_id=session_id, events=items
+                )
+            except OSError:
+                logger.warning(
+                    "failed to append events for session %s", session_id, exc_info=True
+                )
+
+    def _emit_stop_transition(self, *, state: LoopState, was_terminal: bool) -> None:
+        if not was_terminal and self.state_store.is_terminal_state(state=state):
+            self._emit(
+                state.active_session_id,
+                "session_stopped",
+                {"status": state.status, "stop_reason": state.stop_reason},
+            )
+
     def _plan_orphan_recovery(self) -> tuple[CurrentTask, RecoveryOutcome] | None:
         """Phase A: inspect state and, if needed, drain/reap OUTSIDE the lock.
 
@@ -212,6 +280,7 @@ class CoordinatorService:
 
         def mutator(state: LoopState | None) -> tuple[LoopState, TaskResponse | None]:
             current = _require_state(state=state)
+            was_terminal = self.state_store.is_terminal_state(state=current)
             now = utc_now()
 
             # Step 3: If current_task is set (crash recovery from previous worker crash),
@@ -260,6 +329,17 @@ class CoordinatorService:
                     self._track_workflow_failure_cap(
                         state=current, workflow_id=orphaned.workflow_id, success=False
                     )
+                    current.usage_totals.iterations_without_usage += 1
+                    self._emit(
+                        current.active_session_id,
+                        "iteration_abandoned",
+                        {
+                            "workflow_id": orphaned.workflow_id,
+                            "iteration": orphaned.iteration,
+                            "attempt_id": orphaned.attempt_id,
+                            "error": error,
+                        },
+                    )
                     current.iteration_count += 1
                     current.current_task = None
                 else:
@@ -269,9 +349,20 @@ class CoordinatorService:
                     return current, None
 
             # Step 4+: stop conditions, child dispatch, next workflow.
-            return current, self._advance(state=current, caller=caller, now=now)
+            response = self._advance(state=current, caller=caller, now=now)
+            self._emit_stop_transition(state=current, was_terminal=was_terminal)
+            return current, response
 
-        response = self.state_store.mutate(mutator)
+        checkpoint = len(self._pending_events)
+        try:
+            response = self.state_store.mutate(mutator)
+        except BaseException:
+            # Drop only THIS mutation's events: earlier buffered events (e.g.
+            # a child_finished whose children.json write already committed)
+            # must survive to the next flush.
+            del self._pending_events[checkpoint:]
+            raise
+        self._flush_pending_events()
         for path in recovered_pending_paths:
             path.unlink(missing_ok=True)
         return response
@@ -348,8 +439,27 @@ class CoordinatorService:
             worker=caller,
             attempt_id=_new_attempt_id(),
         )
+        self._emit_task_dispatched(
+            session_id=state.active_session_id, task=state.current_task
+        )
         return _build_run_response(
             current_task=state.current_task, config_snapshot=state.config_snapshot
+        )
+
+    def _emit_task_dispatched(self, *, session_id: str, task: CurrentTask) -> None:
+        self._emit(
+            session_id,
+            "task_dispatched",
+            {
+                "workflow_id": task.workflow_id,
+                "iteration": task.iteration,
+                "attempt_id": task.attempt_id,
+                "worker": (
+                    {"hostname": task.worker.hostname, "pid": task.worker.pid}
+                    if task.worker is not None
+                    else None
+                ),
+            },
         )
 
     def _raise_if_worker_alive(self, *, current_task: CurrentTask) -> None:
@@ -375,12 +485,17 @@ class CoordinatorService:
 
         def mutator(state: LoopState | None) -> tuple[LoopState, TaskResponse]:
             current = _require_state(state=state)
+            was_terminal = self.state_store.is_terminal_state(state=current)
             now = utc_now()
+
+            def finish(response: TaskResponse) -> tuple[LoopState, TaskResponse]:
+                self._emit_stop_transition(state=current, was_terminal=was_terminal)
+                return current, response
 
             # Step 3: No active task — stale call. Dispatch as if /register was called.
             # This handles the post-crash stale retry scenario safely.
             if current.current_task is None:
-                return current, self._advance(state=current, caller=caller, now=now)
+                return finish(self._advance(state=current, caller=caller, now=now))
 
             # Step 4: Mismatch check — stale call for a different task.
             # Do NOT mutate state; return the current task's run response so the
@@ -427,8 +542,10 @@ class CoordinatorService:
                         f"to worker pid={active.worker.pid} on "
                         f"{active.worker.hostname}"
                     )
-                return current, _build_run_response(
-                    current_task=active, config_snapshot=current.config_snapshot
+                return finish(
+                    _build_run_response(
+                        current_task=active, config_snapshot=current.config_snapshot
+                    )
                 )
 
             # Step 5: Match confirmed — process result.
@@ -438,14 +555,20 @@ class CoordinatorService:
 
             # Step 6: Special cases that stop immediately.
             if current.stop_reason == "goal_check_broken":
-                return current, TaskResponse(
-                    action=STOP_ACTION, stop_reason="goal_check_broken"
+                return finish(
+                    TaskResponse(action=STOP_ACTION, stop_reason="goal_check_broken")
                 )
 
             # Step 7+: stop conditions, child dispatch, next workflow.
-            return current, self._advance(state=current, caller=caller, now=now)
+            return finish(self._advance(state=current, caller=caller, now=now))
 
-        response = self.state_store.mutate(mutator)
+        checkpoint = len(self._pending_events)
+        try:
+            response = self.state_store.mutate(mutator)
+        except BaseException:
+            del self._pending_events[checkpoint:]
+            raise
+        self._flush_pending_events()
         if response.action == STOP_ACTION:
             parent_response = self._resume_parent_if_active_child_completed(
                 caller=caller
@@ -478,6 +601,11 @@ class CoordinatorService:
                 error = "invalid_goal_check_output"
                 failure_kind = "unknown"
                 state.goal_check_consecutive_failures += 1
+                self._emit(
+                    state.active_session_id,
+                    "goal_check",
+                    {"valid": False, "iteration": active.iteration},
+                )
                 if (
                     state.goal_check_consecutive_failures
                     >= state.config_snapshot.goal_check_consecutive_failures_cap
@@ -486,6 +614,16 @@ class CoordinatorService:
                     state.status = "failed"
             else:
                 state.goal_check_consecutive_failures = 0
+                self._emit(
+                    state.active_session_id,
+                    "goal_check",
+                    {
+                        "valid": True,
+                        "goal_met": goal_signal.goal_met,
+                        "reason": goal_signal.reason,
+                        "iteration": active.iteration,
+                    },
+                )
 
         if state.stop_reason != "goal_check_broken":
             self._apply_session_control(state=state)
@@ -509,6 +647,41 @@ class CoordinatorService:
         )
         self._track_workflow_failure_cap(
             state=state, workflow_id=active.workflow_id, success=success
+        )
+        totals = state.usage_totals
+        if request.usage is not None:
+            totals.prompt_tokens += request.usage.prompt_tokens
+            totals.completion_tokens += request.usage.completion_tokens
+            # "with usage" means FULLY measured: a run where some coordinator
+            # turns carried no usage record keeps its measured subtotal but
+            # counts as not-fully-known, so a cost budget's blind spot stays
+            # visible instead of masquerading as complete accounting.
+            if request.usage.turns_without_usage == 0:
+                totals.iterations_with_usage += 1
+            else:
+                totals.iterations_without_usage += 1
+        else:
+            totals.iterations_without_usage += 1
+        if request.duration_s:
+            totals.duration_s += request.duration_s
+        self._emit(
+            state.active_session_id,
+            "task_finished",
+            {
+                "workflow_id": active.workflow_id,
+                "iteration": active.iteration,
+                "attempt_id": active.attempt_id,
+                "success": success,
+                "error": error,
+                "failure_kind": failure_kind,
+                "prompt_tokens": (
+                    request.usage.prompt_tokens if request.usage else None
+                ),
+                "completion_tokens": (
+                    request.usage.completion_tokens if request.usage else None
+                ),
+                "duration_s": request.duration_s,
+            },
         )
         state.iteration_count += 1
         state.current_task = None
@@ -611,6 +784,8 @@ class CoordinatorService:
                 error=result.error,
                 attempt_id=result.attempt_id,
                 failure_kind=result.failure_kind,
+                usage=result.usage,
+                duration_s=result.duration_s,
             ),
             None,
         )
@@ -807,6 +982,16 @@ class CoordinatorService:
             config_snapshot=snapshot,
         )
         self.state_store.write_state(state=state)
+        self._emit(
+            session_id,
+            "session_started",
+            {
+                "goal_hash": self.preflight.root_config.goal_hash,
+                "workflow_set": self.preflight.workflow_set,
+                "max_turns": self.preflight.root_config.max_turns,
+            },
+        )
+        self._flush_pending_events()
 
     def _preflight_for(
         self, *, workflow_set: str, goal: str | None = None
@@ -942,6 +1127,24 @@ class CoordinatorService:
             child_task = child_state.current_task
             if child_task is None:
                 raise RuntimeError("Child session was created without a task")
+            self._emit(
+                state.active_session_id,
+                "child_started",
+                {
+                    "child_session_id": child_session_id,
+                    "workflow_set": request.workflow_set,
+                    "request_file": request_path.name,
+                },
+            )
+            self._emit(
+                child_session_id,
+                "session_started",
+                {
+                    "workflow_set": request.workflow_set,
+                    "parent_session_id": state.active_session_id,
+                },
+            )
+            self._emit_task_dispatched(session_id=child_session_id, task=child_task)
             # The durable session-stack pointer: committed with the parent
             # state when this mutator returns, so a restarted coordinator can
             # walk parent -> child instead of resuming the parent and
@@ -1049,8 +1252,10 @@ class CoordinatorService:
             repo_root=self.repo_root, session_id=child_state.parent_session_id
         )
         payload = _read_children_payload(path=path)
+        first_finalization = False
         for record in payload["children"]:
             if record.get("session_id") == child_state.active_session_id:
+                first_finalization = record.get("status") in {"running", "dispatching"}
                 record["status"] = child_state.status
                 if not record.get("completed_at"):
                     # Idempotent for audit: keep the FIRST observed completion
@@ -1059,8 +1264,25 @@ class CoordinatorService:
                         utc_now().isoformat().replace("+00:00", "Z")
                     )
                 record["stop_reason"] = child_state.stop_reason
+                if record.get("usage") is None:
+                    # The child's whole-tree totals, so the parent's tree sum
+                    # stays correct without recursing at read time.
+                    record["usage"] = session_tree_usage_totals(
+                        repo_root=self.repo_root, state=child_state
+                    ).model_dump()
                 break
         write_json_atomic(path=path, payload=payload)
+        if first_finalization:
+            self._emit(
+                child_state.parent_session_id,
+                "child_finished",
+                {
+                    "child_session_id": child_state.active_session_id,
+                    "status": child_state.status,
+                    "stop_reason": child_state.stop_reason,
+                },
+            )
+            self._flush_pending_events()
 
     def _apply_stop_precedence(self, *, state: LoopState) -> str | None:
         if state.goal_met:
@@ -1082,6 +1304,18 @@ class CoordinatorService:
             state.status = "max_turns"
             state.stop_reason = "max_turns"
             return "max_turns"
+        budget = self.preflight.root_config.max_cost_usd
+        if budget is not None and state.status == "running":
+            totals = session_tree_usage_totals(repo_root=self.repo_root, state=state)
+            cost = estimate_cost_usd(
+                prompt_tokens=totals.prompt_tokens,
+                completion_tokens=totals.completion_tokens,
+                prices=self.preflight.root_config.model_prices,
+            )
+            if cost is not None and cost >= budget:
+                state.status = "stopped"
+                state.stop_reason = "max_cost_usd"
+                return "max_cost_usd"
         if state.status in {"stopped", "goal_met", "failed", "max_turns"}:
             return state.stop_reason or state.status
         return None

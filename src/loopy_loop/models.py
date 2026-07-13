@@ -30,6 +30,38 @@ STOP_ACTION = "stop"
 FailureKind = Literal["transient", "deterministic", "crash", "unknown"]
 
 
+class IterationUsage(BaseModel):
+    """Coordinator-model token usage for one iteration (P1.1).
+
+    Read by the worker from team-harness's run.json (per-turn usage records).
+    Covers the harness COORDINATOR model only: agent-CLI subprocesses (codex,
+    claude, gemini) bill through their own accounts and are not measurable
+    here — absence of this object means usage is unknown, not zero.
+    """
+
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    turns: int = Field(default=0, ge=0)
+    # Coordinator turns whose response carried no usage record: non-zero means
+    # the token subtotal above is a lower bound, not complete accounting.
+    turns_without_usage: int = Field(default=0, ge=0)
+
+
+class SessionUsageTotals(BaseModel):
+    """Durable per-session usage ledger (own iterations only).
+
+    Child sessions' totals are recorded on their children.json records at
+    finalization; tree-wide numbers are derived by summing, never double-
+    stored.
+    """
+
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    iterations_with_usage: int = Field(default=0, ge=0)
+    iterations_without_usage: int = Field(default=0, ge=0)
+    duration_s: float = Field(default=0.0, ge=0)
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC).replace(microsecond=0)
 
@@ -134,6 +166,7 @@ class LoopState(BaseModel):
     # stops with stop_reason="workflow_failure_cap" instead of burning the
     # remaining turn budget on a wedged workflow.
     workflow_consecutive_failures: dict[str, int] = Field(default_factory=dict)
+    usage_totals: SessionUsageTotals = Field(default_factory=SessionUsageTotals)
     # The durable session-stack pointer: while a child session is active, the
     # parent records WHICH child, so a restarted coordinator can walk the
     # chain to the deepest non-terminal session instead of silently resuming
@@ -142,6 +175,21 @@ class LoopState(BaseModel):
     current_task: CurrentTask | None = Field(default=None)
     history: list[HistoryEntry] = Field(default_factory=list)
     config_snapshot: RootConfigSnapshot = Field(...)
+
+    @model_validator(mode="after")
+    def reconcile_usage_ledger(self) -> Self:
+        """Self-heal a ledger that predates it (pre-P1.1 resumed sessions).
+
+        Iterations completed before the ledger existed have unknown usage;
+        without this, a resumed session reports zero unknown iterations and a
+        newly configured max_cost_usd silently treats all prior spend as
+        zero. Idempotent: counted iterations are never reclassified.
+        """
+        totals = self.usage_totals
+        counted = totals.iterations_with_usage + totals.iterations_without_usage
+        if counted < self.iteration_count:
+            totals.iterations_without_usage += self.iteration_count - counted
+        return self
 
 
 class FinishedRequest(BaseModel):
@@ -158,6 +206,8 @@ class FinishedRequest(BaseModel):
     # /finished from a superseded attempt of the same coordinates.
     attempt_id: str | None = Field(default=None)
     failure_kind: FailureKind | None = Field(default=None)
+    usage: IterationUsage | None = Field(default=None)
+    duration_s: float | None = Field(default=None, ge=0)
 
 
 class ControlSignal(BaseModel):
@@ -194,6 +244,8 @@ class IterationResult(BaseModel):
     error: str | None = Field(default=None)
     error_detail: dict[str, object] | None = Field(default=None)
     failure_kind: FailureKind | None = Field(default=None)
+    usage: IterationUsage | None = Field(default=None)
+    duration_s: float | None = Field(default=None, ge=0)
     harness_run_id: str = Field(default="")
     harness_output_dir: str = Field(default="")
     # Attempt provenance: without it, a stale result.json could complete a

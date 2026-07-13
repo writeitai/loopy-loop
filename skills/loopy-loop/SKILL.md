@@ -123,6 +123,12 @@ team_harness_system_prompt_extension: ""
 # recovery_drain_timeout_s: 600.0
 # Per-workflow circuit breaker (coordinator-side, not sent to workers):
 # workflow_consecutive_failures_cap: 5
+# Optional cost budget (coordinator-side; prices are USD per 1M tokens for
+# the harness coordinator model — agent-CLI spend is not measurable):
+# model_prices:
+#   prompt_usd_per_1m: 2.5
+#   completion_usd_per_1m: 10.0
+# max_cost_usd: 50.0
 ```
 
 Constraints:
@@ -469,9 +475,18 @@ to kill that process and register again.
 ## Monitor and Stop
 
 ```bash
-loopy status   # status, session id, iteration count, current task, stop reason
-loopy stop     # sets stop_requested=true; the worker stops after its next /finished
+loopy status          # session stack, usage totals, estimated cost
+loopy status --watch  # re-render every 2 seconds
+loopy events          # the deepest active session's event stream
+loopy events --follow # tail it live (--json for raw JSON lines)
+loopy stop            # sets stop_requested=true; honored after the next /finished
 ```
+
+`status` walks the durable session stack: while a child runs it shows the
+live child under the suspended parent. Every session also has an append-only
+`events.jsonl` (`session_started`, `task_dispatched`, `task_finished`,
+`child_started`, `child_finished`, `session_stopped`, ...) — the operational
+legibility stream (best-effort; the durable truth stays in state.json).
 
 Both commands print a friendly error and exit if the coordinator holds the
 state lock mid-request — retry shortly.
