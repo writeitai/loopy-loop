@@ -444,7 +444,8 @@ loopy init [--template default|inner_outer_eval|pm_planner_dispatcher]
 Scaffolds loopy-loop files. The default template creates only the reserved
 `goal_check` workflow. `inner_outer_eval` creates the recommended outer/inner/eval
 workflow set. `pm_planner_dispatcher` creates planner/dispatcher workflows for
-child-session orchestration.
+child-session orchestration — and also ships the `inner_outer_eval` child set
+its dispatcher spawns, so a clean init is executable end to end.
 
 ```bash
 loopy coordinator --host 0.0.0.0 --port 8080 [--resume] [--workflow-set NAME] [--goal-file PATH]
