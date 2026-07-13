@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (breaking)
+
+**Breaking API interaction — completions must echo the dispatched
+`attempt_id`.** Every dispatched task now carries an `attempt_id` that the
+worker must echo on `/finished`; a completion without the live task's attempt
+is treated as stale (this is what fences superseded work). A 0.3.0 worker
+therefore cannot complete tasks against a 0.4.0 coordinator — upgrade workers
+and coordinator together (they normally ship in the same install).
 
 - **Durable session-stack recovery (P0.1).** While a child session runs, the
   parent's `state.json` records `active_child_session_id`; on `--resume` the
