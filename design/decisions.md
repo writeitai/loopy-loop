@@ -239,3 +239,44 @@ deterministic check over the diff — consistent with D4's boundary (set-owned, 
 agent-authored) — whose failure blocks the session's goal check until the write is undone.
 The accepted cost: a violating action can occur and must be detected and repaired after the
 fact; that inefficiency buys inspectability and reversibility of the constraint itself.
+
+## D9. Coordinators are uniformly strong; worker model choice is per-spawn, prompt-guided, and audited — never enforced
+
+**Decision.** Every harness coordinator in a session tree — the root PM loop, child
+implementation loops, any deeper level — runs the **same strong coordinator model**
+(`team_harness_model`, one value per repo). Cost control comes from the **workers**:
+the root config may declare **named model tiers** (`model_tiers`: tier name → agent →
+`{model, effort}`), and each coordinator chooses a tier per spawned agent via
+team-harness's per-spawn `spawn_agent(model=…, effort=…)` overrides. Tier selection is
+**guidance rendered into the system prompt plus an audit trail** (team-harness records
+requested/effective model and effort per agent in `run.json`) — the engine never
+validates or blocks a coordinator's model choice (D8). With `default_tier` set, the
+named tier *derives* `team_harness_agent_models` / `team_harness_agent_reasoning_efforts`
+(setting both is a config error), so a model id lives in exactly one place.
+
+**Context.** The obvious alternative — differentiating whole sessions ("strong parent
+session, cheap child session", per-session execution profiles carried on
+`ChildSessionRequest`) — was analyzed (July 2026) and rejected for now, consistent with
+the withdrawal of P0.3. Uniform strong coordinators dissolve that design's two hardest
+problems at once: the cost ledger stays correct (loopy only meters the coordinator
+model, so one repo-global `model_prices` remains valid), and a child's planning/eval
+reasoning is never downgraded along with its implementation muscle (the D4 concern of a
+weak session judging its own work). The coordinator context is also cheaper than it
+looks: it orchestrates on bounded log tails and status polls while worker CLIs — billed
+to their own accounts — chew the bulk tokens. Tier names are deliberately
+capability-semantic bundles of model + effort ("strong", "economy"), not raw
+model-id/effort axes, so prompts reason about one word and model churn stays a one-line
+config edit (the P2.1 drift concern).
+
+**Consequences.** Workflow prompts should name **tiers**, never model ids; the rendered
+guidance block (`render_model_tier_guidance`, `config.py`) is the only place tiers
+expand to models. Adherence is probabilistic by design: a coordinator can forget to
+escalate a review — the remedy is the audit trail (an outer reviewer or an eval check
+verifies `requested_model`/`effective_model` on the child's agent records), never an
+engine fence (D8). Do not add per-session/per-depth model allowlists, "children may not
+request expensive tiers" vetoes, or coordinator-model differentiation per loop level; if
+per-session coordinator profiles ever become genuinely needed, they compose with tiers
+(profiles set session defaults, tiers guide per-spawn choice) and require amending this
+decision. Effort-as-spawn-argument lives in team-harness (>0.3.0); on older versions the
+tier guidance still works for `model`, and effort escalation falls back to raw CLI
+`flags`.

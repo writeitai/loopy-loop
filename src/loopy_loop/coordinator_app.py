@@ -68,6 +68,11 @@ _COORDINATOR_ONLY_FIELDS = {
     "workflow_consecutive_failures_cap",
     "max_cost_usd",
     "model_prices",
+    # Tier declarations resolve at config load into the existing snapshot
+    # fields (agent models/efforts + system prompt extension); the raw
+    # declarations themselves stay coordinator-side.
+    "model_tiers",
+    "default_tier",
 }
 
 

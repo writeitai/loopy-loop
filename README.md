@@ -231,6 +231,25 @@ Important rules:
 - `max_turns` is the maximum number of completed workflow iterations.
 - `team_harness_model` controls the team-harness coordinator model.
 - `team_harness_agent_models` controls default models for worker subprocesses.
+- `model_tiers` (optional) declares named worker tiers — tier name → agent →
+  `{model, effort}` — as the single source of truth for model ids. Loopy
+  renders the table into the harness system prompt so coordinators can pass
+  `spawn_agent(model=…, effort=…)` to move one task to a different tier
+  (guidance, not enforcement — see D8/D9 in `design/decisions.md`). With
+  `default_tier` set, the named tier derives `team_harness_agent_models` and
+  `team_harness_agent_reasoning_efforts`; setting those explicitly alongside
+  `default_tier` is a config error.
+
+  ```yaml
+  model_tiers:
+    strong:
+      codex: {model: "gpt-5.6-sol", effort: "xhigh"}
+      claude: {model: "claude-fable-5", effort: "max"}
+    economy:
+      codex: {model: "gpt-5.6-terra", effort: "low"}
+      claude: {model: "claude-haiku-4-5"}
+  default_tier: "economy"
+  ```
 - `team_harness_api_base` is normalized by loopy-loop: trailing slash stripped,
   `/v1` appended when missing.
 - `team_harness_max_retries`, `team_harness_retry_base_delay_s`, and

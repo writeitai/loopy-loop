@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Named model tiers (`model_tiers` + `default_tier`).** The root config can
+  declare worker-model tiers once — tier name → agent → `{model, effort}` —
+  and loopy renders the table into the harness system prompt so coordinators
+  choose a tier per spawned agent (`spawn_agent(model=…, effort=…)`; the
+  `effort` argument needs team-harness > 0.3.0). `default_tier` derives the
+  per-agent spawn defaults (`team_harness_agent_models` /
+  `team_harness_agent_reasoning_efforts`) from the named tier and rejects
+  explicit duplicates, so model ids stay a one-line config edit. Tier choice
+  is guidance with an audit trail, never enforcement (D8/D9); the raw tier
+  declarations stay coordinator-side and never enter the wire snapshot.
+
 ## 0.5.0
 
 - **events.jsonl is now written (P1.1).** The coordinator appends one
