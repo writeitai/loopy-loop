@@ -236,9 +236,10 @@ Important rules:
   ids. Loopy renders the table into the harness system prompt so coordinators
   can pass `spawn_agent(model=…)` to move one task to a different tier
   (guidance, not enforcement — see D8/D9 in `design/decisions.md`). The
-  per-spawn `effort` argument needs team-harness newer than 0.3.0; on older
-  versions the rendered guidance points coordinators at the CLI's own
-  reasoning-effort flag via `flags`. With `default_tier` set, the named tier
+  per-spawn `effort` argument needs team-harness >= 0.4.0 (the minimum
+  dependency since loopy 0.6.0); on older installed versions the rendered
+  guidance points coordinators at the CLI's own reasoning-effort flag via
+  `flags`. With `default_tier` set, the named tier
   derives `team_harness_agent_models` and
   `team_harness_agent_reasoning_efforts` (the tier must cover every
   configured agent); setting those mappings explicitly alongside
