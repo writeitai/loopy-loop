@@ -1055,3 +1055,70 @@ def test_resume_reuses_in_progress_session(repo_builder: Any, monkeypatch: Any) 
     assert resumed_state.active_session_id == original_session_id
     assert register_response["session_id"] == original_session_id
     assert list((repo_root / ".loopy_loop").glob("state.json.archive_*.json")) == []
+
+
+def test_child_snapshot_inherits_parent_config_despite_yaml_edit(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    """A child session must run under the PARENT's frozen execution config
+    (P0.3/D9): a mid-session edit of loopy_loop_config.yaml must not leak a
+    different model into the child's snapshot."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    child_workflow_dir = (
+        repo_root
+        / ".loopy_loop"
+        / "workflow_sets"
+        / "child_set"
+        / "workflows"
+        / "child_work"
+    )
+    child_workflow_dir.mkdir(parents=True)
+    child_workflow_dir.joinpath("prompt.txt").write_text("Child.", encoding="utf-8")
+    child_workflow_dir.joinpath("config.yaml").write_text(
+        "enabled: true\n", encoding="utf-8"
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+
+    parent_task = client.post("/register", json=REGISTER_BODY).json()
+    assert parent_task["config_snapshot"]["team_harness_model"] == "gpt-5.5"
+
+    config_path = repo_root / "loopy_loop_config.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "team_harness_model: gpt-5.5", "team_harness_model: mutated-model"
+        ),
+        encoding="utf-8",
+    )
+    child_requests_dir_path(
+        repo_root=repo_root, session_id=parent_task["session_id"]
+    ).joinpath("child.json").write_text(
+        json.dumps(
+            {
+                "workflow_set": "child_set",
+                "goal": "Focused child goal.",
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    child_task = client.post(
+        "/finished",
+        json={
+            "workflow_id": parent_task["workflow_id"],
+            "session_id": parent_task["session_id"],
+            "iteration": parent_task["iteration"],
+            "attempt_id": parent_task.get("attempt_id"),
+            "success": True,
+            "text": "parent planned child",
+            "error": None,
+        },
+    ).json()
+
+    assert child_task["action"] == "run"
+    snapshot = child_task["config_snapshot"]
+    assert snapshot["team_harness_model"] == "gpt-5.5"
+    assert snapshot["goal"] == "Focused child goal."
+    assert snapshot["workflow_set"] == "child_set"
+    assert snapshot["goal_hash"] != parent_task["config_snapshot"]["goal_hash"]

@@ -379,3 +379,192 @@ def test_unknown_workflow_config_field_rejected(repo_builder: Any) -> None:
 
     with pytest.raises(ConfigError, match="unknown_key"):
         load_workflow_definitions(repo_root=repo_root, workflow_set="main")
+
+
+_TIER_CONFIG: dict[str, Any] = {
+    "team_harness_agents": ["codex", "claude"],
+    "model_tiers": {
+        "strong": {
+            "codex": {"model": "gpt-5.6-sol", "effort": "high"},
+            "claude": {"model": "claude-fable-5"},
+        },
+        "economy": {
+            "codex": {"model": "gpt-5.6-terra", "effort": "low"},
+            "claude": {"model": "claude-haiku-4-5", "effort": "medium"},
+        },
+    },
+}
+
+
+def test_default_tier_derives_agent_models_and_efforts(repo_builder: Any) -> None:
+    repo_root = repo_builder(root_config={**_TIER_CONFIG, "default_tier": "economy"})
+
+    root_config = load_root_config(repo_root=repo_root)
+
+    assert root_config.team_harness_agent_models == {
+        "codex": "gpt-5.6-terra",
+        "claude": "claude-haiku-4-5",
+    }
+    assert root_config.team_harness_agent_reasoning_efforts == {
+        "codex": "low",
+        "claude": "medium",
+    }
+
+
+def test_model_tiers_render_guidance_into_prompt_extension(repo_builder: Any) -> None:
+    repo_root = repo_builder(root_config={**_TIER_CONFIG, "default_tier": "economy"})
+
+    root_config = load_root_config(repo_root=repo_root)
+    extension = root_config.team_harness_system_prompt_extension
+
+    assert "Model tier policy:" in extension
+    assert "- strong: codex model=gpt-5.6-sol effort=high; " in extension
+    assert "claude model=claude-fable-5" in extension
+    assert "Default tier: economy" in extension
+
+
+def test_model_tiers_guidance_appends_after_existing_extension(
+    repo_builder: Any,
+) -> None:
+    repo_root = repo_builder(
+        root_config={
+            **_TIER_CONFIG,
+            "team_harness_system_prompt_extension": "House rule: keep PRs small.",
+        }
+    )
+
+    root_config = load_root_config(repo_root=repo_root)
+    extension = root_config.team_harness_system_prompt_extension
+
+    assert extension.startswith("House rule: keep PRs small.")
+    assert "Model tier policy:" in extension
+
+
+def test_model_tiers_without_default_tier_keep_agent_models_unchanged(
+    repo_builder: Any,
+) -> None:
+    repo_root = repo_builder(root_config=dict(_TIER_CONFIG))
+
+    root_config = load_root_config(repo_root=repo_root)
+
+    assert root_config.team_harness_agent_models == {}
+    assert root_config.team_harness_agent_reasoning_efforts == {}
+    assert "Model tier policy:" in root_config.team_harness_system_prompt_extension
+    assert "Default tier" not in root_config.team_harness_system_prompt_extension
+
+
+def test_unknown_default_tier_rejected(repo_builder: Any) -> None:
+    repo_root = repo_builder(root_config={**_TIER_CONFIG, "default_tier": "turbo"})
+
+    with pytest.raises(ConfigError, match="default_tier 'turbo'"):
+        load_root_config(repo_root=repo_root)
+
+
+def test_default_tier_conflicts_with_explicit_agent_models(repo_builder: Any) -> None:
+    repo_root = repo_builder(
+        root_config={
+            **_TIER_CONFIG,
+            "default_tier": "economy",
+            "team_harness_agent_models": {"codex": "gpt-5.5"},
+        }
+    )
+
+    with pytest.raises(ConfigError, match="one source of truth"):
+        load_root_config(repo_root=repo_root)
+
+
+def test_model_tiers_reject_agents_missing_from_team_harness_agents(
+    repo_builder: Any,
+) -> None:
+    repo_root = repo_builder(
+        root_config={
+            "team_harness_agents": ["codex"],
+            "model_tiers": {"strong": {"gemini": {"model": "gemini-3.5-pro"}}},
+        }
+    )
+
+    with pytest.raises(ConfigError, match="missing from"):
+        load_root_config(repo_root=repo_root)
+
+
+def test_model_tiers_reject_empty_tier_and_empty_model(repo_builder: Any) -> None:
+    repo_root = repo_builder(root_config={"model_tiers": {"strong": {}}})
+    with pytest.raises(ConfigError, match="must not be empty"):
+        load_root_config(repo_root=repo_root)
+
+    repo_root = repo_builder(
+        root_config={"model_tiers": {"strong": {"codex": {"model": "  "}}}}
+    )
+    with pytest.raises(ConfigError, match="model must not be empty"):
+        load_root_config(repo_root=repo_root)
+
+
+def test_model_tiers_stay_out_of_wire_snapshot(repo_builder: Any) -> None:
+    from loopy_loop.coordinator_app import _COORDINATOR_ONLY_FIELDS
+    from loopy_loop.models import RootConfigSnapshot
+
+    repo_root = repo_builder(root_config={**_TIER_CONFIG, "default_tier": "economy"})
+    root_config = load_root_config(repo_root=repo_root)
+
+    snapshot = RootConfigSnapshot.model_validate(
+        root_config.model_dump(exclude=_COORDINATOR_ONLY_FIELDS)
+    )
+
+    assert snapshot.team_harness_agent_models == {
+        "codex": "gpt-5.6-terra",
+        "claude": "claude-haiku-4-5",
+    }
+    assert "Model tier policy:" in snapshot.team_harness_system_prompt_extension
+    assert "model_tiers" not in snapshot.model_dump()
+
+
+def test_run_preflight_accepts_resolved_default_tier(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    """Regression: PreflightResult re-validates its nested RootConfig, so the
+    resolved config (default_tier + DERIVED mappings) must satisfy its own
+    validators."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder(root_config={**_TIER_CONFIG, "default_tier": "economy"})
+
+    preflight = run_preflight(repo_root=repo_root)
+
+    assert preflight.root_config.team_harness_agent_models == {
+        "codex": "gpt-5.6-terra",
+        "claude": "claude-haiku-4-5",
+    }
+
+
+def test_default_tier_must_cover_all_agents(repo_builder: Any) -> None:
+    repo_root = repo_builder(
+        root_config={
+            "team_harness_agents": ["codex", "claude", "gemini"],
+            "model_tiers": {"economy": {"codex": {"model": "gpt-5.6-terra"}}},
+            "default_tier": "economy",
+        }
+    )
+
+    with pytest.raises(ConfigError, match="missing: \\['claude', 'gemini'\\]"):
+        load_root_config(repo_root=repo_root)
+
+
+def test_model_tiers_reject_multiline_values(repo_builder: Any) -> None:
+    repo_root = repo_builder(
+        root_config={
+            "model_tiers": {
+                "strong": {"codex": {"model": "gpt-5.6-sol\n- injected: bullet"}}
+            }
+        }
+    )
+
+    with pytest.raises(ConfigError, match="single line"):
+        load_root_config(repo_root=repo_root)
+
+
+def test_model_tiers_reject_wrong_shape(repo_builder: Any) -> None:
+    repo_root = repo_builder(
+        root_config={"model_tiers": {"strong": {"codex": "gpt-5.6-sol"}}}
+    )
+
+    with pytest.raises(ConfigError):
+        load_root_config(repo_root=repo_root)

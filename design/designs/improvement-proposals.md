@@ -281,7 +281,22 @@ optional-extra design; one less install mode to document), and the worker append
 the scripts directory that actually holds the installed `eval-banana` script
 (derived from the package's install record, `sysconfig` as fallback) to `PATH` so
 the CLI resolves for spawned agents across supported install modes (`uv tool
-install` and pipx expose only the primary package's entry points). Named profiles and trio pinning remain **Proposed**.
+install` and pipx expose only the primary package's entry points).
+
+The named-profiles piece landed in a deliberately smaller form (2026-07-14):
+**named model tiers** (`model_tiers` + `default_tier` in the root config, see
+D9). Tiers address the drift concern *within a project's config* — a repo that
+opts in declares each model id once and its workflow prompts refer to tier
+names only — but they scope the vocabulary to *worker* models chosen per
+spawn, not full per-session execution profiles (provider/API/prices), because
+coordinators stay uniformly strong by policy (D9) and so never need
+per-session differentiation. The other half of the original concern — the
+model ids hardcoded in loopy's own shipped defaults (`config.py`/`cli.py`
+constants, packaged template YAML, README examples) — is NOT resolved: the
+stock templates still carry explicit ids and only include tiers as a commented
+example. If per-session coordinator profiles ever become a real need, they
+compose with tiers rather than replacing them. Trio pinning remains
+**Proposed**.
 
 ### P2.2 — `_advance()` refactor, folded into the P0.1 state-machine work
 

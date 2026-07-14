@@ -53,6 +53,46 @@ class ModelPrices(BaseModel):
     completion_usd_per_1m: float = Field(ge=0)
 
 
+class ModelTierSpec(BaseModel):
+    """One agent's model/effort bundle inside a named tier.
+
+    A tier bundles model and effort deliberately (instead of exposing them as
+    independent axes) so workflow prompts and harness coordinators reason
+    about one word — "economy", "strong" — not a model x effort grid.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = Field(description="Worker CLI model id for this agent.")
+    effort: str | None = Field(
+        default=None,
+        description=(
+            "Optional reasoning-effort level for this agent. Only agents "
+            "whose CLI exposes a reasoning-effort flag will use it."
+        ),
+    )
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("model must not be empty")
+        if "\n" in value:
+            raise ValueError("model must be a single line")
+        return value
+
+    @field_validator("effort")
+    @classmethod
+    def validate_effort(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if not value.strip():
+            raise ValueError("effort must not be empty when set")
+        if "\n" in value:
+            raise ValueError("effort must be a single line")
+        return value
+
+
 class RootConfig(BaseModel):
     """Repo-level loop configuration loaded from loopy_loop_config.yaml."""
 
@@ -114,6 +154,25 @@ class RootConfig(BaseModel):
             "Per-agent reasoning-effort overrides passed to team-harness, keyed "
             "by agent name. Only agents whose templates support a reasoning "
             "effort flag will use this value."
+        ),
+    )
+    model_tiers: dict[str, dict[str, ModelTierSpec]] = Field(
+        default_factory=dict,
+        description=(
+            "Named worker-model tiers (tier name -> agent name -> "
+            "{model, effort}). Declared once here as the single source of "
+            "truth for model ids; rendered into the harness system prompt so "
+            "coordinators can pick a tier per spawned agent. Coordinator-side "
+            "only; resolved into concrete fields at config load."
+        ),
+    )
+    default_tier: str | None = Field(
+        default=None,
+        description=(
+            "model_tiers key whose bundles become the per-agent spawn "
+            "defaults (team_harness_agent_models / "
+            "team_harness_agent_reasoning_efforts). Mutually exclusive with "
+            "setting those mappings explicitly. Coordinator-side only."
         ),
     )
     team_harness_max_retries: int | None = Field(
@@ -202,6 +261,27 @@ class RootConfig(BaseModel):
                 raise ValueError(f"mapping value for {key!r} must not be empty")
         return value
 
+    @field_validator("model_tiers")
+    @classmethod
+    def validate_model_tiers_keys(
+        cls, value: dict[str, dict[str, ModelTierSpec]]
+    ) -> dict[str, dict[str, ModelTierSpec]]:
+        for tier_name, agents in value.items():
+            # Single-line names only: these strings are interpolated raw into
+            # the rendered system-prompt guidance, where a newline would break
+            # out of its bullet.
+            if not tier_name.strip() or "\n" in tier_name:
+                raise ValueError("model_tiers keys must be non-empty single lines")
+            if not agents:
+                raise ValueError(f"model_tiers[{tier_name!r}] must not be empty")
+            for agent_name in agents:
+                if not agent_name.strip() or "\n" in agent_name:
+                    raise ValueError(
+                        f"model_tiers[{tier_name!r}] agent keys must be "
+                        "non-empty single lines"
+                    )
+        return value
+
     @field_validator("workflow_set")
     @classmethod
     def validate_workflow_set(cls, value: str) -> str:
@@ -213,6 +293,39 @@ class RootConfig(BaseModel):
     @classmethod
     def normalize_api_base_value(cls, value: str) -> str:
         return normalize_api_base(value=value)
+
+    @model_validator(mode="after")
+    def validate_model_tier_selection(self) -> "RootConfig":
+        # NOTE: the "default_tier is mutually exclusive with explicit agent
+        # mappings" rule is enforced on the raw YAML in load_root_config(),
+        # NOT here — after resolve_model_tiers() derives the mappings, the
+        # resolved config must still validate (PreflightResult re-validates
+        # its nested RootConfig).
+        if self.default_tier is not None:
+            if self.default_tier not in self.model_tiers:
+                raise ValueError(
+                    f"default_tier {self.default_tier!r} is not a model_tiers "
+                    f"key; available tiers: {sorted(self.model_tiers)}"
+                )
+            uncovered = set(self.team_harness_agents) - set(
+                self.model_tiers[self.default_tier]
+            )
+            if uncovered:
+                raise ValueError(
+                    f"default_tier {self.default_tier!r} must define a bundle "
+                    "for every team_harness_agents entry (otherwise the "
+                    "rendered 'omitting model uses the default tier' guidance "
+                    f"would be wrong); missing: {sorted(uncovered)}"
+                )
+        unknown_agents = {
+            agent for agents in self.model_tiers.values() for agent in agents
+        } - set(self.team_harness_agents)
+        if unknown_agents:
+            raise ValueError(
+                "model_tiers references agents missing from "
+                f"team_harness_agents: {sorted(unknown_agents)}"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_cost_budget(self) -> "RootConfig":
@@ -342,10 +455,100 @@ def load_root_config(*, repo_root: Path, goal_file: Path | None = None) -> RootC
     if goal_file is not None:
         data["goal_file"] = str(goal_file)
     data = _resolve_root_config_goal(data=data, config_path=config_path)
+    # Enforced on the raw YAML (not in a model validator) because the
+    # resolved config legitimately holds default_tier alongside the DERIVED
+    # mappings, and it must survive re-validation (e.g. inside
+    # PreflightResult).
+    if data.get("default_tier") and (
+        data.get("team_harness_agent_models")
+        or data.get("team_harness_agent_reasoning_efforts")
+    ):
+        raise ConfigError(
+            f"Invalid root config at {config_path}: default_tier derives "
+            "team_harness_agent_models and team_harness_agent_reasoning_efforts "
+            "from the named tier; remove the explicit mappings so model ids "
+            "have one source of truth"
+        )
     try:
-        return RootConfig.model_validate(data)
+        config = RootConfig.model_validate(data)
     except ValidationError as exc:
         raise ConfigError(f"Invalid root config at {config_path}: {exc}") from exc
+    return resolve_model_tiers(config=config)
+
+
+def resolve_model_tiers(*, config: RootConfig) -> RootConfig:
+    """Resolve declared model tiers into the concrete harness fields.
+
+    Applied once, on the config freshly loaded from YAML (never on a config
+    reconstructed from a session snapshot — snapshots carry only the resolved
+    values). Two effects when ``model_tiers`` is non-empty:
+
+    - ``default_tier`` (if set) derives ``team_harness_agent_models`` /
+      ``team_harness_agent_reasoning_efforts`` so per-agent spawn defaults
+      and the tier table cannot drift apart.
+    - A rendered tier-guidance block is appended to
+      ``team_harness_system_prompt_extension`` so every harness coordinator
+      in the session tree knows which named tiers exist and how to select
+      one per spawned agent. This is guidance, not enforcement (D8):
+      adherence is checked by reviewers via the harness audit trail, never
+      gated.
+    """
+    if not config.model_tiers:
+        return config
+    update: dict[str, Any] = {}
+    if config.default_tier is not None:
+        tier = config.model_tiers[config.default_tier]
+        update["team_harness_agent_models"] = {
+            agent: spec.model for agent, spec in tier.items()
+        }
+        update["team_harness_agent_reasoning_efforts"] = {
+            agent: spec.effort
+            for agent, spec in tier.items()
+            if spec.effort is not None
+        }
+    guidance = render_model_tier_guidance(config=config)
+    extension = config.team_harness_system_prompt_extension
+    update["team_harness_system_prompt_extension"] = (
+        f"{extension.rstrip()}\n\n{guidance}" if extension.strip() else guidance
+    )
+    return config.model_copy(update=update)
+
+
+def render_model_tier_guidance(*, config: RootConfig) -> str:
+    """Render the coordinator-facing tier table from ``model_tiers``.
+
+    Workflow prompts should refer to tier NAMES only; this block is the one
+    place tier names expand to model ids, so model churn stays a one-line
+    config edit.
+    """
+    lines = [
+        "Model tier policy:",
+        "- When spawning worker agents you may pass `model` per spawn to move "
+        "a single task to a different tier. Pass `effort` too if the spawn "
+        "tool accepts it; if it rejects `effort` (older team-harness "
+        "versions), pass the worker CLI's own reasoning-effort flag via "
+        "`flags` instead (e.g. codex: `-c model_reasoning_effort=<level>`).",
+        "- Named tiers:",
+    ]
+    for tier_name, agents in config.model_tiers.items():
+        parts: list[str] = []
+        for agent_name, spec in agents.items():
+            part = f"{agent_name} model={spec.model}"
+            if spec.effort is not None:
+                part += f" effort={spec.effort}"
+            parts.append(part)
+        lines.append(f"  - {tier_name}: " + "; ".join(parts))
+    if config.default_tier is not None:
+        lines.append(
+            f"- Default tier: {config.default_tier}. It is already applied as "
+            "the spawn defaults; omitting model/effort uses it."
+        )
+    lines.append(
+        "- Choose a stronger tier for review, evaluation authoring, and "
+        "planning work, or when your assignment names a tier; choose a "
+        "cheaper tier for routine mechanical work."
+    )
+    return "\n".join(lines)
 
 
 def load_workflow_config(*, workflow_dir: Path) -> WorkflowConfig:
