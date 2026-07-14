@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **New `design_loop` template.** `loopy init --template design_loop` scaffolds a
+  complete autonomous design-phase repo: a `design_director` session that dispatches
+  one stage child at a time from a six-set palette (`design_investigation`,
+  `design_shape`, `design_bind`, `design_harden`, `design_phase_review`), turning a
+  seeded product idea into a full-scope, research-grounded design corpus. Unlike the
+  other templates, it also lays down the `plan/` artifact tree, `decisions.md`,
+  `questions.md`, `CLAUDE.md` design rules, and a required `.eval-banana/config.toml`.
+  Each stage set ships fixed eval-banana checks — deterministic **write barriers**
+  (fail-closed detection per D8; scoped by an allowlist and located via
+  `LOOPY_SESSION_DIR`) plus quality/graduation gates — that its `goal_check` runs in
+  place with `--check-dir`. `.loopy_loop` is excluded from bare eval-banana discovery
+  so the shipped checks never auto-run outside their workflows. The template's file
+  list is scanned from the template directory at import (it ships ~90 files) rather
+  than hand-enumerated like the smaller templates.
+
 ## 0.5.0
 
 - **events.jsonl is now written (P1.1).** The coordinator appends one

@@ -1,0 +1,9 @@
+enabled: true
+priority: 20
+run_every: 1
+must_follow: shaper
+not_before_iteration: 1
+description: |
+  Review the shaper's latest step (brief delta review every turn; full divergence
+  attack when the round is ready or every third round). Alternates with the shaper —
+  the scheduler forbids consecutive reruns of one workflow.

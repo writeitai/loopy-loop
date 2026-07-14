@@ -1,0 +1,38 @@
+schema_version: 1
+id: dl_inv_evidence_integrity
+type: harness_judge
+description: Load-bearing claims are honestly sourced — citations resolve and support their claims, statuses are labeled and never upgraded, sources manifest is reproducible, saturation is real.
+tags: [design-loop, investigation, evidence]
+instructions: |
+  Scope resolution (do this FIRST): find the session you are judging. Start from the
+  newest top-level session under .loopy_loop/sessions/ whose state.json is not
+  terminal, and follow active-child pointers (child sessions live under that session's
+  children/ directory) to the DEEPEST active session — that session S is the one this
+  check runs in. Read S/project_state/outcome.md and
+  S/project_state/write_barrier_baseline.json; judge ONLY this session's work: the
+  artifacts its outcome lists and the changes since its baseline base_commit
+  (git diff --name-only <base> plus git status --porcelain). If you cannot resolve
+  exactly one such session, or its outcome.md is missing, score 0 with reason "scope
+  unresolvable".
+  The investigation tree is the one named by the outcome's "Tree:" line. You are
+  auditing its EVIDENCE, adversarially. Verify ALL of the following:
+  1. Pick the 4–6 most recommendation-controlling claims across the memos and
+     synthesis. Each carries an explicit status (VERIFIED-CODE / VERIFIED-PRIMARY /
+     VERIFIED-SECONDARY / INFERRED / ASSUMED / UNVERIFIED / CONFLICTED / STALE) and a
+     citation precise enough to re-verify. Re-verify at least three at their source
+     (open the cited file in the clone under _additional_context/ at the manifest's
+     commit, or the cited document): the source must actually support the claim at the
+     stated strength.
+  2. No status strengthens along the chain memo → proposal_fit → synthesis → PRP; an
+     ASSUMED or UNVERIFIED premise is never presented downstream as fact.
+  3. sources.md covers every clone/paper/URL the memos rely on, with commit/version,
+     license, and dates; nothing load-bearing rests on a source absent from the
+     manifest.
+  4. saturation.md records two targeted final passes with actual queries and an honest
+     statement of what they changed; a "no new options" claim with no recorded queries
+     is a failure.
+  5. Quantitative claims show their arithmetic or cite it; any number that could not be
+     verified is labeled an estimate or measurement obligation, not stated as fact.
+  Score 1 only if EVERY condition holds. Cite the claims you re-verified with their
+  paths. Otherwise score 0.
+  Respond with JSON only: {"score": 0 or 1, "reason": "one sentence"}.

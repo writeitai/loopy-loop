@@ -1,0 +1,8 @@
+enabled: true
+priority: 50
+run_every: 1
+must_follow: roadmap_writer
+not_before_iteration: 4
+description: |
+  Bind design invariants to future implementation acceptance: eval-banana checks under
+  plan/implementation_evals/eval_checks/ plus the coverage ledger.

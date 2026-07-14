@@ -1,0 +1,9 @@
+enabled: true
+priority: 20
+run_every: 1
+must_follow: investigator
+not_before_iteration: 1
+description: |
+  Review the investigator's latest step (brief delta review every turn; full
+  adversarial refutation when the synthesis is ready or every third round). Alternates
+  with the investigator — the scheduler forbids consecutive reruns of one workflow.

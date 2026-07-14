@@ -1,0 +1,69 @@
+schema_version: 1
+id: dl_hrd_reviews_current
+type: deterministic
+description: The red-team objections and the coherence review are stamped with the CURRENT corpus digest — the reviews judged the binding docs as they stand, not an earlier version.
+tags: [design-loop, harden, review-freshness]
+script: |
+  import glob, hashlib, json, os, subprocess, sys
+  from pathlib import Path
+
+  ctx = json.loads(Path(sys.argv[1]).read_text())
+  root = Path(ctx["project_root"])
+  os.chdir(root)
+
+  import os
+  _sd = os.environ.get("LOOPY_SESSION_DIR")
+  if not _sd:
+      print("LOOPY_SESSION_DIR not set — goal_check must export it before eval-banana", file=sys.stderr)
+      sys.exit(1)
+  session_dir = Path(_sd)
+  baseline_path = session_dir / "project_state" / "write_barrier_baseline.json"
+  if not baseline_path.exists():
+      print(f"missing baseline: {baseline_path}", file=sys.stderr)
+      sys.exit(1)
+  base = json.loads(baseline_path.read_text()).get("base_commit") or "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+  def touched_this_session(rel):
+      diff = subprocess.run(["git", "diff", "--name-only", base, "--", rel],
+                            cwd=root, capture_output=True, text=True)
+      if diff.stdout.strip():
+          return True
+      status = subprocess.run(["git", "status", "--porcelain", "--", rel],
+                              cwd=root, capture_output=True, text=True)
+      return bool(status.stdout.strip())
+
+  h = hashlib.sha256()
+  paths = sorted(
+      ["decisions.md"]
+      + glob.glob("plan/designs/**/*.md", recursive=True)
+      + glob.glob("plan/requirements/**/*.md", recursive=True)
+  )
+  for p in paths:
+      h.update(p.encode() + b"\0" + open(p, "rb").read() + b"\0")
+  digest = h.hexdigest()
+
+  problems = []
+  objections = root / "plan" / "analysis" / "objections.md"
+  if not objections.exists():
+      problems.append("plan/analysis/objections.md missing (red team has not run)")
+  else:
+      if digest not in objections.read_text(encoding="utf-8"):
+          problems.append("objections.md carries no stamp for the current corpus digest")
+      if not touched_this_session("plan/analysis/objections.md"):
+          problems.append("objections.md unchanged this session — the stamp is from an earlier round")
+
+  reviews_dir = root / "plan" / "analysis" / "design_reviews"
+  reviews = sorted(reviews_dir.glob("*.md")) if reviews_dir.is_dir() else []
+  if not reviews:
+      problems.append("plan/analysis/design_reviews/ has no review (coherence review has not run)")
+  else:
+      newest = max(reviews, key=lambda f: f.stat().st_mtime)
+      if digest not in newest.read_text(encoding="utf-8"):
+          problems.append(f"newest review {newest.name} carries no stamp for the current corpus digest")
+      if not touched_this_session(str(newest.relative_to(root))):
+          problems.append(f"newest review {newest.name} unchanged this session — the review is from an earlier round")
+
+  if problems:
+      print(f"current digest: {digest}", file=sys.stderr)
+      print("\n".join(problems), file=sys.stderr)
+      sys.exit(1)

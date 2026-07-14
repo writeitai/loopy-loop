@@ -468,7 +468,7 @@ See [docs/http-contract.md](docs/http-contract.md) for exact JSON payloads.
 ## CLI Reference
 
 ```bash
-loopy init [--template default|inner_outer_eval|pm_planner_dispatcher]
+loopy init [--template default|inner_outer_eval|pm_planner_dispatcher|design_loop]
 ```
 
 Scaffolds loopy-loop files. The default template creates only the reserved
@@ -476,6 +476,18 @@ Scaffolds loopy-loop files. The default template creates only the reserved
 workflow set. `pm_planner_dispatcher` creates planner/dispatcher workflows for
 child-session orchestration — and also ships the `inner_outer_eval` child set
 its dispatcher spawns, so a clean init is executable end to end.
+
+`design_loop` scaffolds a complete **autonomous design-phase repo**: a top-level
+`design_director` session that judges the overall state of a design corpus and
+dispatches one stage child at a time from a six-set palette
+(`design_investigation`, `design_shape`, `design_bind`, `design_harden`,
+`design_phase_review`, plus the director), turning a seeded product idea into a
+full-scope, research-grounded design (requirements → analysis → binding designs →
+decision log → questions → objections → implementation eval checks). Unlike the
+other templates it also lays down the `plan/` artifact tree, `decisions.md`,
+`questions.md`, `CLAUDE.md` design rules, and a required `.eval-banana/config.toml`.
+Each stage set ships fixed eval-banana checks (write barriers + quality gates) that
+its `goal_check` runs in place; fill in `design_goal.md` and run the coordinator.
 
 ```bash
 loopy coordinator --host 0.0.0.0 --port 8080 [--resume] [--workflow-set NAME] [--goal-file PATH]

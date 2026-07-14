@@ -1,0 +1,67 @@
+schema_version: 1
+id: dl_phr_report_complete
+type: deterministic
+description: A digest-pinned phase-review report exists with a verdict line, and the digest matches the current corpus.
+tags: [design-loop, phase-review, report]
+script: |
+  import glob, hashlib, json, os, re, sys
+  from pathlib import Path
+
+  ctx = json.loads(Path(sys.argv[1]).read_text())
+  root = Path(ctx["project_root"])
+  os.chdir(root)
+
+  import os
+  _sd = os.environ.get("LOOPY_SESSION_DIR")
+  if not _sd:
+      print("LOOPY_SESSION_DIR not set — goal_check must export it before eval-banana", file=sys.stderr)
+      sys.exit(1)
+  session_dir = Path(_sd)
+  outcome = session_dir / "project_state" / "outcome.md"
+  if not outcome.exists():
+      print("project_state/outcome.md missing — round not complete", file=sys.stderr)
+      sys.exit(1)
+  m = re.search(r"(?m)^Report:\s*(plan/analysis/phase_reviews/[^\s]+\.md)\s*$",
+                outcome.read_text(encoding="utf-8"))
+  if m is None:
+      print("outcome.md has no anchored 'Report: plan/analysis/phase_reviews/<file>.md' line", file=sys.stderr)
+      sys.exit(1)
+  newest = root / m.group(1)
+  if not newest.is_file():
+      print(f"report named by outcome.md does not exist: {m.group(1)}", file=sys.stderr)
+      sys.exit(1)
+  baseline_path = session_dir / "project_state" / "write_barrier_baseline.json"
+  if baseline_path.exists():
+      import subprocess
+      base = json.loads(baseline_path.read_text()).get("base_commit") or "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+      diff = subprocess.run(["git", "diff", "--name-only", base, "--", m.group(1)],
+                            cwd=root, capture_output=True, text=True).stdout.strip()
+      status = subprocess.run(["git", "status", "--porcelain", "--", m.group(1)],
+                              cwd=root, capture_output=True, text=True).stdout.strip()
+      if not diff and not status:
+          print(f"report {m.group(1)} unchanged this session — it is from an earlier round", file=sys.stderr)
+          sys.exit(1)
+  text = newest.read_text(encoding="utf-8")
+
+  problems = []
+  if not re.search(r"(?im)^\s*VERDICT:\s*(sufficient|not sufficient|sufficient-except)", text):
+      problems.append(f"{newest.name}: no VERDICT line (sufficient | not sufficient | sufficient-except)")
+
+  h = hashlib.sha256()
+  paths = sorted(
+      ["decisions.md"]
+      + glob.glob("plan/designs/**/*.md", recursive=True)
+      + glob.glob("plan/requirements/**/*.md", recursive=True)
+  )
+  for p in paths:
+      h.update(p.encode() + b"\0" + open(p, "rb").read() + b"\0")
+  digest = h.hexdigest()
+  if digest not in text:
+      problems.append(f"{newest.name}: no stamp for the current corpus digest {digest[:12]}…")
+
+  if len(text) < 1500:
+      problems.append(f"{newest.name}: suspiciously short for a sufficiency review ({len(text)} bytes)")
+
+  if problems:
+      print("\n".join(problems), file=sys.stderr)
+      sys.exit(1)

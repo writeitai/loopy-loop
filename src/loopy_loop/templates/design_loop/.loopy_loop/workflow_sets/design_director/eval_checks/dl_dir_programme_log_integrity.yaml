@@ -1,0 +1,24 @@
+schema_version: 1
+id: dl_dir_programme_log_integrity
+type: harness_judge
+description: The programme log is a complete, evidence-citing record of the director's decisions, and the director authored no product content itself.
+tags: [design-loop, director, programme-log]
+instructions: |
+  You are auditing the decision record of an autonomous programme director. The
+  director's contract (plan/README.md): it dispatches stage sessions and logs every
+  decision; it never authors product artifacts. Note the director session cannot have a
+  git-diff write barrier (its children legitimately modify the repo while it is
+  suspended), so THIS check is the write-discipline gate. Verify ALL of the following:
+  1. The log is non-empty and every entry states: what was dispatched (or concluded),
+     the goal summary, why now, and the specific evidence cited (paths or register
+     IDs) — no entry justifies itself with only generic language.
+  2. Every dispatch entry that is not the most recent has a filled Outcome line.
+  3. The sequence is coherent: rework entries reference the entry they redo; a
+     conclusion entry exists only at the end.
+  4. Spot-check two recent substantive changes to binding documents (decisions.md or
+     plan/designs/ — use git log if available): each is attributable to a stage
+     session's work recorded in the log (a bind/harden dispatch whose outcome covers
+     it), not to unlogged direct authorship.
+  Score 1 only if EVERY condition holds; cite entry numbers and the spot-checked
+  changes in the reason. Otherwise score 0.
+  Respond with JSON only: {"score": 0 or 1, "reason": "one sentence"}.

@@ -1,0 +1,8 @@
+enabled: true
+priority: 30
+run_every: 1
+must_follow: red_team
+not_before_iteration: 2
+description: |
+  Dated whole-corpus coherence review: traceability, refinement propagation, stale
+  examples, terminology drift, index truthfulness — F-numbered findings.

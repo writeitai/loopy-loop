@@ -1,0 +1,10 @@
+enabled: true
+priority: 20
+run_every: 1
+must_follow: null
+not_before_iteration: 0
+run_on_start: true
+description: |
+  Judge the overall state of the design programme, decide the single next move
+  (dispatch which stage set, with what goal, or conclude), and append the decision
+  with its cited evidence to the programme log.

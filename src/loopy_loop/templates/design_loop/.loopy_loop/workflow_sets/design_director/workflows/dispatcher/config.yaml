@@ -1,0 +1,8 @@
+enabled: true
+priority: 10
+run_every: 1
+must_follow: planner
+not_before_iteration: 1
+description: |
+  Materialize the planner's selection as exactly one child-session request, or import
+  a terminal child's evidence pointers back into session state.

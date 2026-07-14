@@ -1,0 +1,64 @@
+schema_version: 1
+id: dl_shp_requirements_draft_only
+type: deterministic
+description: Every requirements file this session created or modified is explicitly DRAFT-marked — shape never writes current requirements.
+tags: [design-loop, shape, requirements]
+script: |
+  import json, subprocess, sys
+  from pathlib import Path
+
+  ctx = json.loads(Path(sys.argv[1]).read_text())
+  root = Path(ctx["project_root"])
+  import os
+  _sd = os.environ.get("LOOPY_SESSION_DIR")
+  if not _sd:
+      print("LOOPY_SESSION_DIR not set — goal_check must export it before eval-banana", file=sys.stderr)
+      sys.exit(1)
+  session_dir = Path(_sd)
+  baseline_path = session_dir / "project_state" / "write_barrier_baseline.json"
+  if not baseline_path.exists():
+      print(f"missing baseline: {baseline_path}", file=sys.stderr)
+      sys.exit(1)
+  baseline = json.loads(baseline_path.read_text())
+  base = baseline["base_commit"]
+  dirty_at_start = set(baseline.get("dirty_at_start", []))
+
+  def git(*args):
+      r = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+      if r.returncode != 0:
+          print(f"git {' '.join(args)} failed: {r.stderr.strip()}", file=sys.stderr)
+          sys.exit(1)
+      return r.stdout
+
+  changed = set()
+  for line in git("diff", "--name-only", base).splitlines():
+      if line.strip():
+          changed.add(line.strip())
+  for line in git("status", "--porcelain").splitlines():
+      p = line[3:].strip() if len(line) > 3 else ""
+      if " -> " in p:
+          p = p.split(" -> ")[-1]
+      if p:
+          changed.add(p)
+  changed -= dirty_at_start
+
+  import re
+  offenders = []
+  for p in sorted(changed):
+      if not p.startswith("plan/requirements/") or not p.endswith(".md"):
+          continue
+      if Path(p).name == "README.md":
+          continue
+      f = root / p
+      if not f.exists():
+          continue
+      first_heading = next(
+          (l for l in f.read_text(encoding="utf-8").splitlines() if l.lstrip().startswith("#")),
+          "",
+      )
+      if not re.match(r"^#+\s*DRAFT\b", first_heading.lstrip()):
+          offenders.append(f"{p}: first heading is {first_heading!r}, expected '# DRAFT: <title>'")
+  if offenders:
+      print("requirements files modified without a normative DRAFT first heading:", file=sys.stderr)
+      print("\n".join(offenders), file=sys.stderr)
+      sys.exit(1)

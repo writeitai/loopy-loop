@@ -1,0 +1,10 @@
+enabled: true
+priority: 60
+run_every: 1
+must_follow: implementation_eval_writer
+not_before_iteration: 5
+emits_goal_check: true
+description: |
+  Run the set's shipped checks and terminate the child when the harden round is
+  complete: reviews digest-current, findings recorded, roadmap and implementation
+  evals consistent.

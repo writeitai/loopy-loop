@@ -1,0 +1,26 @@
+schema_version: 1
+id: dl_hrd_impl_evals_bound
+type: harness_judge
+description: Implementation eval checks genuinely bind the design — design-first sources, D-tags, conjunctive all-or-nothing conditions, coverage ledger complete, no invented architecture.
+tags: [design-loop, harden, implementation-evals]
+instructions: |
+  Read plan/implementation_evals/README.md (conventions + coverage ledger) and every
+  YAML under plan/implementation_evals/eval_checks/. Cross-read decisions.md and the
+  designs the checks cite. Verify ALL of the following:
+  1. Sample five checks (or all, if fewer): each names its binding design section as
+     the controlling source, tags its D-numbers and a subsystem, states conjunctive
+     conditions with "score 1 only if ALL hold", treats an absent or partial subsystem
+     as score 0, and instructs the judge that current designs control over decision
+     prose (discrepancies noted, not punished).
+  2. No sampled check invents an invariant absent from the cited design/decision, and
+     none weakens one (a check that would pass an implementation the design forbids is
+     a failure — argue one concrete case per sampled check).
+  3. Coverage: pick three substantive decisions from decisions.md — each is either
+     covered by a check whose tags include it or has a credible non-observable
+     exclusion entry in the coverage ledger. An uncovered, unexcluded invariant fails.
+  4. Checks bound to refined decisions reflect the CURRENT design (spot-check one
+     refinement chain end to end).
+  5. Retired checks (if any) are preserved with a note, not silently deleted.
+  Score 1 only if EVERY condition holds. Cite the sampled check ids, D-numbers, and
+  the concrete cases you argued. Otherwise score 0.
+  Respond with JSON only: {"score": 0 or 1, "reason": "one sentence"}.

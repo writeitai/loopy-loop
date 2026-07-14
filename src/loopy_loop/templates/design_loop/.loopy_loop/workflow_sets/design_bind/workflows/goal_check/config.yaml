@@ -1,0 +1,12 @@
+enabled: true
+priority: 30
+run_every: 1
+must_follow: binding_reviewer
+not_before_iteration: 3
+run_after_successes:
+  workflow_id: designer
+  every: 2
+emits_goal_check: true
+description: |
+  Run the set's shipped checks and terminate the child when the binding package is
+  integrated, reviewed, and coherent.

@@ -1,0 +1,10 @@
+enabled: true
+priority: 10
+run_every: 1
+must_follow: null
+not_before_iteration: 0
+run_on_start: true
+description: |
+  Disposition the assigned proposals: accept/reject/compose into decision entries,
+  write the binding designs and requirements, and propagate every accepted change
+  atomically across the corpus.

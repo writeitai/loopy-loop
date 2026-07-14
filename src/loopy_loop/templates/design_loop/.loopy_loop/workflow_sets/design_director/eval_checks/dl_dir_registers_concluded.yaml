@@ -1,0 +1,23 @@
+schema_version: 1
+id: dl_dir_registers_concluded
+type: harness_judge
+description: The living registers are in a concluded state — no critical open question, every objection and review finding dispositioned, resolved items pruned.
+tags: [design-loop, director, registers]
+instructions: |
+  You are judging whether a design programme's registers permit conclusion. Read the
+  target files, and follow their references into plan/analysis/design_reviews/ if any
+  exist. Try first to find a counterexample. Verify ALL of the following:
+  1. questions.md contains no open item that could change correctness, scope,
+     ownership, a boundary, or a required interface. Remaining open items are
+     explicitly parked: each states why it is non-blocking, a safe default, and a
+     reopening trigger.
+  2. Resolved questions have left the open sections (a resolved/audit section naming
+     the resolving D-number is fine).
+  3. Every objection (O-) and design-review finding (F-) has status accepted, rejected,
+     or superseded — none is open. Accepted ones name the decision/design change that
+     absorbed them; rejected ones retain concrete rationale.
+  4. The proposals index is consistent with the register contract: every listed status
+     is absorbed-into-decision (with D-IDs), rejected, or parked (with trigger).
+  Score 1 only if EVERY condition holds. Cite exact file paths and item IDs in the
+  reason, including the strongest counterexample you attempted. Otherwise score 0.
+  Respond with JSON only: {"score": 0 or 1, "reason": "one sentence"}.

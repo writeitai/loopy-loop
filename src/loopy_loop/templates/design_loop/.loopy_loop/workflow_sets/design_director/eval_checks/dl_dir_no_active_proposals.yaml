@@ -1,0 +1,33 @@
+schema_version: 1
+id: dl_dir_no_active_proposals
+type: deterministic
+description: No proposal remains active — every PRP is absorbed, rejected, or parked before the programme can conclude.
+tags: [design-loop, director, proposals]
+script: |
+  import json, re, sys
+  from pathlib import Path
+
+  ctx = json.loads(Path(sys.argv[1]).read_text())
+  root = Path(ctx["project_root"])
+  props = root / "plan" / "proposals"
+  if not props.is_dir():
+      print("plan/proposals/ missing", file=sys.stderr)
+      sys.exit(1)
+  offenders = []
+  for f in sorted(props.glob("PRP-*.md")):
+      head = "\n".join(f.read_text(encoding="utf-8").splitlines()[:10])
+      m = re.search(r"(?im)^Status:\s*([a-z][a-z-]*)", head)
+      if m is None:
+          offenders.append(f"{f.name}: no normative 'Status: <value>' line in the first 10 lines")
+      elif m.group(1).lower() == "active":
+          offenders.append(f"{f.name}: status active")
+  index = props / "index.md"
+  if index.exists():
+      for i, line in enumerate(index.read_text(encoding="utf-8").splitlines(), 1):
+          if re.search(r"\|\s*active\s*\|", line):
+              offenders.append(f"index.md:{i}: active row")
+  else:
+      offenders.append("index.md missing")
+  if offenders:
+      print("\n".join(offenders), file=sys.stderr)
+      sys.exit(1)

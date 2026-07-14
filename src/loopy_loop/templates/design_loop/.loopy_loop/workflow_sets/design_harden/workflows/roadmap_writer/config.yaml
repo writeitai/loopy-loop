@@ -1,0 +1,8 @@
+enabled: true
+priority: 40
+run_every: 1
+must_follow: coherence_review
+not_before_iteration: 3
+description: |
+  Derive build sequencing from the binding docs: roadmap and phase files under
+  plan/plans/ — order never weakens scope.

@@ -1,0 +1,39 @@
+schema_version: 1
+id: dl_hrd_findings_recorded
+type: harness_judge
+description: The harden round's product is honest and routable — findings numbered with evidence and severity, reviews substantive, roadmap consistent with binding docs, outcome routes the blockers.
+tags: [design-loop, harden, findings]
+instructions: |
+  Scope resolution (do this FIRST): find the session you are judging. Start from the
+  newest top-level session under .loopy_loop/sessions/ whose state.json is not
+  terminal, and follow active-child pointers (child sessions live under that session's
+  children/ directory) to the DEEPEST active session — that session S is the one this
+  check runs in. Read S/project_state/outcome.md and
+  S/project_state/write_barrier_baseline.json; judge ONLY this session's work: the
+  artifacts its outcome lists and the changes since its baseline base_commit
+  (git diff --name-only <base> plus git status --porcelain). If you cannot resolve
+  exactly one such session, or its outcome.md is missing, score 0 with reason "scope
+  unresolvable".
+  Read plan/analysis/objections.md, the review files this session's outcome names,
+  plan/plans/, and questions.md. Try first to find dishonesty or emptiness. Verify
+  ALL of the following:
+  1. The newest red-team section and coherence review are substantive: findings carry
+     concrete failure scenarios and evidence paths (file/section), affected IDs, and a
+     severity — or, for a no-findings result, an explicit account of what was attacked
+     and why it held. Generic praise or content-free findings fail.
+  2. Every new O/F finding has status `open` with a proposed correction — none was
+     self-applied to binding docs by this session, and none was silently dropped
+     between the review text and the register.
+  3. The red team addressed BOTH failure directions somewhere: architecture substance
+     AND the programme log (premature_convergence / aimless_exploration) — an explicit
+     "log is clean because…" statement counts.
+  4. plan/plans/roadmap.md references current design sections (spot-check two
+     references — they must exist and say what the roadmap claims), covers every
+     requirement/design area or marks it blocked-on-Q, and contains no scope
+     reduction dressed as sequencing.
+  5. Blocking-severity findings are routed: the outcome (or, failing session access,
+     the newest review's closing section) names them for a design_bind round rather
+     than declaring them handled.
+  Score 1 only if EVERY condition holds. Cite finding IDs and the spot-checked roadmap
+  references. Otherwise score 0.
+  Respond with JSON only: {"score": 0 or 1, "reason": "one sentence"}.

@@ -1,0 +1,32 @@
+schema_version: 1
+id: dl_bnd_no_hedging
+type: deterministic
+description: Requirements and design docs contain no MVP or deferral framing — full-scope design, sequencing only in plan/plans/ (decisions.md is exempt — its history legitimately quotes rejected hedging; judges cover it semantically).
+tags: [design-loop, bind, full-scope]
+script: |
+  import json, re, sys
+  from pathlib import Path
+
+  ctx = json.loads(Path(sys.argv[1]).read_text())
+  root = Path(ctx["project_root"])
+  files = []
+  for d in ("plan/designs", "plan/requirements"):
+      p = root / d
+      if p.is_dir():
+          files += sorted(p.rglob("*.md"))
+  pattern = re.compile(
+      r"\b(MVP|for now|not in v1|v1 only|future phase|later phase|"
+      r"phase\s+\d+\s+only|defer(?:red|ring)?\s+(?:until|to later)|someday|"
+      r"initial(?:ly)?\s+(?:supported\s+)?subset)\b",
+      re.I,
+  )
+  offenders = []
+  for path in files:
+      if not path.exists():
+          continue
+      for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+          if pattern.search(line):
+              offenders.append(f"{path.relative_to(root)}:{line_no}: {line.strip()[:120]}")
+  if offenders:
+      print("\n".join(offenders), file=sys.stderr)
+      sys.exit(1)

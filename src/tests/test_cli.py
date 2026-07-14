@@ -196,6 +196,74 @@ def test_init_pm_planner_dispatcher_template_scaffolds_expected_files(
     ).read_text(encoding="utf-8")
 
 
+def test_init_design_loop_template_scaffolds_expected_files(
+    repo_root: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.chdir(repo_root)
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["init", "--template", "design_loop"])
+
+    assert result.exit_code == 0
+    # Root scaffold: config points at the director set + the markdown seed.
+    config_text = repo_root.joinpath("loopy_loop_config.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert "workflow_set: design_director" in config_text
+    assert "goal_file: design_goal.md" in config_text
+    assert repo_root.joinpath("design_goal.md").exists()
+    # The design-phase artifact scaffold ships with the template.
+    assert repo_root.joinpath("plan/README.md").exists()
+    assert repo_root.joinpath("decisions.md").exists()
+    assert repo_root.joinpath("questions.md").exists()
+    # The eval-banana harness config is required for the gates to run at all.
+    eval_config = repo_root.joinpath(".eval-banana/config.toml").read_text(
+        encoding="utf-8"
+    )
+    assert "[harness]" in eval_config
+    assert ".loopy_loop" in eval_config  # discovery exclusion
+    # All six workflow sets land, each with its shipped eval checks.
+    for workflow_set in (
+        "design_director",
+        "design_investigation",
+        "design_shape",
+        "design_bind",
+        "design_harden",
+        "design_phase_review",
+    ):
+        assert repo_root.joinpath(
+            f".loopy_loop/workflow_sets/{workflow_set}/workflows/goal_check/prompt.txt"
+        ).exists()
+        eval_checks_dir = repo_root.joinpath(
+            f".loopy_loop/workflow_sets/{workflow_set}/eval_checks"
+        )
+        assert eval_checks_dir.is_dir()
+        assert list(eval_checks_dir.glob("*.yaml"))
+    # goal_check runs shipped checks in place (no copy-into-session dance).
+    director_goal_check = repo_root.joinpath(
+        ".loopy_loop/workflow_sets/design_director/workflows/goal_check/prompt.txt"
+    ).read_text(encoding="utf-8")
+    assert (
+        "--check-dir .loopy_loop/workflow_sets/design_director/eval_checks"
+        in director_goal_check
+    )
+    assert "LOOPY_SESSION_DIR" in director_goal_check
+
+
+def test_init_design_loop_template_is_idempotent(
+    repo_root: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.chdir(repo_root)
+    runner = CliRunner()
+
+    first = runner.invoke(main, ["init", "--template", "design_loop"])
+    second = runner.invoke(main, ["init", "--template", "design_loop"])
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert "already initialized" in second.output
+
+
 def test_init_rejects_unknown_template(repo_root: Any, monkeypatch: Any) -> None:
     monkeypatch.chdir(repo_root)
     runner = CliRunner()

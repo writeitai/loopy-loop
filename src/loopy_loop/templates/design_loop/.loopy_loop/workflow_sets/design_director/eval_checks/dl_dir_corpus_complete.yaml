@@ -1,0 +1,32 @@
+schema_version: 1
+id: dl_dir_corpus_complete
+type: harness_judge
+description: The design corpus is complete, coherent, grounded, and hardened — the final programme gate.
+tags: [design-loop, director, completeness]
+instructions: |
+  You are the final gate of an autonomous design programme. The durable product is the
+  repo's plan/ tree + decisions.md per plan/README.md (read it first). Read
+  design_goal.md, then audit the corpus AS A SKEPTIC — search for the missing piece
+  before considering a pass. Verify ALL of the following:
+  1. Requirements: exactly one current requirements document exists under
+     plan/requirements/, covers the seed's full-scope boundary, and contains no
+     DRAFT-marked file presented as current.
+  2. Designs: every row of the overall_design.md index is truthful — "current" docs
+     exist and are substantive (complete mechanism, contracts, worked example, failure
+     behavior), "planned" docs are not referenced as if current, and no design area
+     required by the requirements is missing from the index.
+  3. Decisions: material commitments in the designs trace to D-entries; D-entries cite
+     the analysis and the proposals they absorbed and rejected; refinement chains are
+     coherent (no dangling "Refined by").
+  4. Grounding: decision-relevant factual claims trace to tracked analysis under
+     plan/analysis/ (not to gitignored scratch); unverified numbers are labeled
+     estimates or measurement obligations.
+  5. Hardening evidence exists and corresponds to the CURRENT corpus: a dated
+     whole-corpus review in plan/analysis/design_reviews/, objections dispositioned,
+     a roadmap under plan/plans/ consistent with the designs, and implementation eval
+     checks under plan/implementation_evals/eval_checks/ covering the binding
+     observable invariants. If any of these predate substantive corpus changes, that is
+     a failure.
+  Score 1 only if EVERY condition holds. Cite exact paths/headings for what you checked
+  and name the strongest gap you searched for. Otherwise score 0.
+  Respond with JSON only: {"score": 0 or 1, "reason": "one sentence"}.

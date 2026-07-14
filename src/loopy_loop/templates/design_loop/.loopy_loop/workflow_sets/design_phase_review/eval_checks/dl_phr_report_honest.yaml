@@ -1,0 +1,34 @@
+schema_version: 1
+id: dl_phr_report_honest
+type: harness_judge
+description: The sufficiency report is evidence-based and actionable — every criterion assessed against real paths, the verdict follows from the assessments, gaps come with concrete dispatch recommendations.
+tags: [design-loop, phase-review, honesty]
+instructions: |
+  Scope resolution (do this FIRST): find the session you are judging. Start from the
+  newest top-level session under .loopy_loop/sessions/ whose state.json is not
+  terminal, and follow active-child pointers (child sessions live under that session's
+  children/ directory) to the DEEPEST active session — that session S is the one this
+  check runs in. Read S/project_state/outcome.md and
+  S/project_state/write_barrier_baseline.json; judge ONLY this session's work: the
+  artifacts its outcome lists and the changes since its baseline base_commit
+  (git diff --name-only <base> plus git status --porcelain). If you cannot resolve
+  exactly one such session, or its outcome.md is missing, score 0 with reason "scope
+  unresolvable".
+  The report to judge is the one named by the outcome's "Report:" line. Spot-check it
+  against the corpus it assesses. Verify ALL of the following:
+  1. Every criterion the set's reviewer contract names (frame, seed triage, evidence
+     coverage, saturation, divergence, unknown honesty) is assessed with concrete
+     evidence paths — no criterion answered with generic language.
+  2. Spot-check two of its factual assessments against the corpus (e.g. open the named
+     research tree's saturation.md, or verify a "proposal monopoly" claim in
+     plan/proposals/) — the report must be accurate about what the corpus contains.
+  3. The verdict follows from the per-criterion assessments — a "sufficient" verdict
+     with an unaddressed failing criterion, or a "not sufficient" with all criteria
+     passing and no explanation, is a failure.
+  4. Every named gap carries a concrete, dispatchable recommendation (what
+     investigation/shape work, with what scope) — not "more research needed".
+  5. The report changed nothing else: it recommends, it does not garden registers or
+     touch proposals.
+  Score 1 only if EVERY condition holds. Cite the report path and your spot-checks.
+  Otherwise score 0.
+  Respond with JSON only: {"score": 0 or 1, "reason": "one sentence"}.

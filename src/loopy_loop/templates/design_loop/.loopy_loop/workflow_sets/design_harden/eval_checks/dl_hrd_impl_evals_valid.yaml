@@ -1,0 +1,25 @@
+schema_version: 1
+id: dl_hrd_impl_evals_valid
+type: deterministic
+description: The implementation eval checks exist and pass eval-banana schema validation (they are never RUN here — there is no implementation yet).
+tags: [design-loop, harden, implementation-evals]
+script: |
+  import json, subprocess, sys
+  from pathlib import Path
+
+  ctx = json.loads(Path(sys.argv[1]).read_text())
+  root = Path(ctx["project_root"])
+  checks_dir = root / "plan" / "implementation_evals" / "eval_checks"
+  yamls = sorted(list(checks_dir.glob("*.yaml")) + list(checks_dir.glob("*.yml"))) if checks_dir.is_dir() else []
+  if not yamls:
+      print("plan/implementation_evals/eval_checks/ contains no checks", file=sys.stderr)
+      sys.exit(1)
+  r = subprocess.run(
+      ["eval-banana", "validate", "--cwd", ".", "--check-dir", "plan/implementation_evals/eval_checks"],
+      cwd=root, capture_output=True, text=True,
+  )
+  if r.returncode != 0:
+      print("eval-banana validate failed:", file=sys.stderr)
+      print(r.stdout[-2000:], file=sys.stderr)
+      print(r.stderr[-2000:], file=sys.stderr)
+      sys.exit(1)

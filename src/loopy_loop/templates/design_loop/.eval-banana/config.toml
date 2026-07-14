@@ -1,0 +1,25 @@
+# eval-banana config for a design-loop target repo.
+# The design-loop workflow sets ship fixed eval checks under
+# .loopy_loop/workflow_sets/<set>/eval_checks/ and each goal_check runs them scoped with
+# --check-dir. Without a configured [harness] agent, every harness_judge check REFUSES
+# to run and all gates brick — so this file is required, not optional.
+
+[core]
+output_dir = ".eval-banana/results"
+pass_threshold = 1.0
+# Full document content to the judges — design docs must be judged whole.
+llm_max_input_chars = 0
+
+[harness]
+# Judge agent for harness_judge checks. Prefer a different family than the producing
+# agents where practical (loopy-loop D4 guidance).
+agent = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[discovery]
+# `.loopy_loop` is added to the default excludes so a bare `eval-banana run` (no
+# --check-dir) never auto-discovers the workflow sets' shipped checks or per-session
+# eval_checks — which would collide on ids. The goal_check workflows always pass an
+# explicit --check-dir, which is unaffected by this exclusion.
+exclude_dirs = [".git", ".hg", ".svn", ".venv", "venv", "node_modules", "__pycache__", "dist", "build", ".loopy_loop"]

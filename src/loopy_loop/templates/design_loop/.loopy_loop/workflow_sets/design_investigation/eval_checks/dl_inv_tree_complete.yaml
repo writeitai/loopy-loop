@@ -1,0 +1,42 @@
+schema_version: 1
+id: dl_inv_tree_complete
+type: deterministic
+description: The investigation tree named by outcome.md exists with every required node — brief, sources manifest, verify passes, saturation record, and synthesis.
+tags: [design-loop, investigation, graduation]
+script: |
+  import json, re, sys
+  from pathlib import Path
+
+  ctx = json.loads(Path(sys.argv[1]).read_text())
+  root = Path(ctx["project_root"])
+  import os
+  _sd = os.environ.get("LOOPY_SESSION_DIR")
+  if not _sd:
+      print("LOOPY_SESSION_DIR not set — goal_check must export it before eval-banana", file=sys.stderr)
+      sys.exit(1)
+  session_dir = Path(_sd)
+  outcome = session_dir / "project_state" / "outcome.md"
+  if not outcome.exists():
+      print("project_state/outcome.md missing — round not complete", file=sys.stderr)
+      sys.exit(1)
+  m = re.search(r"(?m)^Tree:\s*plan/analysis/research/([A-Za-z0-9_-]+)\s*$", outcome.read_text(encoding="utf-8"))
+  if m is None:
+      print("outcome.md has no anchored 'Tree: plan/analysis/research/<id>' line", file=sys.stderr)
+      sys.exit(1)
+  tree = root / "plan" / "analysis" / "research" / m.group(1)
+  required = [
+      "00_question_brief.md",
+      "sources.md",
+      "saturation.md",
+      "04_synthesis.md",
+      "verify/completeness.md",
+      "verify/numbers_facts.md",
+      "verify/invariant_coherence.md",
+  ]
+  missing = [r for r in required if not (tree / r).is_file()]
+  empty = [r for r in required if (tree / r).is_file() and (tree / r).stat().st_size < 200]
+  problems = [f"missing: {r}" for r in missing] + [f"suspiciously short (<200 bytes): {r}" for r in empty]
+  if problems:
+      print(f"tree {tree.relative_to(root)}:", file=sys.stderr)
+      print("\n".join(problems), file=sys.stderr)
+      sys.exit(1)

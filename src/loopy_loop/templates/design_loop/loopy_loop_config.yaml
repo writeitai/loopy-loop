@@ -1,0 +1,26 @@
+goal_file: design_goal.md
+workflow_set: design_director
+# Bounds DIRECTOR turns. Child sessions (design_investigation/shape/bind/harden/
+# phase_review) inherit this same value as THEIR own per-session budget — there is no
+# separate per-child engine budget, so keep it generous enough for a full stage round.
+max_turns: 200
+goal_check_consecutive_failures_cap: 3
+workflow_consecutive_failures_cap: 5
+# Optional cost ceiling (coordinator-model spend only). Uncomment to bound a run.
+# max_cost_usd: 250
+team_harness_provider: "codex"
+team_harness_model: "gpt-5.5"
+team_harness_agents:
+  - "codex"
+  - "claude"
+  - "gemini"
+team_harness_agent_models:
+  codex: "gpt-5.5"
+team_harness_agent_reasoning_efforts:
+  codex: "high"
+team_harness_api_base: "https://openrouter.ai/api/v1"
+team_harness_api_key_env: "OPENROUTER_API_KEY"
+# Applies to EVERY harness run in this repo, including the child stage sessions the
+# dispatcher spawns. Keep it empty — the per-role boundaries live in the workflow
+# prompt bodies, and a director-only instruction here would leak into every stage agent.
+team_harness_system_prompt_extension: ""

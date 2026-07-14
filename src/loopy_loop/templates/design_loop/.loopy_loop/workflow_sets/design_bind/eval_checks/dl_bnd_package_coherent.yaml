@@ -1,0 +1,42 @@
+schema_version: 1
+id: dl_bnd_package_coherent
+type: harness_judge
+description: Each new decision's package landed atomically — designs, requirements, index, proposals, and questions all agree; refinements append; cross-links resolve.
+tags: [design-loop, bind, coherence]
+instructions: |
+  Scope resolution (do this FIRST): find the session you are judging. Start from the
+  newest top-level session under .loopy_loop/sessions/ whose state.json is not
+  terminal, and follow active-child pointers (child sessions live under that session's
+  children/ directory) to the DEEPEST active session — that session S is the one this
+  check runs in. Read S/project_state/outcome.md and
+  S/project_state/write_barrier_baseline.json; judge ONLY this session's work: the
+  artifacts its outcome lists and the changes since its baseline base_commit
+  (git diff --name-only <base> plus git status --porcelain). If you cannot resolve
+  exactly one such session, or its outcome.md is missing, score 0 with reason "scope
+  unresolvable".
+  This session's binding package is the set of D-entries and files its outcome lists
+  (cross-check against the baseline diff). For EACH new or refined decision, verify
+  ALL of the following:
+  1. The binding design section it cites exists, is substantive, and actually
+     implements the decision (not merely mentions it); the overall_design.md index row
+     for every touched design is truthful (current means complete and binding).
+  2. Requirements reflect any WHAT-change: the current requirements doc covers it and
+     no DRAFT-marked file is presented as current; a promoted requirements doc names
+     what it supersedes.
+  3. Every PRP the decision absorbed or rejected has its status and disposition
+     updated in both the PRP file and the proposals index, with real reasons on
+     rejections.
+  4. Q-entries the decision answers are moved to the resolved section naming the
+     D-number; no resolved item still sits in an open section.
+  5. Refined earlier decisions carry "Refined by Dn" notes; reversals are tombstones;
+     no D-number was reused or rewritten; worked examples in neighboring designs still
+     obey the changed rules (spot-check one neighbor per decision).
+  6. Every cross-reference you encounter (D-, PRP-, Q-, design paths) resolves to an
+     existing item.
+  7. Every O/F finding the session's goal routed for integration has its status
+     updated in plan/analysis/objections.md or the design-review file — accepted
+     (with the D-link), rejected (with rationale), or superseded — none is still open.
+  Score 1 only if EVERY condition holds for EVERY new decision. Cite D-numbers and the
+  exact files checked, including the strongest incoherence you hunted for. Otherwise
+  score 0.
+  Respond with JSON only: {"score": 0 or 1, "reason": "one sentence"}.

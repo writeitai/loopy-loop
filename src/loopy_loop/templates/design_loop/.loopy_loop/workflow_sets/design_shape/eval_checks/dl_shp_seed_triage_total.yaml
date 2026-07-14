@@ -1,0 +1,19 @@
+schema_version: 1
+id: dl_shp_seed_triage_total
+type: harness_judge
+description: Every seed item — raw concerns, author questions, investigation seeds — traces to a question, proposal, frame statement, or explicit non-goal; nothing silently disappeared.
+tags: [design-loop, shape, seed-triage]
+instructions: |
+  Read design_goal.md (especially its raw-concerns section) and, if they exist,
+  open_questions_from_author.md and investigation_plan.md. Then read questions.md,
+  plan/proposals/index.md, and plan/analysis/problem_frame.md. For EVERY item in the
+  seed sources, find its disposition: a Q-entry citing it, a proposal addressing it, a
+  frame statement covering it, or an explicit non-goal note explaining it. Build the
+  mapping item by item — do not sample. An item is silently dropped if you cannot
+  point to its disposition; a disposition that merely rephrases the item without
+  routing it (no ID, no owner artifact) counts as dropped. Also verify no seed item
+  was answered by fiat: a concern marked resolved must cite the analysis or decision
+  that resolved it, not the shaper's opinion.
+  Score 1 only if every seed item has a real disposition. Cite the items and their
+  dispositions (or name the dropped ones). Otherwise score 0.
+  Respond with JSON only: {"score": 0 or 1, "reason": "one sentence"}.

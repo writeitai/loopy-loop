@@ -1,0 +1,35 @@
+schema_version: 1
+id: dl_inv_synthesis_quality
+type: harness_judge
+description: The synthesis genuinely reconciles the investigation — brief answered, verifier and critic findings dispositioned, confidence honest, unknowns routed, no canonical IDs minted.
+tags: [design-loop, investigation, synthesis]
+instructions: |
+  Scope resolution (do this FIRST): find the session you are judging. Start from the
+  newest top-level session under .loopy_loop/sessions/ whose state.json is not
+  terminal, and follow active-child pointers (child sessions live under that session's
+  children/ directory) to the DEEPEST active session — that session S is the one this
+  check runs in. Read S/project_state/outcome.md and
+  S/project_state/write_barrier_baseline.json; judge ONLY this session's work: the
+  artifacts its outcome lists and the changes since its baseline base_commit
+  (git diff --name-only <base> plus git status --porcelain). If you cannot resolve
+  exactly one such session, or its outcome.md is missing, score 0 with reason "scope
+  unresolvable".
+  The investigation tree is the one named by the outcome's "Tree:" line. Read the
+  whole tree: brief, sources.md, evidence memos,
+  proposal_fit/, verify/ (including critic_round files), saturation.md,
+  04_synthesis.md. Try first to refute the synthesis. Verify ALL of the following:
+  1. Every question in the brief is answered, an explicit non-goal, or an acknowledged
+     unknown in the synthesis — nothing silently dropped.
+  2. Every verify/ and critic finding marked blocking is explicitly resolved in the
+     synthesis: folded in, or rejected with concrete reasons. No averaging of
+     disagreeing analyses.
+  3. Conclusions carry honest confidence tied to evidence status; failed or empty memo
+     streams are reported as failures, not counted as support.
+  4. Unknowns that survived are present in questions.md as Q-entries, and the PRPs the
+     synthesis claims to have created/updated exist in plan/proposals/ with evidence
+     links into this tree.
+  5. The tree mints no canonical D- or R- identifiers and edits no binding document —
+     provisional labels only.
+  Score 1 only if EVERY condition holds. Cite the tree path and the exact files/IDs
+  you checked, including the strongest refutation you attempted. Otherwise score 0.
+  Respond with JSON only: {"score": 0 or 1, "reason": "one sentence"}.

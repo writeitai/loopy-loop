@@ -1,0 +1,9 @@
+enabled: true
+priority: 20
+run_every: 1
+must_follow: designer
+not_before_iteration: 1
+description: |
+  Independently review the designer's latest integration transaction for translation
+  defects. Alternates with the designer — the scheduler forbids consecutive reruns of
+  one workflow.

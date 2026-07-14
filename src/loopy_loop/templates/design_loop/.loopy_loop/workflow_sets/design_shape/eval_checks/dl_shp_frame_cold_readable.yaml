@@ -1,0 +1,22 @@
+schema_version: 1
+id: dl_shp_frame_cold_readable
+type: harness_judge
+description: The problem frame is self-contained for a cold reader and classifies every core area, without presuming a winning proposal.
+tags: [design-loop, shape, problem-frame]
+instructions: |
+  Read plan/analysis/problem_frame.md as a cold reader who has seen nothing else, then
+  design_goal.md to audit fidelity. Try first to find a counterexample. Verify ALL of
+  the following:
+  1. The frame explains the job, the users, the domain's invariants, and what "good"
+     means, in plain language — every domain term defined on first use, no reliance on
+     session memory or specialist background.
+  2. It is faithful to the seed: the boundary and non-goals match design_goal.md, and
+     it invents no facts absent from the seed or tracked analysis (spot-check two
+     claims against their cited analysis).
+  3. It names the design's core areas and classifies each as contested, constrained,
+     or non-architectural, each with its one-line justification.
+  4. It does not presume a winner: "what good means" and the invariants are stated so
+     that every active proposal could in principle satisfy or fail them.
+  Score 1 only if EVERY condition holds. Cite headings and the spot-checked claims.
+  Otherwise score 0.
+  Respond with JSON only: {"score": 0 or 1, "reason": "one sentence"}.

@@ -1,0 +1,12 @@
+enabled: true
+priority: 30
+run_every: 1
+must_follow: divergence_critic
+not_before_iteration: 4
+run_after_successes:
+  workflow_id: shaper
+  every: 3
+emits_goal_check: true
+description: |
+  Run the set's shipped checks and terminate the child when the shaping round is
+  complete and honest.

@@ -1,0 +1,11 @@
+enabled: true
+priority: 30
+run_every: 1
+must_follow: dispatcher
+not_before_iteration: 2
+emits_goal_check: true
+description: |
+  Run the director's shipped programme-gate checks after every dispatcher turn (one
+  gate turn per dispatch cycle — dispatches are expensive, the gate is cheap, and a
+  planner conclusion must be verifiable on the very next cycle). The only workflow
+  that may stop the programme with goal_met.

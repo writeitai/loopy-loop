@@ -1,0 +1,26 @@
+schema_version: 1
+id: dl_shp_divergence_substance
+type: harness_judge
+description: Contested core areas have genuinely different, independently argued, evidence-linked proposals — no monopolies, no strawmen; constrained areas carry inadmissibility evidence.
+tags: [design-loop, shape, divergence]
+instructions: |
+  Read the core-area classification in plan/analysis/problem_frame.md, the proposals
+  index, and every active PRP file in plan/proposals/. Try first to find the weak spot.
+  Verify ALL of the following:
+  1. Every contested core area has 2 or more active proposals that differ materially
+     in mechanism, source of authority, or failure profile — not one shape with a
+     decorated variant.
+  2. No proposal is a strawman: for each competing pair, the weaker proposal's case is
+     argued seriously (real drivers, real evidence links, honest tradeoffs). If you
+     can demolish one side in a sentence its authors should have written, that is a
+     failure.
+  3. Every proposal's decisive claims link to tracked analysis that actually contains
+     them (spot-check two links per contested area); assumptions carry Q-IDs.
+  4. Every constrained area cites concrete evidence why alternatives are inadmissible
+     AND has an explicit counter-case note; every non-architectural area has its
+     one-line rationale.
+  5. Each proposal states falsification conditions — what evidence, scenario, or
+     measurement would kill it.
+  Score 1 only if EVERY condition holds. Cite areas, PRP IDs, and the spot-checked
+  evidence links. Otherwise score 0.
+  Respond with JSON only: {"score": 0 or 1, "reason": "one sentence"}.

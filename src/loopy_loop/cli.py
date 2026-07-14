@@ -31,6 +31,34 @@ DEFAULT_TEMPLATE_NAME = "default"
 MAIN_WORKFLOW_SET_NAME = "main"
 INNER_OUTER_EVAL_TEMPLATE_NAME = "inner_outer_eval"
 PM_PLANNER_DISPATCHER_TEMPLATE_NAME = "pm_planner_dispatcher"
+DESIGN_LOOP_TEMPLATE_NAME = "design_loop"
+# Names never copied out of a template directory even if present on disk.
+_TEMPLATE_SCAN_SKIP = frozenset({"__pycache__", ".DS_Store", ".pytest_cache"})
+
+
+def _scan_template_relative_paths(*, template_name: str) -> list[str]:
+    """Every file under a packaged template, as sorted repo-relative POSIX paths.
+
+    The design_loop template ships ~90 files (six workflow sets with their eval
+    checks, plus the plan/ skeleton and root config/seed files). Enumerating them
+    by hand like the smaller templates would drift the moment a check is added, so
+    its file list is derived from the template directory itself at import time.
+    """
+    root = files("loopy_loop").joinpath("templates", template_name)
+    found: list[str] = []
+
+    def _walk(node: Traversable, prefix: str) -> None:
+        for entry in sorted(node.iterdir(), key=lambda item: item.name):
+            if entry.name in _TEMPLATE_SCAN_SKIP:
+                continue
+            relative_path = f"{prefix}{entry.name}"
+            if entry.is_dir():
+                _walk(entry, f"{relative_path}/")
+            else:
+                found.append(relative_path)
+
+    _walk(root, "")
+    return found
 PACKAGED_TEMPLATE_FILES_BY_NAME = {
     INNER_OUTER_EVAL_TEMPLATE_NAME: [
         ".gitignore",
@@ -69,6 +97,13 @@ PACKAGED_TEMPLATE_EXTRA_SOURCES: dict[str, list[tuple[str, str]]] = {
         if relative_path.startswith(".loopy_loop/workflow_sets/")
     ]
 }
+# The design_loop template is a full design-phase repo scaffold: its six workflow
+# sets ship their own fixed eval checks, and it also lays down the plan/ artifact
+# tree, decisions.md/questions.md, CLAUDE.md, and the eval-banana config. Its file
+# list is scanned rather than hand-written (see _scan_template_relative_paths).
+PACKAGED_TEMPLATE_FILES_BY_NAME[DESIGN_LOOP_TEMPLATE_NAME] = (
+    _scan_template_relative_paths(template_name=DESIGN_LOOP_TEMPLATE_NAME)
+)
 PACKAGED_TEMPLATE_NAMES = list(PACKAGED_TEMPLATE_FILES_BY_NAME)
 GITIGNORE_LINES = [".loopy_loop/sessions/"]
 ROOT_CONFIG_TEMPLATE = f"""goal_file: "{DEFAULT_GOAL_FILENAME}"

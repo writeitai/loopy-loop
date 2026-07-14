@@ -1,0 +1,9 @@
+enabled: true
+priority: 20
+run_every: 1
+must_follow: questions_gardener
+not_before_iteration: 1
+description: |
+  Cold adversarial read of the whole corpus: wrong abstractions, hidden authorities,
+  scale failures, scope hedges, process smells — numbered objections with dispositions
+  proposed.

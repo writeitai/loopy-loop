@@ -1,0 +1,35 @@
+schema_version: 1
+id: dl_bnd_designs_self_contained
+type: harness_judge
+description: Every design document this round created or modified is understandable cold — mechanism explained, contracts and failure behavior stated, one worked example present.
+tags: [design-loop, bind, self-containedness]
+instructions: |
+  Scope resolution (do this FIRST): find the session you are judging. Start from the
+  newest top-level session under .loopy_loop/sessions/ whose state.json is not
+  terminal, and follow active-child pointers (child sessions live under that session's
+  children/ directory) to the DEEPEST active session — that session S is the one this
+  check runs in. Read S/project_state/outcome.md and
+  S/project_state/write_barrier_baseline.json; judge ONLY this session's work: the
+  artifacts its outcome lists and the changes since its baseline base_commit
+  (git diff --name-only <base> plus git status --porcelain). If you cannot resolve
+  exactly one such session, or its outcome.md is missing, score 0 with reason "scope
+  unresolvable".
+  The documents to judge are the design docs this session created or modified (from
+  the outcome list and baseline diff). Read each as a cold implementer who was not in
+  any session. Verify ALL of the following, per document:
+  1. Every named technique or domain term is explained in plain language on first use
+     — what it is, what problem it solves, why chosen — with the technical term kept
+     as an anchor. Naming is not explaining.
+  2. The mechanism's contracts are stated: inputs, outputs, owner/source of truth, and
+     failure behavior — in the document or via an explicit link to the section that
+     states them.
+  3. At least one concrete worked example walks the important state transitions,
+     including an edge or failure case, and the example obeys the document's own
+     rules.
+  4. The reasoning for non-obvious choices is present or linked to the D-entry — the
+     reader never needs a transcript or specialist background to follow.
+  5. Non-goals and boundaries are explicit where the mechanism could plausibly be
+     assumed to cover more.
+  Score 1 only if EVERY condition holds for EVERY touched document. Cite the documents
+  and the passage that best demonstrates or violates each condition. Otherwise score 0.
+  Respond with JSON only: {"score": 0 or 1, "reason": "one sentence"}.
