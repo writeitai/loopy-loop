@@ -277,6 +277,6 @@ engine fence (D8). Do not add per-session/per-depth model allowlists, "children 
 request expensive tiers" vetoes, or coordinator-model differentiation per loop level; if
 per-session coordinator profiles ever become genuinely needed, they compose with tiers
 (profiles set session defaults, tiers guide per-spawn choice) and require amending this
-decision. Effort-as-spawn-argument lives in team-harness (>0.3.0); on older versions the
-tier guidance still works for `model`, and effort escalation falls back to raw CLI
-`flags`.
+decision. Effort-as-spawn-argument lives in team-harness (0.4.0+, TH-D6); on older
+installed versions the tier guidance still works for `model`, and effort escalation
+falls back to raw CLI `flags`.
