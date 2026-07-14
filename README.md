@@ -232,12 +232,16 @@ Important rules:
 - `team_harness_model` controls the team-harness coordinator model.
 - `team_harness_agent_models` controls default models for worker subprocesses.
 - `model_tiers` (optional) declares named worker tiers — tier name → agent →
-  `{model, effort}` — as the single source of truth for model ids. Loopy
-  renders the table into the harness system prompt so coordinators can pass
-  `spawn_agent(model=…, effort=…)` to move one task to a different tier
-  (guidance, not enforcement — see D8/D9 in `design/decisions.md`). With
-  `default_tier` set, the named tier derives `team_harness_agent_models` and
-  `team_harness_agent_reasoning_efforts`; setting those explicitly alongside
+  `{model, effort}` — as the single source of truth for this repo's model
+  ids. Loopy renders the table into the harness system prompt so coordinators
+  can pass `spawn_agent(model=…)` to move one task to a different tier
+  (guidance, not enforcement — see D8/D9 in `design/decisions.md`). The
+  per-spawn `effort` argument needs team-harness newer than 0.3.0; on older
+  versions the rendered guidance points coordinators at the CLI's own
+  reasoning-effort flag via `flags`. With `default_tier` set, the named tier
+  derives `team_harness_agent_models` and
+  `team_harness_agent_reasoning_efforts` (the tier must cover every
+  configured agent); setting those mappings explicitly alongside
   `default_tier` is a config error.
 
   ```yaml

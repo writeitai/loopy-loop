@@ -998,25 +998,19 @@ class CoordinatorService:
         )
         self._flush_pending_events()
 
-    def _preflight_for(
-        self, *, workflow_set: str, goal: str | None = None
-    ) -> PreflightResult:
+    def _preflight_for(self, *, workflow_set: str) -> PreflightResult:
+        """Workflow definitions + set validation only. A child session's
+        execution config never comes from here — it inherits the parent's
+        frozen config_snapshot (see _dispatch_child_session_if_requested),
+        so a mid-session edit of loopy_loop_config.yaml cannot split the
+        session tree across different models or policies."""
         preflight = self.preflights.get(workflow_set)
         if preflight is None:
             preflight = run_preflight(
                 repo_root=self.repo_root, workflow_set=workflow_set
             )
             self.preflights[workflow_set] = preflight
-        if goal is None:
-            return preflight
-        root_config = preflight.root_config.model_copy(
-            update={"goal": goal, "workflow_set": workflow_set}
-        )
-        return PreflightResult(
-            root_config=root_config,
-            workflow_set=workflow_set,
-            workflows=preflight.workflows,
-        )
+        return preflight
 
     def _workflows_for(self, *, workflow_set: str) -> list[WorkflowDefinition]:
         return self._preflight_for(workflow_set=workflow_set).workflows
@@ -1058,9 +1052,7 @@ class CoordinatorService:
             # rejected, never left to wedge every future completion with the
             # same error.
             try:
-                preflight = self._preflight_for(
-                    workflow_set=request.workflow_set, goal=request.goal
-                )
+                preflight = self._preflight_for(workflow_set=request.workflow_set)
             except ConfigError as exc:
                 _reject_request(request_path, reason=str(exc))
                 continue
@@ -1100,8 +1092,17 @@ class CoordinatorService:
                     request_file=request_path.name,
                 ),
             )
-            snapshot = RootConfigSnapshot.model_validate(
-                preflight.root_config.model_dump(exclude=_COORDINATOR_ONLY_FIELDS)
+            # The child inherits the PARENT's frozen execution config — only
+            # goal, goal_hash, and workflow_set change (P0.3's "children
+            # inherit root config"; D9's uniform session tree). Re-deriving
+            # from the on-disk YAML here would let a mid-session config edit
+            # split the tree across different models and policies.
+            snapshot = state.config_snapshot.model_copy(
+                update={
+                    "goal": request.goal,
+                    "goal_hash": goal_hash,
+                    "workflow_set": request.workflow_set,
+                }
             )
             now = utc_now()
             child_state = LoopState(
@@ -1109,7 +1110,7 @@ class CoordinatorService:
                 goal_hash=goal_hash,
                 workflow_set=request.workflow_set,
                 parent_session_id=state.active_session_id,
-                max_turns=preflight.root_config.max_turns,
+                max_turns=state.config_snapshot.max_turns,
                 active_session_id=child_session_id,
                 config_snapshot=snapshot,
                 current_task=CurrentTask(

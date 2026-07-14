@@ -77,13 +77,19 @@ class ModelTierSpec(BaseModel):
     def validate_model(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("model must not be empty")
+        if "\n" in value:
+            raise ValueError("model must be a single line")
         return value
 
     @field_validator("effort")
     @classmethod
     def validate_effort(cls, value: str | None) -> str | None:
-        if value is not None and not value.strip():
+        if value is None:
+            return value
+        if not value.strip():
             raise ValueError("effort must not be empty when set")
+        if "\n" in value:
+            raise ValueError("effort must be a single line")
         return value
 
 
@@ -261,14 +267,18 @@ class RootConfig(BaseModel):
         cls, value: dict[str, dict[str, ModelTierSpec]]
     ) -> dict[str, dict[str, ModelTierSpec]]:
         for tier_name, agents in value.items():
-            if not tier_name.strip():
-                raise ValueError("model_tiers keys must not be empty")
+            # Single-line names only: these strings are interpolated raw into
+            # the rendered system-prompt guidance, where a newline would break
+            # out of its bullet.
+            if not tier_name.strip() or "\n" in tier_name:
+                raise ValueError("model_tiers keys must be non-empty single lines")
             if not agents:
                 raise ValueError(f"model_tiers[{tier_name!r}] must not be empty")
             for agent_name in agents:
-                if not agent_name.strip():
+                if not agent_name.strip() or "\n" in agent_name:
                     raise ValueError(
-                        f"model_tiers[{tier_name!r}] agent keys must not be empty"
+                        f"model_tiers[{tier_name!r}] agent keys must be "
+                        "non-empty single lines"
                     )
         return value
 
@@ -286,20 +296,26 @@ class RootConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_model_tier_selection(self) -> "RootConfig":
+        # NOTE: the "default_tier is mutually exclusive with explicit agent
+        # mappings" rule is enforced on the raw YAML in load_root_config(),
+        # NOT here — after resolve_model_tiers() derives the mappings, the
+        # resolved config must still validate (PreflightResult re-validates
+        # its nested RootConfig).
         if self.default_tier is not None:
             if self.default_tier not in self.model_tiers:
                 raise ValueError(
                     f"default_tier {self.default_tier!r} is not a model_tiers "
                     f"key; available tiers: {sorted(self.model_tiers)}"
                 )
-            if self.team_harness_agent_models or (
-                self.team_harness_agent_reasoning_efforts
-            ):
+            uncovered = set(self.team_harness_agents) - set(
+                self.model_tiers[self.default_tier]
+            )
+            if uncovered:
                 raise ValueError(
-                    "default_tier derives team_harness_agent_models and "
-                    "team_harness_agent_reasoning_efforts from the named tier; "
-                    "remove the explicit mappings so model ids have one source "
-                    "of truth"
+                    f"default_tier {self.default_tier!r} must define a bundle "
+                    "for every team_harness_agents entry (otherwise the "
+                    "rendered 'omitting model uses the default tier' guidance "
+                    f"would be wrong); missing: {sorted(uncovered)}"
                 )
         unknown_agents = {
             agent for agents in self.model_tiers.values() for agent in agents
@@ -439,6 +455,20 @@ def load_root_config(*, repo_root: Path, goal_file: Path | None = None) -> RootC
     if goal_file is not None:
         data["goal_file"] = str(goal_file)
     data = _resolve_root_config_goal(data=data, config_path=config_path)
+    # Enforced on the raw YAML (not in a model validator) because the
+    # resolved config legitimately holds default_tier alongside the DERIVED
+    # mappings, and it must survive re-validation (e.g. inside
+    # PreflightResult).
+    if data.get("default_tier") and (
+        data.get("team_harness_agent_models")
+        or data.get("team_harness_agent_reasoning_efforts")
+    ):
+        raise ConfigError(
+            f"Invalid root config at {config_path}: default_tier derives "
+            "team_harness_agent_models and team_harness_agent_reasoning_efforts "
+            "from the named tier; remove the explicit mappings so model ids "
+            "have one source of truth"
+        )
     try:
         config = RootConfig.model_validate(data)
     except ValidationError as exc:
@@ -493,9 +523,11 @@ def render_model_tier_guidance(*, config: RootConfig) -> str:
     """
     lines = [
         "Model tier policy:",
-        "- When spawning worker agents you may pass `model` (and `effort`, "
-        "where the CLI supports it) per spawn to move a single task to a "
-        "different tier.",
+        "- When spawning worker agents you may pass `model` per spawn to move "
+        "a single task to a different tier. Pass `effort` too if the spawn "
+        "tool accepts it; if it rejects `effort` (older team-harness "
+        "versions), pass the worker CLI's own reasoning-effort flag via "
+        "`flags` instead (e.g. codex: `-c model_reasoning_effort=<level>`).",
         "- Named tiers:",
     ]
     for tier_name, agents in config.model_tiers.items():

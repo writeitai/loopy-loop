@@ -516,3 +516,55 @@ def test_model_tiers_stay_out_of_wire_snapshot(repo_builder: Any) -> None:
     }
     assert "Model tier policy:" in snapshot.team_harness_system_prompt_extension
     assert "model_tiers" not in snapshot.model_dump()
+
+
+def test_run_preflight_accepts_resolved_default_tier(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    """Regression: PreflightResult re-validates its nested RootConfig, so the
+    resolved config (default_tier + DERIVED mappings) must satisfy its own
+    validators."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder(root_config={**_TIER_CONFIG, "default_tier": "economy"})
+
+    preflight = run_preflight(repo_root=repo_root)
+
+    assert preflight.root_config.team_harness_agent_models == {
+        "codex": "gpt-5.6-terra",
+        "claude": "claude-haiku-4-5",
+    }
+
+
+def test_default_tier_must_cover_all_agents(repo_builder: Any) -> None:
+    repo_root = repo_builder(
+        root_config={
+            "team_harness_agents": ["codex", "claude", "gemini"],
+            "model_tiers": {"economy": {"codex": {"model": "gpt-5.6-terra"}}},
+            "default_tier": "economy",
+        }
+    )
+
+    with pytest.raises(ConfigError, match="missing: \\['claude', 'gemini'\\]"):
+        load_root_config(repo_root=repo_root)
+
+
+def test_model_tiers_reject_multiline_values(repo_builder: Any) -> None:
+    repo_root = repo_builder(
+        root_config={
+            "model_tiers": {
+                "strong": {"codex": {"model": "gpt-5.6-sol\n- injected: bullet"}}
+            }
+        }
+    )
+
+    with pytest.raises(ConfigError, match="single line"):
+        load_root_config(repo_root=repo_root)
+
+
+def test_model_tiers_reject_wrong_shape(repo_builder: Any) -> None:
+    repo_root = repo_builder(
+        root_config={"model_tiers": {"strong": {"codex": "gpt-5.6-sol"}}}
+    )
+
+    with pytest.raises(ConfigError):
+        load_root_config(repo_root=repo_root)
