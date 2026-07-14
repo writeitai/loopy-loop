@@ -21,9 +21,8 @@ What to do:
    digests, findings summary, roadmap state, eval coverage). If not, emit goal_met
    false — the round is not complete.
 3. Create <session directory>/eval_results if missing, then run from the repo root:
-   export LOOPY_SESSION_DIR="<Session directory>"
    eval-banana validate --cwd . --check-dir .loopy_loop/workflow_sets/design_harden/eval_checks
-   eval-banana run --cwd . --check-dir .loopy_loop/workflow_sets/design_harden/eval_checks --output-dir "<Session directory>/eval_results"
+   LOOPY_SESSION_DIR="<Session directory>" eval-banana run --cwd . --check-dir .loopy_loop/workflow_sets/design_harden/eval_checks --output-dir "<Session directory>/eval_results"
 4. Summarize in project_state/eval_results.md. Write the goal_check.json output path:
    {"goal_met": <bool>, "reason": "<one line>", "schema_version": 1}
 5. goal_met true requires every check passed and outcome.md complete. OPEN FINDINGS DO

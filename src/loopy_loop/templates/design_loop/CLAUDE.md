@@ -24,11 +24,16 @@ are measured starting points, not committed constants.
 
 ## Rule 3 — The binding boundary constitution
 
-<!-- PROJECT-SPECIFIC: state what product is being designed and what is deliberately
-outside it; where each kind of authority lives; which technology choices are identity
-(fixed) vs verifiable hypotheses; which extension points exist and which invariants no
-adapter or adjacent product may bypass. This is the project's equivalent of ugm's
-library/cloud boundary — write it, then defend it in every design. -->
+Until this section is tailored to the specific product, the **binding boundary is the
+`design_goal.md` seed itself**: its full-scope boundary, explicit non-goals, and any
+fixed (identity) technology choices ARE the constitution. Every design must stay inside
+them; a design that would change the product's boundary or where authority lives is out
+of scope until the seed is amended (which happens only via `updates_from_user`).
+
+A project that needs a sharper boundary than the seed states should replace this
+paragraph with it: say where each kind of authority lives, which technology choices are
+identity (fixed) versus verifiable hypotheses, which extension points exist, and which
+invariants no adapter or adjacent product may bypass — then defend it in every design.
 
 ## Process rules
 

@@ -99,12 +99,16 @@ PACKAGED_TEMPLATE_EXTRA_SOURCES: dict[str, list[tuple[str, str]]] = {
 }
 # The design_loop template is a full design-phase repo scaffold: its six workflow
 # sets ship their own fixed eval checks, and it also lays down the plan/ artifact
-# tree, decisions.md/questions.md, CLAUDE.md, and the eval-banana config. Its file
-# list is scanned rather than hand-written (see _scan_template_relative_paths).
-PACKAGED_TEMPLATE_FILES_BY_NAME[DESIGN_LOOP_TEMPLATE_NAME] = (
-    _scan_template_relative_paths(template_name=DESIGN_LOOP_TEMPLATE_NAME)
-)
-PACKAGED_TEMPLATE_NAMES = list(PACKAGED_TEMPLATE_FILES_BY_NAME)
+# tree, decisions.md/questions.md, CLAUDE.md, and the eval-banana config. Its ~90-file
+# list is scanned on demand (see _resolve_packaged_template_files) rather than
+# hand-written. It is named here WITHOUT scanning, so importing this module never
+# touches template resources — a missing/corrupt resource surfaces only when the
+# template is actually used, not on every `loopy status`/`events`/`stop`.
+PACKAGED_TEMPLATE_NAMES = [*PACKAGED_TEMPLATE_FILES_BY_NAME, DESIGN_LOOP_TEMPLATE_NAME]
+# Gitignore entries the design_loop scaffold needs beyond the shared GITIGNORE_LINES
+# (its shipped .gitignore carries all of them, but a pre-existing target .gitignore is
+# left untouched by init, so these are appended idempotently).
+DESIGN_LOOP_EXTRA_GITIGNORE = [".eval-banana/results/", "_additional_context/"]
 GITIGNORE_LINES = [".loopy_loop/sessions/"]
 ROOT_CONFIG_TEMPLATE = f"""goal_file: "{DEFAULT_GOAL_FILENAME}"
 workflow_set: "{MAIN_WORKFLOW_SET_NAME}"
@@ -179,7 +183,12 @@ def init(template_name: str) -> None:
         created = _init_packaged_template(
             repo_root=repo_root, template_name=template_name
         )
-    _ensure_gitignore(repo_root=repo_root)
+    extra_gitignore = (
+        DESIGN_LOOP_EXTRA_GITIGNORE
+        if template_name == DESIGN_LOOP_TEMPLATE_NAME
+        else None
+    )
+    _ensure_gitignore(repo_root=repo_root, extra_lines=extra_gitignore)
 
     if created:
         click.echo("Created:")
@@ -187,6 +196,12 @@ def init(template_name: str) -> None:
             click.echo(f"- {path}")
     else:
         click.echo("loopy-loop is already initialized.")
+
+    if template_name == DESIGN_LOOP_TEMPLATE_NAME:
+        for warning in _design_loop_integration_warnings(
+            repo_root=repo_root, created=created
+        ):
+            click.echo(f"WARNING: {warning}")
 
 
 def _init_default_template(*, repo_root: Path) -> list[str]:
@@ -223,10 +238,34 @@ def _init_default_template(*, repo_root: Path) -> list[str]:
     return created
 
 
+def _resolve_packaged_template_files(*, template_name: str) -> list[str]:
+    """Repo-relative paths a packaged template ships.
+
+    Static templates use their hand-written list; templates absent from that map
+    (design_loop) are scanned on demand, so the scan runs only when the template is
+    used and a missing/corrupt resource raises an actionable error instead of
+    breaking every CLI command at import.
+    """
+    static = PACKAGED_TEMPLATE_FILES_BY_NAME.get(template_name)
+    if static is not None:
+        return static
+    try:
+        scanned = _scan_template_relative_paths(template_name=template_name)
+    except OSError as exc:
+        raise click.ClickException(
+            f"template '{template_name}' resources are missing or unreadable: {exc}"
+        ) from exc
+    if not scanned:
+        raise click.ClickException(
+            f"template '{template_name}' shipped no files — the installation is corrupt"
+        )
+    return scanned
+
+
 def _init_packaged_template(*, repo_root: Path, template_name: str) -> list[str]:
     template_root = files("loopy_loop").joinpath("templates", template_name)
     created: list[str] = []
-    for relative_path in PACKAGED_TEMPLATE_FILES_BY_NAME[template_name]:
+    for relative_path in _resolve_packaged_template_files(template_name=template_name):
         created.extend(
             _copy_template_file_if_missing(
                 source_root=template_root,
@@ -531,7 +570,7 @@ def _write_if_missing(*, path: Path, content: str) -> list[str]:
     return [str(path)]
 
 
-def _ensure_gitignore(*, repo_root: Path) -> None:
+def _ensure_gitignore(*, repo_root: Path, extra_lines: list[str] | None = None) -> None:
     path = repo_root / ".gitignore"
     existing_lines: list[str]
     if path.exists():
@@ -539,8 +578,42 @@ def _ensure_gitignore(*, repo_root: Path) -> None:
     else:
         existing_lines = []
     updated_lines = list(existing_lines)
-    for line in GITIGNORE_LINES:
-        if line not in existing_lines:
+    for line in [*GITIGNORE_LINES, *(extra_lines or [])]:
+        if line not in updated_lines:
             updated_lines.append(line)
     content = "\n".join(updated_lines).rstrip() + "\n"
     path.write_text(content, encoding="utf-8")
+
+
+def _design_loop_integration_warnings(
+    *, repo_root: Path, created: list[str]
+) -> list[str]:
+    """Warn when init left a required design_loop integration file untouched.
+
+    `_write_if_missing` never overwrites, so initializing into a repo that already
+    has `.eval-banana/config.toml` or `CLAUDE.md` silently keeps the old one — which
+    can leave the qualitative gates unrunnable or the design rules unenforced. The
+    scaffold still succeeds; these warnings tell the user exactly what to reconcile.
+    """
+    created_paths = set(created)
+    warnings: list[str] = []
+
+    eval_config = repo_root / ".eval-banana" / "config.toml"
+    if eval_config.exists() and str(eval_config) not in created_paths:
+        text = eval_config.read_text(encoding="utf-8")
+        if "[harness]" not in text or "agent" not in text:
+            warnings.append(
+                "existing .eval-banana/config.toml has no [harness] agent — every "
+                "design-loop gate will refuse to run until you configure one "
+                "(see the template's .eval-banana/config.toml for the required keys, "
+                "including the .loopy_loop discovery exclusion)."
+            )
+
+    claude_md = repo_root / "CLAUDE.md"
+    if claude_md.exists() and str(claude_md) not in created_paths:
+        warnings.append(
+            "existing CLAUDE.md was left unchanged — merge the design-phase rules "
+            "from the template's CLAUDE.md so the bind workflow can enforce them."
+        )
+
+    return warnings

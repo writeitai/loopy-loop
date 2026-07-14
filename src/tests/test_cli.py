@@ -264,6 +264,73 @@ def test_init_design_loop_template_is_idempotent(
     assert "already initialized" in second.output
 
 
+def test_design_loop_scan_matches_source_tree() -> None:
+    # Drift guard: the on-demand scan must enumerate exactly the files present under
+    # the packaged template directory, so a wheel that drops (or adds) a file is a
+    # visible test failure rather than a silently incomplete scaffold.
+    from importlib.resources import files
+
+    from loopy_loop.cli import _scan_template_relative_paths
+
+    scanned = set(_scan_template_relative_paths(template_name="design_loop"))
+    template_root = Path(str(files("loopy_loop").joinpath("templates", "design_loop")))
+    on_disk = {
+        str(path.relative_to(template_root).as_posix())
+        for path in template_root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+    assert scanned == on_disk
+    assert scanned, "design_loop template scanned no files"
+
+
+def test_init_design_loop_workflow_graphs_all_preflight(
+    repo_root: Any, monkeypatch: Any
+) -> None:
+    # A scaffolded target must have every workflow set (the director plus the five
+    # stage sets it dispatches as children) load and pass graph validation, so an
+    # unsatisfiable cadence or a dangling must_follow cannot ship undetected.
+    from loopy_loop.config import load_workflow_definitions
+    from loopy_loop.config import validate_workflow_graph
+
+    monkeypatch.chdir(repo_root)
+    result = CliRunner().invoke(main, ["init", "--template", "design_loop"])
+    assert result.exit_code == 0
+
+    for workflow_set in (
+        "design_director",
+        "design_investigation",
+        "design_shape",
+        "design_bind",
+        "design_harden",
+        "design_phase_review",
+    ):
+        workflows = load_workflow_definitions(
+            repo_root=repo_root, workflow_set=workflow_set
+        )
+        assert workflows, workflow_set
+        validate_workflow_graph(workflows=workflows)
+
+
+def test_init_design_loop_warns_on_preexisting_eval_config(
+    repo_root: Any, monkeypatch: Any
+) -> None:
+    # Initializing into a repo that already has a harness-less eval-banana config must
+    # not silently leave the gates unrunnable — init warns with a repair pointer.
+    monkeypatch.chdir(repo_root)
+    eval_dir = repo_root / ".eval-banana"
+    eval_dir.mkdir()
+    (eval_dir / "config.toml").write_text("[core]\noutput_dir = 'x'\n", encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["init", "--template", "design_loop"])
+
+    assert result.exit_code == 0
+    assert "no [harness] agent" in result.output
+    # The extra design-loop ignore entries are still ensured on a pre-existing repo.
+    gitignore = repo_root.joinpath(".gitignore").read_text(encoding="utf-8")
+    assert "_additional_context/" in gitignore
+    assert ".eval-banana/results/" in gitignore
+
+
 def test_init_rejects_unknown_template(repo_root: Any, monkeypatch: Any) -> None:
     monkeypatch.chdir(repo_root)
     runner = CliRunner()

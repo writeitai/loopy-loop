@@ -22,9 +22,8 @@ What to do:
    record that in project_state/eval_results.md and emit goal_met false — the round is
    not complete.
 3. Create <session directory>/eval_results if missing, then run from the repo root:
-   export LOOPY_SESSION_DIR="<Session directory>"
    eval-banana validate --cwd . --check-dir .loopy_loop/workflow_sets/design_investigation/eval_checks
-   eval-banana run --cwd . --check-dir .loopy_loop/workflow_sets/design_investigation/eval_checks --output-dir "<Session directory>/eval_results"
+   LOOPY_SESSION_DIR="<Session directory>" eval-banana run --cwd . --check-dir .loopy_loop/workflow_sets/design_investigation/eval_checks --output-dir "<Session directory>/eval_results"
 4. Also verify the latest verify/critic_round_*.md has no unresolved blocking finding
    (the synthesis must address each blocking finding explicitly — fixed or rejected
    with reasons).

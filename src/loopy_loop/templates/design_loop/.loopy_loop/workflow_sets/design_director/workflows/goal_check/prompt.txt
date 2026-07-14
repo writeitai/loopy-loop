@@ -21,9 +21,8 @@ What to do:
    library change, never mid-session.
 2. Create <session directory>/eval_results if missing, then run from the repo root
    (the eval-banana CLI ships with loopy-loop and is on PATH):
-   export LOOPY_SESSION_DIR="<Session directory>"
    eval-banana validate --cwd . --check-dir .loopy_loop/workflow_sets/design_director/eval_checks
-   eval-banana run --cwd . --check-dir .loopy_loop/workflow_sets/design_director/eval_checks --output-dir "<Session directory>/eval_results"
+   LOOPY_SESSION_DIR="<Session directory>" eval-banana run --cwd . --check-dir .loopy_loop/workflow_sets/design_director/eval_checks --output-dir "<Session directory>/eval_results"
 3. Read the console output and the newest report.json/report.md. Summarize per-check
    results in project_state/eval_results.md (headline + failed-check reasons + report
    path).
