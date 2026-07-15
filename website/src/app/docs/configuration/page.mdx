@@ -19,6 +19,7 @@ goal_file: loopy_loop_goal.txt
 workflow_set: inner_outer_eval
 max_turns: 160
 goal_check_consecutive_failures_cap: 3
+workflow_consecutive_failures_cap: 5
 team_harness_provider: "codex"
 team_harness_model: "gpt-5.5"
 team_harness_agents:
@@ -33,6 +34,11 @@ team_harness_agent_reasoning_efforts:
   codex: "high"
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
+# Optional coordinator-model cost estimate and stop threshold:
+# model_prices:
+#   prompt_usd_per_1m: 2.5
+#   completion_usd_per_1m: 10.0
+# max_cost_usd: 50.0
 ```
 
 ## Core fields
@@ -45,6 +51,7 @@ These fields control the goal, the workflow set, and how long the loop runs.
 | `workflow_set` | string | required | The workflow set used for new sessions when the coordinator is started without an override. |
 | `max_turns` | integer | required | Maximum number of completed workflow iterations before the loop stops. |
 | `goal_check_consecutive_failures_cap` | integer | `3` | How many consecutive invalid or missing goal-check outputs are tolerated before the loop stops with `goal_check_broken`. Must be at least `1`. |
+| `workflow_consecutive_failures_cap` | integer | `5` | Consecutive failures allowed for one workflow before the coordinator stops with `workflow_failure_cap`. A success of that workflow resets its counter. |
 
 The goal must live in a file. See the [Success & Control](/docs/success-and-control) page for how `max_turns` and the failure cap participate in stopping the loop.
 
@@ -59,6 +66,8 @@ Everything about *how* work is executed — which provider, coordinator model, a
 | `team_harness_agents` | list of strings | `["codex"]` | Agent names team-harness should make available as worker subprocesses, such as `codex`, `claude`, and `gemini`. |
 | `team_harness_agent_models` | map | `{}` | Per-agent default worker model overrides, keyed by agent name. |
 | `team_harness_agent_reasoning_efforts` | map | `{}` | Per-agent reasoning-effort overrides, keyed by agent name. Only agents whose templates support a reasoning-effort flag use this value. |
+| `model_tiers` | map | `{}` | Coordinator-side tier name → agent → `{model, effort}` bundles rendered into the harness prompt for per-spawn worker choice. Tier selection is guidance and audit evidence, not enforcement. |
+| `default_tier` | string | unset | A `model_tiers` key whose bundles derive the per-agent default model/effort maps. When set, remove explicit `team_harness_agent_models` and `team_harness_agent_reasoning_efforts`. |
 | `team_harness_api_base` | string | `"https://openrouter.ai/api/v1"` | The OpenAI-compatible API base URL passed to team-harness. Normalized on load (see below). |
 | `team_harness_api_key_env` | string | `"OPENROUTER_API_KEY"` | Name of the environment variable that holds the API key. |
 | `team_harness_system_prompt_extension` | string | `""` | Extra system-prompt text appended for every harness run. The templates use this to state session-state and PR/merge policy. |
@@ -72,10 +81,14 @@ These optional fields tune how team-harness retries transient API and network er
 | `team_harness_max_retries` | integer | unset | Coordinator retry budget. Must be `0` or greater. |
 | `team_harness_retry_base_delay_s` | number | unset | Base delay in seconds for retry backoff. Must be greater than `0`. |
 | `team_harness_retry_max_delay_s` | number | unset | Maximum delay in seconds for retry backoff. Must be greater than `0`, and no less than `team_harness_retry_base_delay_s`. |
-| `recovery_policy` | string | `drain` | Coordinator-side (not sent to workers). What crash recovery does with agent processes a dead worker left running: `drain` lets them finish (one shared `recovery_drain_timeout_s` deadline) before the iteration is re-run; `reap` kills them immediately. |
+| `recovery_policy` | string | `drain` | Coordinator-side (not sent to workers). What crash recovery does with identity-tracked agent processes: `drain` lets them finish within one shared `recovery_drain_timeout_s` deadline; `reap` kills them immediately. Recovery records abandonment, then normal scheduling continues only if no stop condition fires. |
 | `recovery_drain_timeout_s` | number | `600` | Coordinator-side. Shared deadline in seconds for draining ALL of an iteration's orphaned agents during crash recovery. Must be `0` or greater. |
 
 The `inner_outer_eval` template ships these as commented-out examples so you can see the shape before enabling them.
+
+### Usage and cost controls
+
+`model_prices` supplies `prompt_usd_per_1m` and `completion_usd_per_1m` for the harness coordinator model. With it configured, status can estimate cost from known coordinator-token usage. `max_cost_usd` is an optional positive stop threshold and is rejected unless prices are present. Agent-CLI subprocess spend is not measurable and is never included; missing or partial usage remains explicitly unknown. These fields are coordinator-side and reload when a coordinator resumes rather than entering the worker config snapshot.
 
 ### Optional criteria fields
 
@@ -109,6 +122,8 @@ The root config is parsed strictly, which turns silent mistakes into loud, early
 - **`goal_file` must resolve to a non-empty file.** It is read relative to the config file, and an empty goal is rejected.
 - **`workflow_set` must not be empty.**
 - **Agent maps require non-empty keys and values.** Empty strings in `team_harness_agent_models` or `team_harness_agent_reasoning_efforts` are rejected.
+- **Tier declarations are checked.** Tier/agent names and models must be non-empty single lines, tier agents must appear in `team_harness_agents`, and `default_tier` must cover every configured agent. A default tier conflicts with explicit per-agent model/effort maps.
+- **Cost thresholds require prices.** `max_cost_usd` without `model_prices` is rejected because the threshold could never be evaluated honestly.
 - **Retry bounds are checked.** `team_harness_retry_max_delay_s` must be at least `team_harness_retry_base_delay_s`.
 
 ## Where to go next

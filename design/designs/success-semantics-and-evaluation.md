@@ -77,7 +77,8 @@ and that layer is LLM-as-judge by design (Decision 2), a whole iteration's
 "success" can rest on a single model judgment with no deterministic backstop. For
 low-stakes goals this is an acceptable, conscious trade. For high-stakes work it
 should be **backstopped**, not reverted — see the note in Decision 2 about
-repo-owned deterministic checks, and the separate improvement-proposals doc.
+repo-owned deterministic checks and the active
+[`P1.2` proposal](../proposals/improvement-proposals.md#p12--target-owned-deterministic-evaluation-backstop).
 
 ### Alternatives considered and rejected
 
@@ -185,5 +186,6 @@ than abandoning the approach.
 Both decisions are sound. Neither should be reverted. The one thing worth adding —
 for high-stakes targets only — is a deterministic backstop built from the target
 repo's **own** contract tests, which strengthens both decisions without undoing
-either. That, and other forward-looking proposals, are covered separately in the
-improvement-proposals design doc.
+either. That conditional follow-up is tracked as
+[`P1.2`](../proposals/improvement-proposals.md#p12--target-owned-deterministic-evaluation-backstop),
+not as part of this implemented design.

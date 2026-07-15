@@ -18,15 +18,15 @@ Every response from either endpoint is a `TaskResponse` whose `action` is either
 `"run"` or `"stop"`.
 
 - A **run** response carries `workflow_set`, `workflow_id`, `session_id`,
-  `iteration`, and a `config_snapshot`. The worker loads the named workflow, renders
-  its prompt, and executes it.
+  `iteration`, `attempt_id`, and a `config_snapshot`. The worker loads the named
+  workflow, renders its prompt, and executes it.
 - A **stop** response carries only a `stop_reason`; the other fields are `null`.
   The worker exits.
 
 ## POST /register
 
-A worker calls `/register` to receive its first assignment. The request body is
-empty.
+A worker calls `/register` with its process identity to receive its first
+assignment.
 
 Request — the worker's process identity is **required** (a breaking change in
 0.3; pre-0.3 workers are rejected with HTTP 400):
@@ -53,6 +53,7 @@ Run response:
   "workflow_id": "planner",
   "session_id": "20260419_143022_71393ee22450_ab12cd34",
   "iteration": 3,
+  "attempt_id": "a1b2c3d4e5f6",
   "config_snapshot": {
     "goal": "Ship a minimal working landing page",
     "goal_hash": "71393ee22450",
@@ -87,6 +88,7 @@ Stop response:
   "workflow_id": null,
   "session_id": null,
   "iteration": null,
+  "attempt_id": null,
   "config_snapshot": null
 }
 ```
@@ -99,20 +101,23 @@ Rules for `/register`:
 - `workflow_set` tells the worker which
   `.loopy_loop/workflow_sets/<workflow_set>/workflows/<workflow_id>/` directory to
   load.
-- If a task is already current — meaning the previous worker crashed without calling
-  `/finished` — `/register` first verifies whether the recorded worker is *actually
-  dead*: a verifiably-alive worker (same host, matching pid + start-time token, and
-  not a zombie) gets **HTTP 409** instead of having its task reclaimed. If that
-  worker is hung, kill its process (the 409 names the pid) and register again. For a
-  confirmed-dead or unverifiable worker, the coordinator checks that iteration
+- If a task is already current — meaning the prior assignment remains
+  unacknowledged — `/register` first checks the recorded worker's liveness. A
+  verifiably-alive worker (same host, matching pid + start-time token, and not a
+  zombie) gets **HTTP 409** instead of having its task reclaimed. If that worker is
+  hung, kill its process (the 409 names the pid) and register again. When the worker
+  is not verifiably alive, the coordinator checks that iteration
   directory for `pending_finished_request.json` or `result.json`. If either proves
   the task completed, the coordinator records the completed task in history before
   checking stop conditions. A task with no recoverable local completion has its
   orphaned agent processes drained or reaped per `recovery_policy` (a `salvage.json`
-  records what was handled) and is recorded as failed with
-  `error="abandoned_after_<policy>"` (or plain `"abandoned"` when nothing settled).
-  If any orphan may still be running after recovery, `/register` returns **HTTP
-  409** rather than dispatching a second writer. See
+  records processed-run reports) and is recorded as failed with
+  `error="abandoned_after_<policy>"` when something settled (or plain
+  `"abandoned"` otherwise). For an identity-tracked harness run, an unsettled
+  reaper outcome makes `/register` return **HTTP 409** rather than dispatching a
+  second writer. A remote loopy worker cannot provide the same local proof
+  because the coordinator cannot reach its processes.
+  See
   [Crash recovery](#crash-recovery-and-stale-retries).
 - If the loop is already in a terminal state, `/register` immediately returns
   `action: "stop"`.
@@ -148,17 +153,37 @@ Request:
   "iteration": 3,
   "success": true,
   "text": "done",
-  "error": null
+  "error": null,
+  "failure_kind": null,
+  "usage": {
+    "prompt_tokens": 5210,
+    "completion_tokens": 902,
+    "turns": 3,
+    "turns_without_usage": 0
+  },
+  "duration_s": 187.4,
+  "attempt_id": "a1b2c3d4e5f6",
+  "worker": {
+    "hostname": "buildbox",
+    "pid": 4242,
+    "starttime": "lstart:..."
+  }
 }
 ```
+
+`attempt_id` must echo the live task's value. `worker` identifies the caller
+that will own the next task. `failure_kind`, `usage`, and `duration_s` are
+optional; missing usage means unknown, never zero.
 
 Response: same shape as the `/register` response (`action` is `"run"` or `"stop"`).
 
 Rules for `/finished`:
 
 - **Match required.** The report must match the current task on `session_id`,
-  `workflow_id`, and `iteration`. Only then does the coordinator record the result,
-  read the session artifacts, and dispatch the next task.
+  `workflow_id`, `iteration`, and the live `attempt_id`. Only then does the
+  coordinator record the result, read session artifacts, and dispatch the next
+  task. A stale call from a different identified worker gets HTTP 409 rather
+  than receiving the live owner's task.
 - **`control.json` and `goal_check.json`.** After a matched finish, the coordinator
   reads `control.json` only from the session directory, and reads `goal_check.json`
   only from the current iteration directory when the workflow is `goal_check` or has
@@ -177,9 +202,10 @@ The contract is designed so that a killed worker, a duplicate retry, or a lost
 acknowledgment never corrupts loop state.
 
 **Stale finish (mismatch).** If a `/finished` call's `session_id` +
-`workflow_id` + `iteration` does not match the current task, the call is stale. The
-coordinator does **not** mutate state and does **not** change the current task; it
-returns the current task's run response so the caller sees what is actually running.
+`workflow_id` + `iteration` + live `attempt_id` does not match the current task,
+the call is stale. The coordinator does **not** mutate state or change the
+current task. It returns the current task only to that task's recorded owner (or
+for a pre-identity legacy task); a different identified caller gets HTTP 409.
 
 **Attempt ids.** Every dispatched task carries a unique `attempt_id`, echoed by
 the worker on `/finished`. A call from a superseded attempt — same
@@ -206,22 +232,21 @@ pending file is missing) and records the task as completed — rather than marki
 `abandoned`. A locally written result is treated as authoritative. The per-iteration
 files behind this are described in [Session Layout](/docs/session-layout).
 
-**Worker crash mid-run.** With nothing recoverable, `/register` applies the
-configured recovery policy to any agent processes the dead worker's harness run
-left behind — by default **bounded drain**: let in-flight agents finish (their
-completed repo edits survive in the working tree; git is the source of truth),
-then re-run the iteration from that better starting point. One
+**Worker task interrupted mid-run.** With nothing recoverable, `/register`
+applies the configured recovery policy to identity-tracked agent processes the
+prior worker's harness run left behind — by default **bounded drain**: let
+in-flight agents finish while their edits survive in the working tree. One
 `recovery_drain_timeout_s` deadline is shared across all of the iteration's
 interrupted runs. A `salvage.json` in the interrupted iteration directory records
-what was drained or reaped, so surviving edits are auditable rather than a mystery
-diff. The iteration's own result is never fabricated. Recovery runs outside the
-state lock (`loopy status`/`stop` stay usable), but `/register` itself can block
-roughly up to the drain deadline plus kill grace periods — the bundled worker uses
-an unbounded read timeout on `/register` only. Process recovery is same-host-only:
-a worker identity from another hostname skips reaping. If any orphan may still be
-running afterwards (unverifiable identity, probe failure, or a kill that did not
-land), the coordinator refuses to dispatch replacement work (HTTP 409) and the
-salvage record names the unresolved processes. This requires a team-harness version
-with the process reaper — older versions skip orphan recovery and fall back to
-plain abandonment. The recovery settings are coordinator-side only; they are not
-part of the wire `config_snapshot`.
+what the reaper reported, so surviving edits are auditable rather than a mystery
+diff. The task's result is never fabricated: abandonment consumes a turn, after
+which normal scheduling continues only if no stop condition fires. Recovery runs
+outside the state lock (`loopy status`/`stop` stay usable), but `/register` itself
+can block roughly up to the drain deadline plus kill grace periods — the bundled
+worker uses an unbounded read timeout on `/register` only. Process recovery is
+same-host-only. For an identity-tracked harness run, an unsettled reaper outcome
+refuses replacement work (HTTP 409) and is captured in `salvage.json`. A remote
+loopy worker skips reaping and falls back to legacy abandonment; when local
+worker liveness is unverifiable, team-harness recovery is still attempted if its
+run data supports it. The recovery settings are coordinator-side only and are
+not part of the wire `config_snapshot`.

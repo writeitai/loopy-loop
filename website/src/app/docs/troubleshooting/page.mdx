@@ -37,7 +37,7 @@ output path, **and** it updates `control.json` when the goal is met. The eval ve
 is evidence; the stop is a separate, explicit decision. See
 [Success & Control](/docs/success-and-control) for the full model.
 
-You can always force a stop by hand with `loopy stop`, which the loop records as
+You can request a graceful stop by hand with `loopy stop`, which the loop records as
 `stop_reason: "stop_requested"`.
 
 ## The loop stopped with goal_check_broken
@@ -141,15 +141,19 @@ or run `loopy stop` first to reach a terminal state before a fresh start.
 **Symptom.** A worker process died in the middle of an assignment, and you are not
 sure whether that iteration's work was lost or will be double-counted.
 
-**Cause.** The worker crashed inside the handoff window — after writing its result
-but before the coordinator acknowledged `/finished`.
+**Cause.** The worker may have stopped before publishing a result, or inside the
+handoff window after writing its result but before the coordinator acknowledged
+`/finished`.
 
 **Fix.** Usually nothing. The loop is built to recover: when the next `/register`
 arrives, the coordinator looks in the current iteration directory for
 `pending_finished_request.json` (or, failing that, `result.json`). If either proves
-the task completed, it records the completed result instead of marking the task
-`abandoned`. Only a task with no recoverable local result is recorded as failed with
-`error="abandoned"`. Just start a worker again and let it re-register. The
+the task completed, it records the completed result. A task with no recoverable
+local result enters agent-process recovery: settled cleanup records
+`abandoned_after_<policy>`, no settled process records plain `abandoned`, and an
+unsettled identity-tracked process makes registration return HTTP 409 instead of
+risking a second writer. Start the worker again and let it re-register; if it gets
+409, resolve the process named by the recovery report before trying again. The
 [HTTP Contract](/docs/http-contract) documents the recovery rules in full.
 
 ## The worker cannot reach the coordinator
@@ -170,7 +174,8 @@ loopy worker --coordinator http://127.0.0.1:8080
 Also export the `team_harness_api_key_env` variable in the worker shell, not just
 the coordinator shell — each process resolves the key independently. The worker
 calls `/register` once for its first task, then loops on `/finished` until it
-receives `action: "stop"`; multiple workers may share one coordinator.
+receives `action: "stop"`. Run exactly one worker per coordinator; a second is
+refused while the recorded worker is verifiably alive.
 
 ## A workflow ignores project_state
 

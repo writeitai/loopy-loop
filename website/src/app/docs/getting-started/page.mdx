@@ -76,7 +76,7 @@ The goal must live in a file — inline `goal:` values in `loopy_loop_config.yam
 
 ## Run the loop
 
-loopy-loop runs as two processes: a coordinator that owns the loop state and one or more workers that execute assignments. Start them in separate terminals.
+loopy-loop runs as two processes: a coordinator that owns the loop state and one worker that executes assignments. Start them in separate terminals.
 
 The default templates use `team_harness_provider: "codex"`, which relies on your local Codex authentication. If you switch to an OpenAI-compatible provider, export the environment variable named in `team_harness_api_key_env` (usually `OPENROUTER_API_KEY`) in **both** the coordinator and worker shells.
 
@@ -92,7 +92,7 @@ Start a worker in another terminal, pointing it at the coordinator:
 loopy worker --coordinator http://127.0.0.1:8080
 ```
 
-The worker asks the coordinator for a task, runs it through `team-harness`, reports the result, and repeats until the coordinator tells it to stop. Multiple workers can share one coordinator.
+The worker asks the coordinator for a task, runs it through `team-harness`, reports the result, and repeats until the coordinator tells it to stop. Exactly one worker owns assignments for a coordinator; a second worker is refused while the recorded worker is verifiably alive.
 
 ## Monitor, stop, and resume
 
@@ -100,10 +100,12 @@ From the repo root, check on the run or ask it to wind down:
 
 ```bash
 loopy status
+loopy status --watch
+loopy events --follow
 loopy stop
 ```
 
-`loopy status` prints the latest session id, iteration count, current task, and stop reason. `loopy stop` requests a graceful stop; workers exit after their next check-in.
+`loopy status` prints the active session stack, current tasks, usage, and estimated cost; `--watch` refreshes it every two seconds. `loopy events --follow` tails the deepest active session. `loopy stop` requests a graceful stop; while a child runs, the top-level stop takes effect after that child terminates and the parent resumes.
 
 If the coordinator process dies while a session is still running, the state file stays marked `running`. Reattach to it with `--resume`:
 

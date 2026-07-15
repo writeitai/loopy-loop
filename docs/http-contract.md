@@ -80,8 +80,8 @@ Rules:
 - `workflow_set` tells the worker which
   `.loopy_loop/workflow_sets/<workflow_set>/workflows/<workflow_id>/` directory
   to load.
-- If `current_task` is already set (previous worker crashed without calling
-  `/finished`), `/register` proceeds in three steps:
+- If `current_task` is already set (the prior assignment remains
+  unacknowledged), `/register` proceeds in three steps:
   1. **Liveness check.** If the recorded worker identity is *verifiably still
      alive* (same host, matching pid + starttime), the call is refused with
      **HTTP 409** and no state is mutated — the task is not abandoned and no
@@ -92,18 +92,18 @@ Rules:
      file proves the task completed, the completed task is recorded in history
      before checking stop conditions.
   3. **Orphan recovery.** With nothing recoverable, the coordinator applies the
-     configured recovery policy (`recovery_policy`, default `drain`; ONE
-     `recovery_drain_timeout_s` deadline shared across all of the iteration's
-     interrupted runs) to any agent processes the dead worker's harness run
-     left behind, writes a `salvage.json` into the interrupted iteration
-     directory when something was handled, and records the iteration as failed
-     with `error="abandoned_after_<policy>"` (or plain `"abandoned"` when
-     nothing settled). Requires team-harness with the process reaper; older
-     versions skip this step. Recovery refuses to dispatch replacement work —
-     **HTTP 409** — when team-harness's guard reports the run's owner still
-     alive, or when any orphan's state after recovery is "may still be
-     running" (unverifiable identity, probe failure, or a kill that did not
-     land); the salvage record documents the unresolved processes.
+     configured recovery policy (`recovery_policy`, default `drain`; one
+     `recovery_drain_timeout_s` deadline shared across all interrupted harness
+     runs) to agent processes left by the interrupted worker task. It writes
+     `salvage.json` whenever at least one tracked harness run is processed, and
+     records the task as failed with `error="abandoned_after_<policy>"` when at
+     least one orphan settled (or plain `"abandoned"` otherwise). Recovery
+     refuses replacement work with **HTTP 409** when team-harness's guard says
+     the run owner is still alive, or when a processed orphan may still be
+     running because its identity was unverifiable, a probe failed, or a kill
+     did not land. The salvage record documents those unresolved processes.
+     Older team-harness versions without the process reaper degrade to plain
+     abandonment.
   The recovery settings are coordinator-side configuration only — they are
   **not** part of the wire `config_snapshot` (released workers reject unknown
   snapshot fields).
@@ -111,8 +111,9 @@ Rules:
   usable while it drains; `/register` can still block roughly up to the drain
   deadline (plus kill grace periods), and the bundled worker uses an unbounded
   read timeout on `/register` only. Process recovery is same-host: a worker
-  identity from another hostname skips reaping (its processes cannot be
-  reached from here). A **hung-but-alive** worker keeps its task (409); the
+  identity from another hostname skips reaping and falls back to plain
+  abandonment because its processes cannot be reached from here. A
+  **hung-but-alive** worker keeps its task (409); the
   escape hatch is to kill that process and register again — the 409 message
   names its pid.
 - If the loop is in a terminal state, `/register` immediately returns `action=stop`.
@@ -153,8 +154,10 @@ run the next dispatched task, so its identity is stamped onto that task.
 `failure_kind` is optional and classifies a failed iteration for the history
 record: `transient` (provider said retry — the harness's own retries were
 already exhausted), `deterministic` (auth/config error retries cannot fix), or
-`unknown`. The coordinator itself records `crash` for iterations abandoned by
-a dead worker. Consecutive failures of the same workflow are counted
+`unknown`. The coordinator itself records `crash` for tasks abandoned by
+worker-crash recovery; this label records the recovery path, not proof that a
+remote or otherwise unverifiable worker was dead. Consecutive failures of the
+same workflow are counted
 (coordinator-side `workflow_consecutive_failures_cap`, default 5; any success
 of that workflow resets its counter) and stop the loop terminally with
 `stop_reason="workflow_failure_cap"` at the cap.

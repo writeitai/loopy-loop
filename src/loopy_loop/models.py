@@ -23,8 +23,9 @@ STOP_ACTION = "stop"
 #   own retries were already exhausted — a later iteration may succeed.
 # - "deterministic": retrying the same thing cannot help (auth failure,
 #   invalid config, 4xx).
-# - "crash": the coordinator observed the worker die mid-iteration
-#   (abandoned / abandoned_after_<policy> entries).
+# - "crash": the task was abandoned by the worker-crash recovery path
+#   (abandoned / abandoned_after_<policy> entries); for a remote or otherwise
+#   unverifiable identity, this does not prove the worker died.
 # - "unknown": no classification signal (agent-process failures, unexpected
 #   exceptions, results from pre-taxonomy versions).
 FailureKind = Literal["transient", "deterministic", "crash", "unknown"]

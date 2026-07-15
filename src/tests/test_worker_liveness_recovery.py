@@ -2,9 +2,10 @@
 
 The worker sends its process identity with /register and /finished; the
 coordinator stamps it onto the dispatched CurrentTask, refuses (409) to reclaim
-a task whose worker is verifiably alive, and — on a confirmed-dead worker with
-nothing recoverable — applies the recovery policy to orphaned agent processes
-via team-harness before re-running the iteration.
+a task whose worker is verifiably alive, and — when the prior worker is not
+verifiably alive and nothing is recoverable — applies the recovery policy to
+agent processes via team-harness before recording abandonment and resuming
+normal scheduling.
 """
 
 from __future__ import annotations

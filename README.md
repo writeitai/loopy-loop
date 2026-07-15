@@ -262,10 +262,11 @@ Important rules:
   team-harness API/network errors.
 - `recovery_policy` (`drain` by default, or `reap`) and
   `recovery_drain_timeout_s` control what crash recovery does with agent
-  processes a dead worker left running: drain lets them finish (one shared
-  bounded deadline) before the iteration is re-run; reap kills them
-  immediately. These are coordinator-side settings and are not part of the
-  config snapshot sent to the worker.
+  processes left by an interrupted worker task: drain lets them finish within
+  one shared bounded deadline; reap kills them immediately. The interrupted
+  task is recorded as abandoned, consumes a turn, and then normal scheduling
+  continues only if no stop condition fires. These are coordinator-side
+  settings and are not part of the config snapshot sent to the worker.
 - `workflow_consecutive_failures_cap` (default 5) is a per-workflow circuit
   breaker: that many consecutive failed iterations of the same workflow stop
   the loop with `stop_reason="workflow_failure_cap"` instead of retrying a
@@ -429,8 +430,9 @@ consecutive failed iterations of any single workflow stop the loop with
 `stop_reason="workflow_failure_cap"` after `workflow_consecutive_failures_cap`.
 Failed iterations record a `failure_kind` in history — `transient` (provider
 said retry; team-harness's own retries were exhausted), `deterministic`
-(auth/config errors retries cannot fix), `crash` (worker died mid-iteration),
-or `unknown` — so a stopped run is legible without reading harness logs.
+(auth/config errors retries cannot fix), `crash` (the task was abandoned by
+worker-crash recovery; this does not prove an unverifiable worker died), or
+`unknown` — so a stopped run is legible without reading harness logs.
 
 ## Workflow Sets and Child Sessions
 
