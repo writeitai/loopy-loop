@@ -1,12 +1,12 @@
 export const metadata = {
   title: "CLI Reference",
   description:
-    "Every loopy-loop command: init, coordinator, worker, status, and stop, with their flags and usage examples.",
+    "Every loopy-loop command: init, coordinator, worker, status, events, and stop, with their flags and usage examples.",
 };
 
 # CLI Reference
 
-loopy-loop is driven by a single command-line tool with five subcommands: `init` scaffolds a repo, `coordinator` and `worker` run the loop, and `status` and `stop` control it. Every command operates on the current working directory, so run them from the root of your target repository.
+loopy-loop is driven by a single command-line tool with six subcommands: `init` scaffolds a repo, `coordinator` and `worker` run the loop, `status` and `events` inspect it, and `stop` controls it. Every command operates on the current working directory, so run them from the root of your target repository.
 
 ## Command aliases
 
@@ -57,7 +57,7 @@ Starting a coordinator against a still-running session without `--resume` is int
 
 ## loopy worker
 
-Runs a blocking worker that executes assignments through `team-harness`. It calls `/register` once for its first task, then loops — running each workflow and reporting via `/finished` — until the coordinator returns a stop response. You can run several workers against one coordinator.
+Runs the single blocking worker that executes assignments through `team-harness`. It calls `/register` once for its first task, then loops — running each workflow and reporting via `/finished` — until the coordinator returns a stop response. A second worker is refused while the recorded worker is verifiably alive.
 
 | Option | Default | Description |
 | --- | --- | --- |
@@ -71,7 +71,7 @@ The worker reaches the model layer too, so if your provider needs an API key, ex
 
 ## loopy status
 
-Prints the state of the latest session: overall status, session id, completed iteration count, the current task (workflow id, iteration, session, and start time), and the stop reason if any. If there is no state yet, it says so.
+Prints the durable session stack: overall status, session id, completed iteration count, current task, stop reason, subtree token usage and duration, and estimated cost when `model_prices` is configured. While a child runs it appears below the suspended parent. If there is no state yet, the command says so.
 
 ```bash
 loopy status
@@ -79,23 +79,37 @@ loopy status
 
 ```text
 status: running
-session: 20260712T193000Z-a1b2c3d4e5f6
-iteration_count: 12
-current_task: inner (iteration 12, session 20260712T193000Z-a1b2c3d4e5f6, started 2026-07-12T19:41:07Z)
+session: 20260712_193000_a1b2c3d4e5f6_7a8b9c0d
+iteration_count: 11
+current_task: inner (iteration 12, session 20260712_193000_a1b2c3d4e5f6_7a8b9c0d, started 2026-07-12T19:41:07Z)
 stop_reason: none
+subtree_usage: prompt_tokens=12000 completion_tokens=3000 (iterations fully measured: 11, unknown: 0)
+subtree_harness_duration_s: 840
 ```
 
-`status` takes no options.
+`loopy status --watch` clears and re-renders the view every two seconds until interrupted.
+
+## loopy events
+
+Prints the deepest active session's versioned `events.jsonl` stream. `--follow` tails new events and switches streams when a child starts or finishes; `--json` emits raw JSON lines.
+
+```bash
+loopy events
+loopy events --follow
+loopy events --follow --json
+```
 
 ## loopy stop
 
-Requests a graceful stop by setting `stop_requested=true` in the latest session-local state. Running workers exit after their next check-in with the coordinator; the coordinator brings the session to a terminal state. It prints `stop requested` on success, and errors if there is no state to stop.
+Requests a graceful stop by setting `stop_requested=true` in the latest top-level session state. When no child is active, the worker exits after its next check-in and the coordinator brings the session to a terminal state. It prints `stop requested` on success, and errors if there is no state to stop.
 
 ```bash
 loopy stop
 ```
 
 `stop` takes no options. For how a *workflow* stops the loop on its own — versus this operator-initiated stop — see [Success & Control](/docs/success-and-control).
+
+`stop` currently targets the latest top-level session. If a child is active, the child does not see the flag; it terminates normally, then the resumed parent honors the request. Child-aware and force-stop behavior remains proposed work.
 
 ## Where to go next
 

@@ -54,9 +54,8 @@ involvement is a last resort, never a normal step.
   run stops — state exactly what was missing and what was tried.
 - **Do NOT build or assume a preferred human gate.** No `paused` / `waiting_for_human`
   state, no `gate_request.json`, no external-action approval flow. That was considered and
-  rejected (D5; `design/designs/improvement-proposals.md` P0.2). Do not pause a run to ask
-  a question when you could either solve it autonomously or stop cleanly with
-  `unresolvable_error`.
+  rejected by D5. Do not pause a run to ask a question when you could either solve it
+  autonomously or stop cleanly with `unresolvable_error`.
 
 ## Rule 3 — Design and decision docs must be understandable cold, by future agents AND humans
 
@@ -72,9 +71,10 @@ specialist. Write for them.
   companion design section must be self-contained.
 - **Anchor claims in the code.** Reference the file/function (e.g. `coordinator_app.py`,
   `harness_runner.py`) so a reader can verify — but lead with the plain-English meaning.
-- **Keep `design/` honest about status.** `design/designs/` is binding; `design/analysis/`
-  is working notes (may be superseded); `improvement-proposals.md` is *proposed, not
-  decided*. Don't cite a proposal as if it were a decision.
+- **Keep `design/` honest about status.** `design/designs/` is binding;
+  `design/proposals/` is unimplemented, non-binding work under consideration; and
+  `design/analysis/` is working notes (may be superseded). Don't cite a proposal as if
+  it were a decision or a description of current behavior.
 
 When in doubt on any rule, favor the version a stranger could read cold and fully
 understand.

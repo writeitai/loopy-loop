@@ -201,8 +201,8 @@ class CoordinatorService:
         self, *, request: RegisterRequest | None = None
     ) -> TaskResponse:
         caller = request.worker if request is not None else None
-        # Two-phase recovery: the potentially long drain of a dead worker's
-        # orphaned agents (up to recovery_drain_timeout_s) runs in phase A,
+        # Two-phase recovery: the potentially long drain of an interrupted
+        # task's agent processes (up to recovery_drain_timeout_s) runs in phase A,
         # OUTSIDE the state lock, so `loopy status`/`stop` and /finished stay
         # responsive. Phase B re-validates under the lock and retries from
         # phase A when the state moved in between.
@@ -312,8 +312,8 @@ class CoordinatorService:
                         now=now,
                     )
                 elif recovery is not None and _same_task(orphaned, recovery[0]):
-                    # The dead worker's orphans were handled in phase A
-                    # (outside the lock); commit the abandonment.
+                    # The interrupted task's agent processes were handled in
+                    # phase A (outside the lock); commit the abandonment.
                     outcome = recovery[1]
                     error = "abandoned"
                     if outcome.salvaged:
@@ -714,7 +714,7 @@ class CoordinatorService:
             state.stop_reason = "workflow_failure_cap"
 
     def _recover_orphaned_agents(self, *, current_task: CurrentTask) -> RecoveryOutcome:
-        """Apply the configured recovery policy to a dead worker's orphans.
+        """Apply the configured recovery policy to an interrupted task's agents.
 
         Runs in phase A, OUTSIDE the state lock — draining can take up to the
         configured timeout without blocking status/stop or /finished.

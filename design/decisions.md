@@ -7,8 +7,11 @@ the conversation that produced them** — needs to understand each one cold.
 Companion docs:
 - `design/designs/success-semantics-and-evaluation.md` — the self-contained, detailed
   form of **D3** and **D4** (this log states the conclusion; that doc makes it complete).
-- `design/designs/improvement-proposals.md` — forward-looking changes we are *considering*
-  (not decided; do not treat as binding).
+- `design/designs/long-running-loop-reliability.md` — the self-contained description
+  of the crash recovery, telemetry, failure containment, and model-tier mechanisms
+  already implemented under several decisions below.
+- `design/proposals/` — forward-looking changes we are *considering* (not decided;
+  do not treat them as binding or as descriptions of current behavior).
 - `design/analysis/` — the July 2026 review that produced several of these decisions
   (working notes; may be messy or superseded).
 - `README.md` — the user-facing behavior these decisions implement.
@@ -46,7 +49,9 @@ This is the premise the rest of the log depends on.
 
 **Decision.** The coordinator drives exactly **one** worker at a time, over a
 two-endpoint ping-pong API (`POST /register`, `POST /finished`). v0.2.0 deliberately
-removed leases, polling, and worker identity to get here. Several recovery paths in
+removed leases, polling, and the multi-worker registry/scheduling model to get here.
+v0.3.0 later added process identity solely to prove ownership and liveness during
+crash recovery; it did not restore a worker pool. Several recovery paths in
 `coordinator_app.py` are correct **only** under this single-worker assumption, and say
 so in comments.
 
@@ -57,9 +62,10 @@ parallelism already exists one layer down, inside `team-harness` (a coordinator 
 spawn several worker CLIs at once).
 
 **Consequences.** Do **not** reintroduce parallel loopy workers as a "scaling" feature;
-it is a redesign of the state machine, not a flag, and it is explicitly deferred (see
-`improvement-proposals.md`). Recovery logic may rely on "at most one task is live."
-Child sessions are depth-first, one at a time (see D6).
+it is a redesign of the state machine, not a flag. The deliberate boundaries in
+`designs/long-running-loop-reliability.md` record it as rejected, not pending work.
+Recovery logic may rely on "at most one task is live." Child sessions are depth-first,
+one at a time (see D6).
 
 ## D3. Iteration success means "the assignment ran," not "the work is good"
 
@@ -137,9 +143,9 @@ only when a blocker is genuinely unavoidable without a human. When they do stop,
 recorded blocker must be specific enough that a human reading it later understands
 exactly what was missing and what was tried, because that report is the entire
 human-facing surface. Do **not** add a `paused` / `waiting_for_human` state, a
-`gate_request.json` flow, or an external-action approval gate; that proposal was
-considered and rejected (see `improvement-proposals.md` P0.2). This decision is the
-mechanism `AGENTS.md` and `CLAUDE.md` point agents at.
+`gate_request.json` flow, or an external-action approval gate; that alternative was
+considered and rejected. This entry is the canonical disposition and the mechanism
+`AGENTS.md` and `CLAUDE.md` point agents at.
 
 ## D6. Large multi-phase targets are driven by the planner/dispatcher double loop from the start
 
@@ -157,13 +163,12 @@ the start avoids re-architecting mid-project.
 
 **Consequences.** The parent/child machinery is on the critical path from day one, so it
 must be hardened *first* — durable active-child crash recovery and a PM template that is
-runnable from a clean init are prerequisites, not later polish (see
-`improvement-proposals.md` P0). Note that this recovery is of session/child *state* from
-files, not of running agent processes: re-adopting a crashed worker's agent subprocesses
-is not feasible, so a hard worker crash is handled by cleanup, not adoption
-(`improvement-proposals.md` P2.5). Child sessions remain depth-first and one-at-a-time
-(consistent with D2). The planner drives the target's *own* authoritative plan; it does
-not invent a parallel backlog.
+runnable from a clean init are prerequisites, not later polish. Both are implemented and
+described in `designs/long-running-loop-reliability.md`. Session-stack recovery
+reconstructs session/child *state* from files; it does not re-adopt a crashed worker's
+agent subprocesses. A hard worker crash is handled by the D7 drain/reap cleanup path.
+Child sessions remain depth-first and one-at-a-time (consistent with D2). The planner
+drives the target's *own* authoritative plan; it does not invent a parallel backlog.
 
 ## D7. Process-lifecycle ownership is split: team-harness owns agent processes, loopy-loop owns the worker
 
@@ -174,35 +179,47 @@ own:
   provides a durable liveness check plus **drain / reap / ignore** policy operations over those
   groups. (team-harness `design/decisions.md` TH-D5;
   `design/designs/process-lifecycle-and-reaping.md`.)
-- **loopy-loop owns its own `loopy worker` process.** It records the worker's pid and a
-  heartbeat in the session directory, and on crash recovery it (a) uses worker liveness to tell
-  "still running" from "dead" before reclaiming a task — closing the duplicate-work window on a
-  second `/register` — and (b) applies a policy per orphaned agent for the interrupted run.
+- **loopy-loop owns its own `loopy worker` process.** It records the worker's hostname,
+  pid, and pid-reuse-proof start-time token on the live `CurrentTask`. On crash recovery it
+  (a) probes a verifiable same-host identity to tell "still running" from "dead" before
+  reclaiming a task — closing the local duplicate-work window on a second `/register` — and
+  (b) applies the configured policy to the interrupted run's orphaned agents. There is no
+  periodic heartbeat; liveness is checked directly against the stored identity.
   **Default: bounded drain** — let an in-flight agent finish within a timeout (fits loopy's
   git-is-truth, cost-conscious profile; no concurrent-writer problem because it runs during
-  recovery), with **reap** as the escape for force-stop / hung-past-timeout / unsafe-to-finish.
-  A drained iteration is **still re-run**: its `result.json` never existed and is never
-  synthesized from drained outputs (that would fabricate a result the dead coordinator never
-  produced — the false-closure trap D3 prevents). The drain's yield is the agents' completed
-  repo edits (preserved by git, D1) plus an explicit **salvage record** — `salvage.json` in the
-  interrupted iteration's directory and an `abandoned_after_drain` history code — so the
-  provenance of the surviving edits is auditable rather than a mystery diff.
+  recovery), with **reap** as the escape for hung-past-timeout or unsafe-to-finish work. A
+  future force-stop command must reuse this cleanup path rather than inventing another one.
+  A drained iteration is **never accepted or synthesized from drained outputs**: its
+  `result.json` never existed, and fabricating one would trigger the false-closure trap D3
+  prevents. If stop conditions still allow the session to continue, the scheduler dispatches
+  another real iteration; a failure cap or `max_turns` may instead stop it. Recovery preserves
+  completed repo edits through git (D1). When it processes at least one tracked harness run,
+  it also writes `salvage.json` in the interrupted iteration's directory. When at least one
+  orphan reaches a settled outcome, history uses `abandoned_after_<policy>` instead of plain
+  `abandoned`. These records make the provenance of surviving edits auditable rather than a
+  mystery diff.
 
-**Context.** loopy-loop runs the harness synchronously inside its worker; the agent CLIs are
-children of that worker, not of loopy-loop's coordinator, and loopy-loop tracks no process
-identity of its own today. A hard worker crash therefore orphans agent processes that keep
-spending money and writing to the checkout, and loopy-loop cannot currently distinguish a live
-worker from a dead one. Neither problem is solvable by re-adopting processes (impossible — see
-D6 and team-harness TH-D2); both are solvable by *tracking identity, then draining or reaping*,
-and the natural split is "each layer owns the processes it spawns."
+**Context.** Before v0.3.0, loopy-loop ran the harness synchronously inside its worker
+without persisting process identity. The agent CLIs are children of that worker, not of
+loopy-loop's coordinator, so a hard worker crash could orphan processes that kept spending
+money and writing to the checkout while the coordinator could not distinguish a live worker
+from a dead one. Neither problem is solvable by re-adopting processes (impossible — see D6
+and team-harness TH-D2). For a verifiable same-host identity, both are solved by *tracking
+identity, then draining or reaping*, with the natural split "each layer owns the processes it
+spawns." A remote worker remains unverifiable and falls back to legacy abandonment because
+its processes cannot be reached from the coordinator host. A missing start-time token or
+identity provider prevents the worker-liveness proof; same-host agent recovery is still
+attempted when team-harness has usable run records, and otherwise degrades to legacy
+abandonment. Those fallback paths cannot prove the old writer is gone.
 
 **Consequences.** The process-lifecycle mechanism (liveness + drain/reap/ignore) is a
 team-harness feature (we own it — it is not a `/proc`-scraping hack bolted onto loopy-loop);
-loopy-loop consumes it. loopy-loop's own new work is small: persist the worker pid + heartbeat,
-and apply a recovery policy per orphan (default bounded drain, reap as escape). This makes D6's
-state-recovery *safe* (verify-dead-before-reclaim) rather than optimistic. See
-`improvement-proposals.md` P0.1 (worker liveness) and P2.5 (recovery policy), and team-harness
-TH-D5.
+loopy-loop consumes it. loopy-loop persists the worker's hostname/pid/start-time identity and
+applies one configured recovery policy to the interrupted run's orphans (default bounded
+drain, reap as escape). For identity-tracked same-host runs this makes D6's state recovery
+verify-dead-before-reclaim rather than optimistic; legacy and remote identities retain the
+documented limitation above. The implemented protocol and salvage boundary are described in
+`designs/long-running-loop-reliability.md`; the process-group mechanism is team-harness TH-D5.
 
 ## D8. Constraints on agents are fail-closed detection with a repair path, never hard prevention
 

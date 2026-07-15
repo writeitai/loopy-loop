@@ -1,14 +1,14 @@
 # Design: Public Documentation Site
 
-**Status:** Proposed (plan for a new deliverable; nothing built yet)
+**Status:** Accepted and implemented (`website/` plus `.github/workflows/docs-deploy.yml`)
 **Date recorded:** 2026-07-12
-**Applies to:** a new, self-contained documentation site for `loopy-loop`, to live
-in this repository and be published on a `writeit.ai` subdomain.
+**Applies to:** the self-contained `loopy-loop` documentation site in `website/`
+and its GitHub Pages deployment target on a `writeit.ai` subdomain.
 
-This document records the plan and the decisions behind it, so that when the site is
-built the choices are already argued and a later reader understands *why* the stack
-looks the way it does. It is written before implementation on purpose: the "what to
-build" is settled here first.
+This document was written before implementation and now records the decisions behind
+the shipped site, so a later reader understands *why* the stack looks the way it does.
+The implementation landed in `website/`; its build and deployment workflow lives at
+`.github/workflows/docs-deploy.yml`.
 
 The shared principle:
 
@@ -40,7 +40,7 @@ The shared principle:
 Three sibling frontends were reviewed before choosing an approach:
 
 - **`orchestra/public_and_admin_app/fe`** (the `247agents.io` site) — **the model we
-  will follow.** It is a Next.js 16 App-Router site whose docs are native
+  followed.** It is a Next.js 16 App-Router site whose docs are native
   [`@next/mdx`](https://nextjs.org/docs/app/building-your-application/configuring/mdx)
   pages: each `src/app/(public)/docs/**/page.mdx` file *is* a route. It uses Tailwind
   v4 + shadcn/ui + `@tailwindcss/typography` (`prose`), `rehype-pretty-code` (Shiki)
@@ -213,9 +213,9 @@ These become the shadcn/Tailwind CSS variables (`--background`, `--foreground`,
 - **Font:** `writeit.ai` uses **proxima-nova**, a paid Adobe Typekit font served from
   a domain-locked kit. It cannot ship in a self-hostable OSS module and will not render
   off `writeit.ai` domains. We therefore match the *colours* exactly and pick a close
-  open substitute — **Hanken Grotesk** or **Figtree** (both load via `next/font`,
-  self-host cleanly, and are visually adjacent to proxima-nova). This keeps the module
-  truly self-hostable while preserving brand feel.
+  open substitute. The implementation chose **Hanken Grotesk**, loaded through
+  `next/font`; it self-hosts cleanly and is visually adjacent to proxima-nova. This
+  keeps the module truly self-hostable while preserving brand feel.
 - **Light-first:** `writeit.ai` itself is light-only, so light mode is the faithful
   match. Dark mode is a cheap fast-follow (`next-themes` + the shadcn dark tokens
   orchestra already defines) and is deferred, not designed out.
@@ -227,20 +227,20 @@ These become the shadcn/Tailwind CSS variables (`--background`, `--foreground`,
 ### Decision
 
 The first version restructures **existing** documentation into MDX pages rather than
-writing net-new prose, and reconciles the drifted `skills/loopy-loop/SKILL.md` against
-the current API as part of that pass.
+writing net-new prose. The same release sequence also reconciled the drifted
+`skills/loopy-loop/SKILL.md` against the current API.
 
 ### Context / why
 
-The content is roughly 80% already written — the 466-line `README.md`,
+The content was roughly 80% already written — the then-466-line `README.md`,
 `docs/session-layout.md`, `docs/http-contract.md`, the accepted
 `success-semantics-and-evaluation.md` design doc, the `CHANGELOG`, and `SKILL.md`.
-This is primarily a re-homing and structuring job. `SKILL.md` currently references the
-older `.loopy_loop/workflows/` layout and pre-0.2.0 polling language; the docs must
-follow the README's current two-endpoint / `workflow_sets/` model, and the drift is
-worth fixing while the content is being touched.
+This was primarily a re-homing and structuring job. Before the implementation,
+`SKILL.md` referenced the older `.loopy_loop/workflows/` layout and pre-0.2.0 polling
+language. The site and corrected Skill now follow the README's two-endpoint /
+`workflow_sets/` model.
 
-### Proposed information architecture
+### Implemented information architecture
 
 Each entry is one `page.mdx`, sourced from the material in parentheses.
 
@@ -256,7 +256,7 @@ Each entry is one `page.mdx`, sourced from the material in parentheses.
 | `/docs/session-layout` | `docs/session-layout.md` |
 | `/docs/http-contract` | `docs/http-contract.md` |
 | `/docs/child-sessions` | `child_requests` contract, `pm_planner_dispatcher` |
-| `/docs/cli-reference` | `init` / `coordinator` / `worker` / `status` / `stop` |
+| `/docs/cli-reference` | `init` / `coordinator` / `worker` / `status` / `events` / `stop` |
 | `/docs/troubleshooting` | `SKILL.md` "Common Pitfalls" |
 
 The nav order and grouping live in one hand-maintained array (orchestra's
@@ -269,16 +269,16 @@ The nav order and grouping live in one hand-maintained array (orchestra's
 `Next.js` (App Router) · `@next/mdx` · `output: 'export'` + `trailingSlash: true` ·
 `Tailwind v4` + `shadcn/ui` + `@tailwindcss/typography` · `remark-gfm` +
 `rehype-slug` + `rehype-pretty-code` (Shiki) · `Pagefind` + `cmdk` for ⌘K search ·
-WriteIt palette with Hanken Grotesk / Figtree · deployed to GitHub Pages at
-`loopy.writeit.ai`.
+WriteIt palette with Hanken Grotesk · GitHub Pages deployment target at
+`loopy.writeit.ai` (the external Pages/DNS provisioning remains an operational step).
 
 ---
 
 ## Follow-up (out of scope for this repo's PR)
 
-After the site is live, add a "Docs" link on `writeit.ai` pointing to
-`https://loopy.writeit.ai`. That is a separate change in the `writeit` repo and is
-tracked as a follow-up, not part of building the site here.
+The remaining cross-repository follow-up is to add a "Docs" link on `writeit.ai`
+pointing to `https://loopy.writeit.ai`. That change belongs in the `writeit` repo and
+is not part of this implementation.
 
 ---
 
@@ -290,7 +290,7 @@ tracked as a follow-up, not part of building the site here.
 | 2. Location | `website/` in this repo | Self-hostable module; docs version with code |
 | 3. Hosting | GitHub Pages at `loopy.writeit.ai` via CNAME | Hosting stays with the OSS repo; static, no server |
 | 4. Search | Pagefind + `cmdk` (⌘K) | Static, self-hostable, closes orchestra's search gap |
-| 5. Style | WriteIt palette + open font, light-first | Brand-continuous; font stays self-hostable; faithful to a light-only site |
+| 5. Style | WriteIt palette + Hanken Grotesk, light-first | Brand-continuous; font stays self-hostable; faithful to a light-only site |
 | 6. Content | Restructure existing docs into MDX; fix `SKILL.md` drift | Content ~80% written; keep docs on the current API |
 
 ### When to revisit
@@ -299,4 +299,4 @@ tracked as a follow-up, not part of building the site here.
   (search + dark mode built in). The content (MDX) ports with little change.
 - If org ops-consistency outweighs repo-locality, switch Decision 3 to **Firebase
   Hosting** (same CNAME flow, different deploy step, no code change).
-- Add **dark mode** (`next-themes` + existing shadcn dark tokens) once light mode ships.
+- **Dark mode** remains an optional follow-up (`next-themes` + shadcn dark tokens).

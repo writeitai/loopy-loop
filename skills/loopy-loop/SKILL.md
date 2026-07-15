@@ -448,26 +448,29 @@ terminal state. Resume reconstructs the session stack: a running child session
 continues where it was; a child found terminal is finalized and its parent
 resumed.
 
-### Crash recovery (worker died mid-iteration)
+### Crash recovery (worker task interrupted)
 
 When a new worker registers while a task is still marked live, the coordinator:
 
 1. **Liveness check** — refuses (409) if the recorded worker is verifiably
    still alive on this host.
-2. **Result recovery** — if the dead worker already produced
+2. **Result recovery** — if the prior worker already produced
    `pending_finished_request.json` or `result.json`, the completed task is
    recorded; no work is lost.
 3. **Orphan recovery** — otherwise the recovery policy is applied to agent
-   processes the dead worker's harness run left behind: `drain` (default)
+   processes the prior worker's harness run left behind: `drain` (default)
    waits up to `recovery_drain_timeout_s` for them to finish; `reap` kills
-   them. When at least one orphaned run was actually handled, a
-   `salvage.json` in the interrupted iteration directory records what
-   happened to each orphan and the failed iteration carries
-   `error="abandoned_after_<policy>"` (plain `"abandoned"` when nothing
-   settled). The iteration is then re-dispatched unless a stop condition
-   fires first (the abandonment consumes a turn, so it can itself trigger
-   `max_turns`). If any orphan may still be running, the coordinator refuses
-   to dispatch (409) rather than risk duplicate work.
+   them. When at least one harness run is processed, `salvage.json` records
+   what happened; the failed iteration carries
+   `error="abandoned_after_<policy>"` only when something settled (plain
+   `"abandoned"` otherwise). The abandonment consumes a turn and normal
+   scheduling continues only if no stop condition fires; the same workflow is
+   not guaranteed to run next. For identity-tracked harness runs, an unsettled
+   reaper outcome refuses dispatch (409). A remote loopy worker skips reaping
+   and falls back to legacy abandonment; when local worker liveness is
+   unverifiable, same-host team-harness recovery is still attempted if its run
+   records support it. Those fallback paths cannot provide the local safety
+   proof.
 
 A hung-but-alive worker keeps its task (409 names its pid); the escape hatch is
 to kill that process and register again.
@@ -488,15 +491,13 @@ live child under the suspended parent. Every session also has an append-only
 `child_started`, `child_finished`, `session_stopped`, ...) — the operational
 legibility stream (best-effort; the durable truth stays in state.json).
 
-Both commands print a friendly error and exit if the coordinator holds the
+The commands print a friendly error and exit if the coordinator holds the
 state lock mid-request — retry shortly.
 
-**Child-session caveat:** both commands operate on the latest **top-level**
-session state. While a child session runs, `loopy status` shows the suspended
-parent (often `current_task: none`), not the live child; and `loopy stop`
-sets `stop_requested` on the parent — the child does not see the flag and
-keeps iterating until it reaches a terminal state, and only then does the
-resumed parent honor the stop.
+**Child-session caveat:** `status` and `events` resolve the durable stack and
+show/follow the live child. `stop` still operates on the latest **top-level**
+session state: the child does not see that flag and keeps iterating until it
+reaches a terminal state, after which the resumed parent honors the stop.
 
 Per-iteration artifacts live at
 `.loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>/`

@@ -6,10 +6,15 @@ One session directory is created per fresh coordinator run and reused for all it
 .loopy_loop/
 └── sessions/
     └── <session_id>/
+        ├── goal.md
         ├── session.json
+        ├── state.json
         ├── events.jsonl
         ├── control.json
         ├── updates_from_user.md
+        ├── children.json
+        ├── child_requests/
+        ├── children/
         ├── project_state/
         │   └── finished.md
         ├── eval_checks/
@@ -36,7 +41,18 @@ One session directory is created per fresh coordinator run and reused for all it
                 └── goal_check.json
 ```
 
+`children/` appears after the session dispatches its first child; the
+`children.json` ledger and `child_requests/` inbox are scaffolded at session
+creation.
+
 ## Session Files
+
+`goal.md`
+
+- Exact resolved goal text for this session, including a child request's goal
+  or a `--goal-file` override
+- The rendered Goal and this session-local copy are canonical for active work;
+  the repo-root goal file may describe a different session
 
 `session.json`
 
@@ -44,6 +60,13 @@ One session directory is created per fresh coordinator run and reused for all it
 - Contains `session_id`, `goal_hash`, and `created_at`
 - New session ids use `<YYYYMMDD>_<HHMMSS>_<goal_hash>_<random>` so session
   directories sort chronologically by name
+
+`state.json`
+
+- Coordinator-owned durable dispatch state, history, stop state, active-child
+  pointer, and usage ledger
+- This is the durable source of truth; `events.jsonl` is only an observability
+  projection
 
 `events.jsonl`
 
@@ -77,8 +100,9 @@ One session directory is created per fresh coordinator run and reused for all it
 `project_state/`
 
 - Optional workflow-owned markdown state for reusable workflows
-- `loopy_loop_goal.txt` is the source of truth for the target, constraints, and
-  completion intent; do not copy or restate the goal into `project_state/`
+- The rendered Goal and session-local `goal.md` are the source of truth for the
+  target, constraints, and completion intent; do not copy or restate the goal
+  into `project_state/`
 - Common files include `README.md`, `memory.md`, `current_state.md`,
   `what_we_have.md`, `decisions.md`, `eval_results.md`, `finished.md`, and
   `what_we_should_do/plan.md`
@@ -138,6 +162,21 @@ eval-banana run \
 .loopy_loop/sessions/<session_id>/harness_outputs/<NNNN>_<workflow_id>/<team_harness_run_id>/
 ```
 
+`children.json`, `child_requests/`, and `children/`
+
+- `child_requests/` is the inbox for pending child-session requests, and
+  `children/` contains the child session directories once dispatched
+- `children.json` indexes every dispatched child with its `session_id`,
+  `workflow_set`, status, timestamps, `stop_reason`, and originating
+  `request_file`
+- A request filename suppresses redispatch only while its child record is
+  `running` or `dispatching`, closing the record-written/request-not-yet-removed
+  crash window; a completed child's old filename may be reused for new work
+- The parent's `state.json` records `active_child_session_id` while a child runs,
+  which is the durable pointer followed during restart
+- At finalization the child record captures whole-subtree usage so the parent's
+  tree-wide ledger and `max_cost_usd` include completed children
+
 ## Iteration Files
 
 `prompt.txt`
@@ -176,42 +215,31 @@ eval-banana run \
 - If the file is missing but `result.json` exists for the active task, the
   coordinator can reconstruct the finished request from `result.json`
 
-`children.json` (parent sessions)
-
-- Index of child sessions dispatched by this session; each record carries the
-  child `session_id`, `workflow_set`, `status`, timestamps, `stop_reason`, and
-  the originating `request_file` name (which makes the dispatch scan
-  idempotent: a request whose filename already appears here is never
-  dispatched twice, even if a crash left the file behind)
-- The parent's `state.json` additionally records `active_child_session_id`
-  while a child runs — the durable session-stack pointer a restarted
-  coordinator follows to resume the child instead of orphaning it
-- At finalization the record also captures the child's usage totals
-  (`usage`: tokens, known/unknown iteration counts, duration), which is how
-  a parent's tree-wide usage and `max_cost_usd` budget include finished
-  children without double-storing
-
-Atomicity and crash model: the coordinator- and worker-owned artifacts above
-are written atomically (same-directory temp file + rename), so a **process
-crash** never leaves them truncated — readers see either the previous or the
-new complete file. This does not extend to power loss / kernel crashes (no
-fsync), and it cannot be enforced for **workflow-written** signals
-(`control.json`, `goal_check.json`, child requests): the packaged prompts
-instruct agents to publish those via temp-file + rename, but a torn write by a
-non-compliant agent is read as invalid output.
+Atomicity and crash model: recovery-relevant mutations such as `state.json`,
+later `children.json` updates, iteration results, handoff records, and
+`salvage.json` use same-directory temporary files plus replace. Each published
+file is atomic, but the parent/child transition is not one multi-file
+transaction; restart reconciliation handles its staged crash windows. Initial
+session scaffolding includes direct writes, so atomicity is not a blanket claim
+for every coordinator-created file. Nor can the engine enforce atomic writes
+for workflow-owned signals (`control.json`, `goal_check.json`, child requests):
+packaged prompts require temp-file-plus-rename publication, and the coordinator
+treats torn or invalid output as invalid rather than as evidence. There is no
+fsync guarantee for power or kernel failure.
 
 `salvage.json`
 
-- Written into the interrupted iteration's directory during crash recovery,
-  when the coordinator applied the recovery policy (`recovery_policy`, default
-  bounded drain) to agent processes a dead worker's harness run left behind
+- Written into the interrupted iteration's directory when crash recovery
+  processes at least one tracked harness run using `recovery_policy` (bounded
+  `drain` by default, or immediate `reap`)
 - Records the reap reports: which orphaned agents were drained (allowed to
   finish), reaped (killed), or skipped, so the provenance of any surviving
   working-tree edits is auditable rather than a mystery diff
-- The iteration is still re-run — its `result.json` never existed and is never
-  fabricated; when any orphan actually settled, the corresponding history entry
-  carries `error="abandoned_after_<policy>"` (e.g. `abandoned_after_drain`)
-  instead of plain `"abandoned"`
+- Its `result.json` never existed and is never fabricated. The abandonment
+  consumes a turn; normal scheduling continues only if no stop condition fires,
+  and it need not select the same workflow next. When any orphan settled, the
+  history entry carries `error="abandoned_after_<policy>"` (for example,
+  `abandoned_after_drain`) instead of plain `"abandoned"`
 - Schema: `{"schema_version": 1, "recorded_at": ..., "policy": ...,
   "reaped_runs": N, "settled_workers": N, "unsettled_workers": N,
   "reports": [...]}`. A non-zero `unsettled_workers` means some orphan may

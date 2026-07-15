@@ -32,10 +32,15 @@ A session directory looks like this:
 .loopy_loop/
 └── sessions/
     └── <session_id>/
+        ├── goal.md
         ├── session.json
+        ├── state.json
         ├── events.jsonl
         ├── control.json
         ├── updates_from_user.md
+        ├── children.json
+        ├── child_requests/
+        ├── children/
         ├── project_state/
         │   └── finished.md
         ├── eval_checks/
@@ -62,16 +67,26 @@ A session directory looks like this:
                 └── goal_check.json
 ```
 
-Sessions that spawn child work also grow a `child_requests/` inbox and a
-`children/` directory; those are covered on [Child Sessions](/docs/child-sessions).
+The `children/` directory is populated only when the session dispatches child
+work; these files are covered on [Child Sessions](/docs/child-sessions).
 
 ## Session files
+
+**`goal.md`** — The exact resolved goal text for this session. The rendered Goal
+and this session-local copy are canonical for active work, including child goals
+and `--goal-file` overrides.
 
 **`session.json`** — Session metadata, written once when the directory is created.
 It contains `session_id`, `goal_hash`, and `created_at`.
 
-**`events.jsonl`** — A reserved append-only event log for diagnostics, created at
-session start in v1.
+**`state.json`** — Coordinator-owned durable dispatch state, history, stop state,
+active-child pointer, and usage ledger. This is the source of truth behind the
+best-effort event stream.
+
+**`events.jsonl`** — A best-effort, append-only stream of versioned lifecycle
+events. It is written after the durable state mutation, so consumers must
+tolerate gaps, duplicates, and a torn final line; `state.json` remains the source
+of truth. Tail it with `loopy events --follow`.
 
 **`control.json`** — The session-scoped workflow stop switch, created with
 `state: "running"` when the session starts. Workflows update it only when they want
@@ -85,9 +100,9 @@ planning input, and clears the file only after reflecting the request into
 `project_state/`.
 
 **`project_state/`** — Optional workflow-owned durable markdown state for reusable
-workflows. `loopy_loop_goal.txt` remains the source of truth for the target,
-constraints, and completion intent; do not copy or restate the goal into
-`project_state/`. Common files include `README.md`, `memory.md`,
+workflows. The rendered Goal and session-local `goal.md` are canonical for the
+active session (especially for a child or `--goal-file` override); do not copy or
+restate the goal into `project_state/`. Common files include `README.md`, `memory.md`,
 `current_state.md`, `what_we_have.md`, `decisions.md`, `eval_results.md`,
 `finished.md`, and `what_we_should_do/plan.md`. The `README.md` should document
 ownership rules — `memory.md` for essential durable facts only, `finished.md` for
@@ -135,6 +150,15 @@ team-harness then creates a child directory named with its own run id:
 .loopy_loop/sessions/<session_id>/harness_outputs/<NNNN>_<workflow_id>/<team_harness_run_id>/
 ```
 
+**`children.json`, `child_requests/`, and `children/`** — `child_requests/` is
+the inbox for pending requests, `children/` holds dispatched child sessions,
+and `children.json` indexes their durable status and outcomes. While a child is
+active, the parent's `state.json` carries `active_child_session_id`, which is
+the pointer followed during restart. A request filename suppresses redispatch
+only while its child record is `running` or `dispatching`; once that child is
+complete, the filename may be reused for new work. Final child records include
+whole-subtree usage for the parent's ledger and cost budget.
+
 ## Iteration files
 
 Each iteration gets its own directory under `iterations/`, named
@@ -175,25 +199,17 @@ task instead of marking it `abandoned`; if it is missing but `result.json` exist
 for the active task, the coordinator reconstructs the finished request from
 `result.json`. See [HTTP Contract](/docs/http-contract) for the recovery rules.
 
-**`children.json`** (parent sessions) — Index of child sessions dispatched by
-this session. Each record carries the child `session_id`, `workflow_set`,
-`status`, timestamps, `stop_reason`, and the originating `request_file` name,
-which makes the dispatch scan idempotent — a request whose filename already
-appears here is never dispatched twice, even if a crash left the file behind.
-While a child runs, the parent's `state.json` records
-`active_child_session_id`: the durable session-stack pointer a restarted
-coordinator follows to resume the child instead of orphaning it.
-
-**`salvage.json`** — Written into the interrupted iteration's directory during
-crash recovery, when the coordinator drained or reaped agent processes a dead
-worker's harness run left behind (per `recovery_policy`). It records the reap
-reports so the provenance of any surviving working-tree edits is auditable rather
-than a mystery diff. The iteration is still re-run — its `result.json` never
-existed and is never fabricated — and when any orphan actually settled, its
-history entry carries `error="abandoned_after_<policy>"` (e.g.
-`abandoned_after_drain`) instead of plain `"abandoned"`. A non-zero
-`unsettled_workers` in the record means some orphan may still be running; the
-coordinator refuses to dispatch replacement work (HTTP 409) until it is resolved.
+**`salvage.json`** — Written into the interrupted iteration's directory when
+crash recovery processes at least one tracked harness run. It records reaper
+reports so the provenance of surviving working-tree edits is auditable rather
+than a mystery diff. The task's `result.json` never existed and is never
+fabricated; abandonment consumes a turn, then normal scheduling continues only
+if no stop condition fires. When any orphan settled, history carries
+`error="abandoned_after_<policy>"` instead of plain `"abandoned"`. For an
+identity-tracked run, a non-zero `unsettled_workers` means some orphan may still
+be running and replacement dispatch is refused (HTTP 409). Remote or otherwise
+unreachable processes can fall back to legacy abandonment without that local
+proof.
 
 **`goal_check.json`** — A per-iteration eval artifact, present only for the
 reserved `goal_check` workflow or a workflow configured with

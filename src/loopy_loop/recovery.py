@@ -1,10 +1,10 @@
-"""Crash recovery for a dead worker's orphaned agent processes (D7 / P2.5).
+"""Recovery for an interrupted worker task's agent processes (D7 / P2.5).
 
-When the coordinator confirms a worker is dead and its iteration produced no
+When a prior task remains unacknowledged and its iteration produced no
 recoverable result, the agent CLIs that worker's harness spawned may still be
-running — orphaned, spending money, writing to the checkout. team-harness owns
-the mechanism (persisted process identity + drain/reap policies, TH-D5); this
-module is the loopy-side trigger:
+running, spending money and writing to the checkout. team-harness owns the
+mechanism (persisted process identity + drain/reap policies, TH-D5); this module
+is the loopy-side trigger:
 
 1. **Discover** the interrupted harness run(s): team-harness routes each run's
    session output under the iteration's ``harness_outputs`` directory, named by
@@ -15,12 +15,14 @@ module is the loopy-side trigger:
    timeout, preserving near-complete work and a clean tree) or ``reap`` (kill).
 3. **Record the salvage**: a ``salvage.json`` in the interrupted iteration's
    directory carrying the reap reports, so the provenance of any surviving
-   working-tree edits is auditable (the iteration itself is still re-run — its
-   ``result.json`` never existed and is never fabricated; loopy `decisions.md`
-   D3/D7).
+   working-tree edits is auditable. The interrupted task is abandoned and
+   consumes a turn; its ``result.json`` never existed and is never fabricated,
+   and normal scheduling continues only if no stop condition fires (loopy
+   `decisions.md` D3/D7).
 
 team-harness versions without the reaper are tolerated: recovery degrades to
-the pre-existing behavior (mark abandoned, re-run) with nothing reaped.
+the pre-existing behavior (mark abandoned, then continue normal scheduling if
+allowed) with nothing reaped.
 ``ReapRefusedError`` — team-harness's own parent-liveness guard — bubbles up so
 the coordinator can treat "the run's owner is still alive" as a busy signal.
 """
@@ -100,7 +102,7 @@ def _load_reaper() -> tuple[Any, Any] | None:
 
 @dataclass
 class RecoveryOutcome:
-    """What crash recovery did about a dead worker's orphaned agents."""
+    """What crash recovery did about an interrupted task's agent processes."""
 
     reaped_runs: int = 0
     settled_workers: int = 0
@@ -238,9 +240,9 @@ def _write_salvage_record(
 ) -> None:
     """Make the salvage auditable: which orphans were handled, and how.
 
-    The iteration is still re-run (D3: its result.json never existed and is
-    never fabricated); surviving working-tree edits are explained by this
-    record instead of appearing as a mystery diff.
+    The interrupted task is abandoned rather than synthesized (D3: its
+    result.json never existed and is never fabricated); surviving working-tree
+    edits are explained by this record instead of appearing as a mystery diff.
     """
     iteration_dir = iteration_dir_path(
         repo_root=repo_root,

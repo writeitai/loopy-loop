@@ -215,7 +215,7 @@ class RootConfig(BaseModel):
         description=(
             "What to do with agent processes orphaned by a crashed worker: "
             "'drain' lets in-flight agents finish (bounded by "
-            "recovery_drain_timeout_s) before re-running the iteration; "
+            "recovery_drain_timeout_s) before normal scheduling continues; "
             "'reap' kills them immediately."
         ),
     )
