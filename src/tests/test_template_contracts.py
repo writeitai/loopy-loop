@@ -15,7 +15,6 @@ TEMPLATES_ROOT = Path(__file__).resolve().parents[1] / "loopy_loop" / "templates
 RUNTIME_IGNORE_RULES = {
     ".loopy_loop/sessions/",
     ".loopy_loop/traces/",
-    ".loopy_loop/trace_export_outbox/",
     ".loopy_loop/trace_finalization_outbox/",
     ".loopy_loop/repository.json",
     ".loopy_loop/state.json",

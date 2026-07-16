@@ -120,6 +120,18 @@ def test_corrupt_unrelated_session_tree_does_not_break_healthy_references(
     assert resolver.resolve("session:/state.json") == (child / "state.json").resolve()
 
 
+def test_manifestless_child_directory_is_not_session_topology(tmp_path: Path) -> None:
+    root, child, _, _ = _tree(tmp_path)
+    child.joinpath("children", "agent-scratch").mkdir(parents=True)
+
+    resolver = LogicalReferenceResolver.for_session(
+        repo_root=tmp_path, session_id="child"
+    )
+
+    assert resolver.resolve("root:/goal.md") == (root / "goal.md").resolve()
+    assert resolver.resolve("session:/state.json") == (child / "state.json").resolve()
+
+
 @pytest.mark.parametrize(
     "reference",
     [
@@ -280,6 +292,31 @@ def test_resolves_only_traces_bound_to_current_tree(tmp_path: Path) -> None:
     )
     with pytest.raises(LogicalReferenceError, match="unknown trace"):
         resolver.resolve("trace:missing:/output.json")
+
+
+def test_corrupt_unrelated_trace_manifest_does_not_poison_healthy_trace(
+    tmp_path: Path,
+) -> None:
+    _session(tmp_path, "root")
+    traces = tmp_path / ".loopy_loop" / "traces" / "root"
+    healthy = traces / "sessions/root/attempts/healthy"
+    _write_json(
+        healthy / "trace_manifest.json",
+        {
+            "manifest_id": "trace-healthy",
+            "root_session_id": "root",
+            "session_id": "root",
+        },
+    )
+    corrupt = traces / "sessions/root/attempts/corrupt/trace_manifest.json"
+    corrupt.parent.mkdir(parents=True)
+    corrupt.write_text("{", encoding="utf-8")
+
+    resolved = LogicalReferenceResolver.for_session(
+        repo_root=tmp_path, session_id="root"
+    ).resolve("trace:trace-healthy:/artifact.json")
+
+    assert resolved == (healthy / "artifact.json").resolve()
 
 
 def test_trace_manifest_nested_identity_is_honored(tmp_path: Path) -> None:

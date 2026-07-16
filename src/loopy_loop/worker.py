@@ -89,7 +89,9 @@ class FinishedAssignment:
     pending_path: Path
 
 
-def _join_trace_errors(current: str | None, addition: str) -> str:
+def _join_trace_errors(*, current: str | None, addition: str) -> str:
+    """Append one trace failure detail without losing an earlier diagnosis."""
+
     return f"{current}; {addition}" if current else addition
 
 
@@ -137,7 +139,9 @@ def ensure_interpreter_scripts_on_path(environ: MutableMapping[str, str]) -> Non
 
 
 def run_worker_loop(*, repo_root: Path, coordinator_url: str) -> None:
-    ensure_interpreter_scripts_on_path(os.environ)
+    """Register one worker and execute assignments sequentially until stopped."""
+
+    ensure_interpreter_scripts_on_path(environ=os.environ)
     base_url = coordinator_url.rstrip("/")
     identity = current_worker_identity()
     with httpx.Client(timeout=30.0) as client:
@@ -176,6 +180,8 @@ def _post_register(
     identity: WorkerIdentity,
     repo_root: Path,
 ) -> TaskResponse:
+    """Register this process with its protocol and repository identity."""
+
     request = RegisterRequest(
         worker=identity,
         worker_protocol_version=2,
@@ -192,7 +198,7 @@ def _post_register(
         json=request.model_dump(),
         timeout=httpx.Timeout(30.0, read=None),
     )
-    _exit_if_busy(response)
+    _exit_if_busy(response=response)
     response.raise_for_status()
     return TaskResponse.model_validate(response.json())
 
@@ -282,9 +288,11 @@ def _run_task(
                 repo_root=root,
                 root_session_id=str(metadata.get("root_session_id") or task.session_id),
                 session_id=task.session_id,
-                request_id=_optional_string(metadata.get("origin"), "request_id"),
+                request_id=_optional_string(
+                    value=metadata.get("origin"), key="request_id"
+                ),
                 work_item_id=_optional_string(
-                    metadata.get("origin"), "parent_work_item_id"
+                    value=metadata.get("origin"), key="parent_work_item_id"
                 ),
                 workflow_set=task.workflow_set,
                 workflow_id=task.workflow_id,
@@ -306,11 +314,18 @@ def _run_task(
                 workflow_snapshot=task.workflow_snapshot,
                 repository_id=task.repository_id,
             )
-            config_payload, prompt_text, _ = verify_workflow_snapshot(
-                descriptor=task.workflow_snapshot,
-                repo_root=root,
-                expected_task=attempt_task,
+            (config_payload, prompt_text, _, frozen_config_snapshot) = (
+                verify_workflow_snapshot(
+                    descriptor=task.workflow_snapshot,
+                    repo_root=root,
+                    expected_task=attempt_task,
+                )
             )
+            if config_snapshot != frozen_config_snapshot:
+                raise AssignmentContractError(
+                    "coordinator config snapshot does not match the frozen "
+                    "attempt snapshot"
+                )
             from loopy_loop.config import WorkflowConfig
 
             workflow_config = WorkflowConfig.model_validate(config_payload)
@@ -348,14 +363,14 @@ def _run_task(
                 )
             if (
                 not assignment_file.is_file()
-                or file_sha256(assignment_file) != task.assignment_sha256
+                or file_sha256(path=assignment_file) != task.assignment_sha256
             ):
                 # Detection, not a filesystem fence (D8): restore the exact
                 # engine-derived envelope so the failed attempt can still post
                 # a provenance-valid completion and the next iteration can
                 # repair the work.
                 write_attempt_assignment(path=assignment_file, assignment=assignment)
-                if file_sha256(assignment_file) != task.assignment_sha256:
+                if file_sha256(path=assignment_file) != task.assignment_sha256:
                     raise AssignmentContractError(
                         "coordinator-frozen assignment cannot be reconstructed"
                     )
@@ -513,7 +528,7 @@ def _run_task(
         and task.assignment_sha256 is not None
         and (
             not assignment_file.is_file()
-            or file_sha256(assignment_file) != task.assignment_sha256
+            or file_sha256(path=assignment_file) != task.assignment_sha256
         )
     ):
         assignment_changed_during_run = True
@@ -521,7 +536,8 @@ def _run_task(
             write_attempt_assignment(path=assignment_file, assignment=assignment)
         except OSError as exc:
             trace_problem = _join_trace_errors(
-                trace_problem, f"cannot restore changed assignment: {exc}"
+                current=trace_problem,
+                addition=f"cannot restore changed assignment: {exc}",
             )
         else:
             iteration_result = iteration_result.model_copy(
@@ -536,7 +552,7 @@ def _run_task(
         if assignment_file is not None
         and assignment_file.is_file()
         and task.assignment_sha256 is not None
-        and file_sha256(assignment_file) == task.assignment_sha256
+        and file_sha256(path=assignment_file) == task.assignment_sha256
         else None
     )
     completion_repository_id = task.repository_id or local_repository_id
@@ -605,7 +621,8 @@ def _run_task(
             # visibly incomplete and retain the recovery-journal result.
             traceback.print_exc()
             trace_problem = _join_trace_errors(
-                trace_problem, f"cannot persist completion protocol trace: {exc}"
+                current=trace_problem,
+                addition=f"cannot persist completion protocol trace: {exc}",
             )
             iteration_result = iteration_result.model_copy(
                 update={"trace_incomplete": True, "trace_error": trace_problem}
@@ -721,6 +738,8 @@ def _render_prompt(
     assignment: AttemptAssignment | None = None,
     assignment_file: Path | None = None,
 ) -> str:
+    """Render the workflow prompt with authoritative role and path context."""
+
     root = repo_root or Path.cwd()
     session_dir = session_dir_path(repo_root=root, session_id=session_id)
     attempt_id = (
@@ -802,6 +821,8 @@ def _render_prompt(
 
 
 def _read_session_metadata(*, repo_root: Path, session_id: str) -> dict[str, object]:
+    """Read and validate the session manifest used by worker-side binding."""
+
     path = session_dir_path(repo_root=repo_root, session_id=session_id) / "session.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -814,7 +835,9 @@ def _read_session_metadata(*, repo_root: Path, session_id: str) -> dict[str, obj
     return payload
 
 
-def _optional_string(value: object, key: str) -> str | None:
+def _optional_string(*, value: object, key: str) -> str | None:
+    """Read a non-empty optional string from a loosely typed JSON object."""
+
     if not isinstance(value, dict):
         return None
     candidate = value.get(key)
@@ -829,6 +852,8 @@ def _capture_git_boundary(
     phase: Literal["before", "after"],
     trace_root: Path,
 ) -> dict[str, object]:
+    """Capture one Git boundary and persist its compact session receipt."""
+
     if phase not in {"before", "after"}:
         raise AssignmentContractError(f"invalid git evidence phase: {phase}")
     status_path = trace_root / "git" / f"{phase}-status.jsonl"
@@ -893,6 +918,8 @@ def _worker_capabilities() -> frozenset[str]:
 def _semantic_prompt_context(
     *, repo_root: Path, session_id: str, attempt_id: str
 ) -> str:
+    """Render pending user inputs and the latest usable eval-readiness receipt."""
+
     sections: list[str] = []
     journal = user_updates_journal_path(repo_root=repo_root, session_id=session_id)
     records: list[dict[str, object]] = []
@@ -962,7 +989,7 @@ def _semantic_prompt_context(
     readiness_root = eval_readiness_dir_path(repo_root=repo_root, session_id=session_id)
     readiness_files = sorted(
         readiness_root.glob("*.json"),
-        key=lambda path: (_safe_mtime_ns(path), path.name),
+        key=lambda path: (_safe_mtime_ns(path=path), path.name),
         reverse=True,
     )
     skipped_readiness: list[str] = []
@@ -993,7 +1020,9 @@ def _semantic_prompt_context(
     return "\n".join(sections)
 
 
-def _safe_mtime_ns(path: Path) -> int:
+def _safe_mtime_ns(*, path: Path) -> int:
+    """Return a sortable mtime, placing unreadable artifacts last."""
+
     try:
         return path.stat().st_mtime_ns
     except OSError:

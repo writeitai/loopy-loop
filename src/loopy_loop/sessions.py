@@ -40,7 +40,6 @@ INPUTS_DIRNAME = "inputs"
 USER_UPDATES_JOURNAL_FILENAME = "user_updates.jsonl"
 HARNESS_OUTPUTS_DIRNAME = "harness_outputs"
 TRACES_DIRNAME = "traces"
-TRACE_EXPORT_OUTBOX_DIRNAME = "trace_export_outbox"
 TRACE_FINALIZATION_OUTBOX_DIRNAME = "trace_finalization_outbox"
 UPDATES_FROM_USER_FILENAME = "updates_from_user.md"
 FINISHED_FILENAME = "finished.md"
@@ -680,10 +679,6 @@ def attempt_trace_dir_path(
         / "attempts"
         / attempt_id
     )
-
-
-def trace_export_outbox_dir_path(*, repo_root: Path) -> Path:
-    return repo_root / LOOPY_DIRNAME / TRACE_EXPORT_OUTBOX_DIRNAME
 
 
 def trace_finalization_outbox_dir_path(*, repo_root: Path) -> Path:

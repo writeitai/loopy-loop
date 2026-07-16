@@ -1237,6 +1237,35 @@ def test_frozen_workflow_tampering_fails_before_harness_call(
     assert task.assignment_sha256 == file_sha256(Path(task.assignment_path))
 
 
+def test_wire_config_must_match_frozen_snapshot_before_harness_call(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    _init_git_repo(repo_root)
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task = TaskResponse.model_validate(
+        client.post("/register", json=_register_v2(repo_root)).json()
+    )
+    assert task.config_snapshot is not None
+    forged = task.model_copy(
+        update={
+            "config_snapshot": task.config_snapshot.model_copy(
+                update={"goal": "wire-only substituted goal"}
+            )
+        }
+    )
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "loopy_loop.worker.run_harness_iteration", lambda **kwargs: calls.append(kwargs)
+    )
+
+    with pytest.raises(FatalAssignmentError, match="does not match the frozen"):
+        _run_task(repo_root=repo_root, task=forged)
+
+    assert calls == []
+
+
 def test_assignment_mutation_during_harness_is_restored_and_cannot_complete(
     repo_builder: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1430,6 +1459,52 @@ def test_three_depth_dispatch_unwinds_two_terminal_descendants(
     )
     assert root_children["children"][0]["status"] == "stopped"
     assert child_children["children"][0]["status"] == "failed"
+
+
+def test_terminal_child_repairs_ledger_while_ignoring_non_session_directory(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    _write_workflow_set(
+        repo_root=repo_root, workflow_set="child_set", workflow_id="child_work"
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    root_task = client.post("/register", json=_register_v2(repo_root)).json()
+    _write_v2_child_request(
+        repo_root=repo_root,
+        parent_task=root_task,
+        request_id="repair-with-stray",
+        workflow_set="child_set",
+        goal="Reach a valid terminal blocker",
+    )
+    child_task = _finish(client, root_task)
+    parent_root = session_dir_path(
+        repo_root=repo_root, session_id=root_task["session_id"]
+    )
+    parent_root.joinpath("children", "agent-scratch").mkdir()
+    child_root = session_dir_path(
+        repo_root=repo_root, session_id=child_task["session_id"]
+    )
+    child_root.joinpath("children", "agent-scratch").mkdir(parents=True)
+    children_path(repo_root=repo_root, session_id=root_task["session_id"]).write_text(
+        "{", encoding="utf-8"
+    )
+    _write_terminal_blocker_control(repo_root=repo_root, task=child_task)
+
+    resumed = _finish(client, child_task)
+
+    assert resumed["action"] == "run"
+    assert resumed["session_id"] == root_task["session_id"]
+    repaired = json.loads(
+        children_path(
+            repo_root=repo_root, session_id=root_task["session_id"]
+        ).read_text(encoding="utf-8")
+    )
+    assert [record["request_id"] for record in repaired["children"]] == [
+        "repair-with-stray"
+    ]
+    assert repaired["children"][0]["stop_reason"] == "unresolvable_error"
 
 
 def test_root_stop_is_projected_to_depth_two_and_dispatches_no_next_task(
@@ -2567,6 +2642,65 @@ def test_goal_met_control_must_cite_its_goal_check_projection_receipt(
         ).glob("*.json")
     )
     assert "goal_check projection" in failure.read_text(encoding="utf-8")
+
+
+def test_goal_met_control_rejects_projection_reason_that_differs_from_receipt(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root, _, client, task, state = _setup_eval_task(
+        repo_builder=repo_builder, monkeypatch=monkeypatch
+    )
+    _, receipt_ref, _ = _write_valid_eval_bundle(
+        repo_root=repo_root, task=task, state=state
+    )
+    goal_check_path(
+        repo_root=repo_root,
+        session_id=task["session_id"],
+        iteration=task["iteration"],
+        workflow_id=task["workflow_id"],
+    ).write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "goal_met": True,
+                "reason": "projection-only explanation",
+                "eval_receipt_ref": receipt_ref,
+            }
+        ),
+        encoding="utf-8",
+    )
+    control_path(repo_root=repo_root, session_id=task["session_id"]).write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "control_id": "control-reason-mismatch",
+                "state": "stopped",
+                "reason": "claims the mismatched projection",
+                "stop_reason": "goal_met",
+                "producer": {
+                    "session_id": task["session_id"],
+                    "workflow_id": task["workflow_id"],
+                    "attempt_id": task["attempt_id"],
+                },
+                "eval_receipt_ref": receipt_ref,
+                "created_at": utc_now().isoformat().replace("+00:00", "Z"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = _finish(client, task)
+
+    assert response["action"] == "run"
+    updated = _read_state(repo_root, task["session_id"])
+    assert updated.goal_met is False
+    assert updated.history[-1].error == "invalid_control_output"
+    failure = next(
+        protocol_failures_dir_path(
+            repo_root=repo_root, session_id=task["session_id"]
+        ).glob("*.json")
+    )
+    assert "projection reason" in failure.read_text(encoding="utf-8")
 
 
 def test_canonical_eval_report_must_be_eval_receipt_sibling(

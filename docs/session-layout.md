@@ -6,13 +6,13 @@ loopy-loop separates compact durable state from detailed execution traces:
   schedule, recover, evaluate, and understand a recursive run.
 - `.loopy_loop/traces/` is detailed, attempt-scoped observability: model
   envelopes, team-harness records, direct-agent assignments and logs, raw eval
-  output, and verbose git evidence. Traces are independently sealable,
-  exportable, and prunable.
+  output, and verbose git evidence. Traces are independently sealable and
+  gitignored.
 
 Both trees are runtime output and are ignored by the generated `.gitignore`.
 Ignoring session state does not make it disposable while a run is active:
-continuity lives in these files. Trace pruning, by contrast, is supported once
-an attempt is sealed because compact receipts remain in its session.
+continuity lives in these files. Trace retention is independent because the
+compact receipts needed for correctness remain in the session.
 
 Path construction is centralized in `src/loopy_loop/sessions.py`. Fresh 0.7
 runs use the v2 layout below. Existing v1 sessions remain readable and are
@@ -74,7 +74,6 @@ or a three-loop deployment.
 │                   └── <grandchild_session_id>/...
 ├── traces/
 │   └── <root_session_id>/sessions/<session_id>/attempts/<attempt_id>/
-├── trace_export_outbox/
 └── trace_finalization_outbox/
 ```
 
@@ -255,8 +254,8 @@ Implementation entries should link compact eval, git, and delivery evidence.
 - `eval_readiness/` contains task-acceptance/readiness context for later eval
   work. The worker includes the latest receipt in semantic prompt context; it
   does not force scheduler eligibility.
-- `eval_receipts/` contains compact, identity-bound verdict receipts and any
-  canonical report copies that must survive trace pruning.
+- `eval_receipts/` contains compact, identity-bound verdict receipts and
+  canonical report copies retained independently from detailed traces.
 
 Raw eval-banana output belongs under the attempt trace's `eval/` directory.
 The attempt assignment exposes that exact absolute path as `raw_eval_output`.
@@ -328,16 +327,15 @@ The worker writes compact git boundary receipts before and after each v2
 attempt. Verbose status/diff material goes into the trace, while hashes and
 summary facts remain under `git_receipts/`. Workflow roles may write delivery
 receipts for branches, PRs, merges, or other declared deliverables. These
-compact records survive trace pruning.
+compact records do not depend on detailed trace retention.
 
-Schema-v2 receipts use `loopy-dirty-tree-v2-sha256`. The digest binds every
-non-runtime Git index entry (mode, object ID, stage, and path), then binds
-porcelain status plus type/mode/content facts for changed tracked and untracked
-working-tree paths. This distinguishes different partial-staging or unmerged
-index states even when HEAD, status text, and working-tree bytes otherwise
-match. Engine runtime session/trace/outbox/state paths are excluded, but
-versioned `.loopy_loop/workflow_sets/` definitions are product input and remain
-part of the subject.
+Schema-v2 receipts use `loopy-git-status-diff-v1-sha256`. The digest binds
+byte-stable, non-runtime porcelain status records plus Git's staged and
+unstaged binary diffs. Engine runtime session/trace/outbox/state paths are
+excluded, but versioned `.loopy_loop/workflow_sets/` definitions are product
+input and remain part of the subject. Untracked and nested repositories remain
+visible through porcelain paths; the compact digest is not a second archive of
+their complete contents, which belong in the verbose trace when observable.
 
 ## Iteration directory
 
@@ -476,23 +474,16 @@ same active manifest and writes the exact `TaskResponse` to
 
 Loopy passes the absolute `<attempt>/harness/` directory to team-harness as
 `CallerContext.trace_root`. Team-harness owns one fresh run-ID child beneath
-that caller-selected root. On both structured success and structured failure
-it exposes the exact `run_json_path`, `session_output_dir`, and
-`coordinator_input_path`. `harness_runner._normalize_harness_result()` carries
-the returned run-record and output-directory paths into `IterationResult`
-rather than guessing a global run location; the coordinator input remains at
-the explicit team-harness path inside that returned output directory. In
-caller mode the session output directory is the run directory itself.
+that caller-selected root and returns its exact run, output, and coordinator
+input paths on structured success or failure. Loopy carries those paths in the
+iteration result rather than guessing or copying a global run location.
 
 `coordinator_input.json` is the generated system/user envelope persisted before
-client/model preflight. `run.json` is the canonical team-harness run record and
-direct-agent catalog. Each direct spawn receives an automatically generated
-`agent_assignment.json` and full prompt identifying its parent attempt,
-delegated role/task, relevant absolute state paths, output directory, and the
-fact that the harness coordinator owns integration and the loop-layer
-decision. Direct stdout/stderr and process/session identity are recorded under
-the same run child. This contract is implemented by team-harness's
-`CallerContext`, `TeamHarness.run()`, and `tools.agent_tools.spawn_agent()`.
+client/model preflight. `run.json` is the canonical run and direct-agent
+catalog. Each direct spawn receives `agent_assignment.json` with its parent
+attempt, delegated task, relevant absolute state and output paths, and the
+harness coordinator's integration ownership. Its streams and process/provider
+identity remain under the same run.
 
 For a built-in direct spawn with `type=harness`, team-harness derives a nested
 caller context automatically. It retains the same root/current session, depth,
@@ -505,27 +496,22 @@ the nested input, finalized run, and canonical stream files before calling the
 direct-agent channel complete. Generic subprocesses do not receive or imply
 this contract automatically.
 
-The outer loopy trace manifest records identity, per-channel status, usage,
-failure, a hashed file inventory, lifecycle, and export state. `sealed` means capture completed; `incomplete` means the attempt ended
-with an explicitly incomplete channel or capture problem. A channel not
-exposed by the provider is marked unavailable/not-produced instead of being
-invented.
+The outer manifest records identity, per-channel status, usage, failure, a
+hashed file inventory, and lifecycle. `sealed` means capture completed;
+`incomplete` means a channel or capture step did not. An unexposed provider
+channel is marked unavailable/not-produced rather than invented.
 
-### Raw local capture boundary
+### Raw local traces
 
-Loopy writes observable trace JSON, text, and binary artifacts without
-credential detection or value redaction. Sealing inventories and hashes the
-raw local bytes; it does not transform them. The entire trace tree is
-gitignored by default and must be treated as private local runtime data because
-it can contain prompts, outputs, environment-derived values, credentials, and
-other sensitive material.
+The trace tree is gitignored and must be treated as private local runtime data:
+it contains raw observable JSON, text, binary artifacts, prompts, commands,
+streams, and environment-derived values. Sealing inventories and hashes local
+bytes; it is an integrity/completeness boundary, not a disclosure-safety claim.
 
 This is not universal filesystem interception. A model/tool can write directly
 to the working tree or active trace because D8 deliberately avoids a write
-sandbox. `sealed`/`incomplete` is an integrity and completeness boundary, not a
-claim that the data is safe to disclose. Provider-native nested agents that do
-not pass through team-harness's direct spawn tool cannot be observed and remain
-marked unavailable.
+sandbox. Provider-native nested agents that do not pass through team-harness's
+direct spawn tool cannot be observed and remain marked unavailable.
 
 For a matching `/finished`, the coordinator writes a finalization-outbox intent
 containing the exact request and an unavailable response before it commits the
@@ -557,23 +543,8 @@ publication because trace storage is not an acceptance gate.
 ### Trace operations
 
 - `loopy traces list` lists manifests.
-- `loopy traces inspect <path-or-manifest-id>` reads one manifest.
-- `loopy traces export <path-or-manifest-id> --destination DESTINATION`
-  enqueues an idempotent outbox record and makes an exact, unfiltered local
-  copy.
-- `loopy traces prune <path-or-manifest-id>` removes only a sealed or incomplete
-  trace confined under this repository's trace root. A v2 trace must have its
-  valid session-plane seal receipt; an authentically sealed trace may still be
-  pruned after observed file drift, which is reported. Export remains strict
-  about the exact sealed inventory.
-
-`.loopy_loop/trace_export_outbox/` currently drives local-directory export. Its
-durable status/attempt/error shape is intended to support a future cloud
-transport without making upload part of scheduler correctness. Publication is
-atomic and exact: reuse verifies the destination inventory, and a manifest-ID
-collision or destination drift is refused. A future cloud exporter must own an
-explicit data-safety policy and apply it before transmitting these raw bytes;
-the current local exporter is not that policy boundary.
+- `loopy traces inspect <path-or-manifest-id>` reads one manifest and reports
+  its currently observed integrity.
 
 ## Logical references
 

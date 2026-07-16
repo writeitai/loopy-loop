@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import stat
 import subprocess
 import tempfile
 from typing import Literal
@@ -17,15 +16,23 @@ from urllib.parse import unquote
 from urllib.parse import urlsplit
 
 GIT_EVIDENCE_SCHEMA_VERSION = 2
-DIRTY_TREE_ALGORITHM = "loopy-dirty-tree-v2-sha256"
+DIRTY_TREE_ALGORITHM = "loopy-git-status-diff-v1-sha256"
 ENGINE_RUNTIME_DIR = b".loopy_loop"
-_ENGINE_RUNTIME_DIRECTORIES = {
-    b"sessions",
-    b"traces",
-    b"trace_export_outbox",
-    b"trace_finalization_outbox",
-}
+_ENGINE_RUNTIME_DIRECTORIES = {b"sessions", b"traces", b"trace_finalization_outbox"}
 _ENGINE_RUNTIME_FILES = {b"repository.json", b"state.json", b"state.json.lock"}
+_DIFF_PATHSPECS = (
+    ".",
+    ":(exclude).loopy_loop/sessions",
+    ":(exclude).loopy_loop/sessions/**",
+    ":(exclude).loopy_loop/traces",
+    ":(exclude).loopy_loop/traces/**",
+    ":(exclude).loopy_loop/trace_finalization_outbox",
+    ":(exclude).loopy_loop/trace_finalization_outbox/**",
+    ":(exclude).loopy_loop/repository.json",
+    ":(exclude).loopy_loop/state.json",
+    ":(exclude).loopy_loop/state.json.lock",
+    ":(exclude).loopy_loop/state.json.archive_*",
+)
 
 
 class GitEvidenceError(RuntimeError):
@@ -81,11 +88,13 @@ class _StatusEntry:
 
     @property
     def paths(self) -> tuple[bytes, ...]:
+        """Return every path named by this porcelain record."""
         if self.source_path is None:
             return (self.path,)
         return (self.path, self.source_path)
 
     def canonical_bytes(self) -> bytes:
+        """Return the byte-stable representation used by the digest."""
         value = self.status + b" " + self.path
         if self.source_path is not None:
             value += b"\x00" + self.source_path
@@ -100,22 +109,27 @@ def capture_git_evidence(
     verbose_status_path: Path | None = None,
     verbose_diff_path: Path | None = None,
 ) -> GitEvidenceReceipt:
-    """Capture compact, credential-safe facts for one attempt boundary."""
+    """Capture branch, HEAD, dirty status/diff, and credential-safe remotes."""
     if phase not in {"before", "after"}:
         raise GitEvidenceError(f"invalid git evidence phase: {phase!r}")
-    root = _repository_root(repo_root)
-    status_entries = _filtered_status_entries(root)
-    digest = _digest_entries(root=root, entries=status_entries)
+    root = _repository_root(repo_root=repo_root)
+    status_entries = _filtered_status_entries(root=root)
+    diff = _content_diff(root=root)
+    digest = _digest_entries(entries=status_entries, diff=diff)
 
     branch_result = _git(
-        root, "symbolic-ref", "--quiet", "--short", "HEAD", allowed=(0, 1)
+        root=root,
+        arguments=("symbolic-ref", "--quiet", "--short", "HEAD"),
+        allowed=(0, 1),
     )
     branch = (
         branch_result.stdout.decode("utf-8", "surrogateescape").strip()
         if branch_result.returncode == 0
         else None
     )
-    head_result = _git(root, "rev-parse", "--verify", "HEAD", allowed=(0, 128))
+    head_result = _git(
+        root=root, arguments=("rev-parse", "--verify", "HEAD"), allowed=(0, 128)
+    )
     head = (
         head_result.stdout.decode("ascii").strip()
         if head_result.returncode == 0
@@ -125,12 +139,12 @@ def capture_git_evidence(
     status_output: str | None = None
     if verbose_status_path is not None:
         target = Path(verbose_status_path).resolve()
-        _write_bytes_atomic(target, _render_status(status_entries))
+        _write_bytes_atomic(path=target, content=_render_status(entries=status_entries))
         status_output = str(target)
     diff_output: str | None = None
     if verbose_diff_path is not None:
         target = Path(verbose_diff_path).resolve()
-        _write_bytes_atomic(target, _verbose_diff(root))
+        _write_bytes_atomic(path=target, content=diff)
         diff_output = str(target)
 
     return GitEvidenceReceipt(
@@ -154,15 +168,17 @@ def capture_git_evidence(
 
 
 def dirty_tree_digest(*, repo_root: Path) -> DirtyTreeDigest:
-    """Return the canonical digest for relevant working-tree changes."""
-    root = _repository_root(repo_root)
-    return _digest_entries(root=root, entries=_filtered_status_entries(root))
+    """Hash relevant porcelain status plus staged and unstaged Git diffs."""
+    root = _repository_root(repo_root=repo_root)
+    return _digest_entries(
+        entries=_filtered_status_entries(root=root), diff=_content_diff(root=root)
+    )
 
 
 def sanitized_remote_fingerprints(*, repo_root: Path) -> tuple[RemoteFingerprint, ...]:
     """Fingerprint remotes without retaining URL userinfo, query, or path."""
-    root = _repository_root(repo_root)
-    names_output = _git(root, "remote").stdout
+    root = _repository_root(repo_root=repo_root)
+    names_output = _git(root=root, arguments=("remote",)).stdout
     names = sorted(
         {
             line.decode("utf-8", "surrogateescape")
@@ -172,55 +188,65 @@ def sanitized_remote_fingerprints(*, repo_root: Path) -> tuple[RemoteFingerprint
     )
     result: list[RemoteFingerprint] = []
     for name in names:
-        urls = _git(root, "remote", "get-url", "--all", name).stdout.splitlines()
+        urls = _git(
+            root=root, arguments=("remote", "get-url", "--all", name)
+        ).stdout.splitlines()
         for raw_url in sorted(set(urls)):
             if not raw_url:
                 continue
-            transport, host, canonical = _sanitize_remote(raw_url)
+            transport, host, canonical = _sanitize_remote(raw_url=raw_url)
             result.append(
                 RemoteFingerprint(
                     remote=name,
                     transport=transport,
                     host=host,
-                    fingerprint=_sha256(canonical),
+                    fingerprint=_sha256(value=canonical),
                 )
             )
     return tuple(result)
 
 
 def _repository_root(repo_root: Path) -> Path:
+    """Return Git's canonical top-level directory for the requested path."""
+
     requested = Path(repo_root).resolve()
-    try:
-        inside = _git(requested, "rev-parse", "--is-inside-work-tree").stdout.strip()
-        if inside != b"true":
-            raise GitEvidenceError(f"not a Git working tree: {requested}")
-        top_level = _git(requested, "rev-parse", "--show-toplevel").stdout.rstrip(
-            b"\r\n"
-        )
-    except GitEvidenceError:
-        raise
-    except OSError as exc:  # pragma: no cover - Path.resolve normally catches nothing
-        raise GitEvidenceError(f"cannot inspect repository {requested}: {exc}") from exc
+    inside = _git(
+        root=requested, arguments=("rev-parse", "--is-inside-work-tree")
+    ).stdout.strip()
+    if inside != b"true":
+        raise GitEvidenceError(f"not a Git working tree: {requested}")
+    top_level = _git(
+        root=requested, arguments=("rev-parse", "--show-toplevel")
+    ).stdout.rstrip(b"\r\n")
     if not top_level:
         raise GitEvidenceError(f"Git returned no repository root for {requested}")
     return Path(os.fsdecode(top_level)).resolve()
 
 
 def _filtered_status_entries(root: Path) -> tuple[_StatusEntry, ...]:
+    """Return sorted porcelain entries excluding loopy runtime artifacts."""
+
     output = _git(
-        root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no"
+        root=root,
+        arguments=(
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=no",
+        ),
     ).stdout
-    entries = []
-    for entry in _parse_status(output):
-        if all(_is_engine_path(path) for path in entry.paths):
-            continue
-        entries.append(entry)
-    # The algorithm contract sorts the complete porcelain records bytewise,
-    # independently of locale and Git's presentation order.
+    entries = [
+        entry
+        for entry in _parse_status(output=output)
+        if not all(_is_engine_path(path=path) for path in entry.paths)
+    ]
     return tuple(sorted(entries, key=_StatusEntry.canonical_bytes))
 
 
 def _parse_status(output: bytes) -> Iterator[_StatusEntry]:
+    """Parse NUL-delimited porcelain-v1 records without decoding paths."""
+
     fields = output.split(b"\x00")
     if fields and fields[-1] == b"":
         fields.pop()
@@ -230,246 +256,59 @@ def _parse_status(output: bytes) -> Iterator[_StatusEntry]:
         index += 1
         if len(field) < 4 or field[2:3] != b" ":
             raise GitEvidenceError("Git returned malformed porcelain v1 status")
-        status_value = field[:2]
-        path = _normalize_git_path(field[3:])
-        source: bytes | None = None
-        if b"R" in status_value or b"C" in status_value:
+        status = field[:2]
+        path = _normalize_git_path(path=field[3:])
+        source_path: bytes | None = None
+        if b"R" in status or b"C" in status:
             if index >= len(fields):
                 raise GitEvidenceError("Git returned an incomplete rename status")
-            source = _normalize_git_path(fields[index])
+            source_path = _normalize_git_path(path=fields[index])
             index += 1
-        yield _StatusEntry(status=status_value, path=path, source_path=source)
+        yield _StatusEntry(status=status, path=path, source_path=source_path)
 
 
 def _digest_entries(
-    *, root: Path, entries: tuple[_StatusEntry, ...]
+    *, entries: tuple[_StatusEntry, ...], diff: bytes
 ) -> DirtyTreeDigest:
+    """Bind status records and exact staged/unstaged diff bytes into a digest."""
+
     hasher = hashlib.sha256()
-    _hash_field(hasher, DIRTY_TREE_ALGORITHM.encode("ascii"))
-    # Bind the exact staged/index subject as well as porcelain status and
-    # working-tree bytes. Without this, two partial-staging states can have
-    # identical HEAD/status/worktree while selecting different staged blobs.
-    for record in _index_records(root):
-        _hash_field(hasher, b"index-entry")
-        _hash_field(hasher, record)
-    relevant_paths: set[bytes] = set()
+    _hash_field(hasher=hasher, value=DIRTY_TREE_ALGORITHM.encode("ascii"))
+    paths: set[bytes] = set()
     for entry in entries:
-        _hash_field(hasher, b"status")
-        _hash_field(hasher, entry.status)
-        _hash_field(hasher, b"path")
-        _hash_field(hasher, entry.path)
-        if not _is_engine_path(entry.path):
-            relevant_paths.add(entry.path)
-        if entry.source_path is not None:
-            _hash_field(hasher, b"source")
-            _hash_field(hasher, entry.source_path)
-            if not _is_engine_path(entry.source_path):
-                relevant_paths.add(entry.source_path)
-
-    for path in sorted(relevant_paths):
-        _hash_field(hasher, b"file-fact")
-        _hash_field(hasher, path)
-        for field in _path_fact(root=root, relative=path):
-            _hash_field(hasher, field)
-
+        _hash_field(hasher=hasher, value=b"status")
+        _hash_field(hasher=hasher, value=entry.canonical_bytes())
+        paths.update(entry.paths)
+    _hash_field(hasher=hasher, value=b"staged-and-unstaged-diff")
+    _hash_field(hasher=hasher, value=diff)
     return DirtyTreeDigest(
         algorithm=DIRTY_TREE_ALGORITHM,
         digest="sha256:" + hasher.hexdigest(),
         dirty=bool(entries),
         status_entry_count=len(entries),
-        changed_path_count=len(relevant_paths),
+        changed_path_count=len(paths),
     )
 
 
-def _index_records(root: Path) -> tuple[bytes, ...]:
-    records: list[bytes] = []
-    output = _git(root, "ls-files", "--stage", "-z").stdout
-    for raw in output.split(b"\x00"):
-        if not raw:
-            continue
-        try:
-            metadata, raw_path = raw.split(b"\t", 1)
-        except ValueError as exc:
-            raise GitEvidenceError("Git returned a malformed index entry") from exc
-        fields = metadata.split(b" ")
-        if len(fields) != 3:
-            raise GitEvidenceError("Git returned malformed index metadata")
-        mode, object_id, stage = fields
-        path = _normalize_git_path(raw_path)
-        if (
-            not mode.isdigit()
-            or len(object_id) not in {40, 64}
-            or any(byte not in b"0123456789abcdef" for byte in object_id.lower())
-            or stage not in {b"0", b"1", b"2", b"3"}
-        ):
-            raise GitEvidenceError("Git returned invalid index metadata")
-        if _is_engine_path(path):
-            continue
-        records.append(metadata + b"\t" + path)
-    return tuple(sorted(records))
+def _content_diff(root: Path) -> bytes:
+    """Return deterministic binary staged and unstaged diffs for relevant paths."""
 
-
-def _path_fact(*, root: Path, relative: bytes) -> tuple[bytes, ...]:
-    root_bytes = os.fsencode(root)
-    _validate_git_path(relative)
-    _reject_symlink_parents(root=root_bytes, relative=relative)
-    path = os.path.join(root_bytes, relative)
-    try:
-        metadata = os.lstat(path)
-    except FileNotFoundError:
-        return (b"tombstone",)
-    except OSError as exc:
-        raise GitEvidenceError(
-            f"cannot inspect changed path {os.fsdecode(relative)!r}: {exc}"
-        ) from exc
-
-    mode = metadata.st_mode
-    common = (f"mode:{mode:o}".encode("ascii"),)
-    if stat.S_ISREG(mode):
-        return (
-            b"type:regular",
-            *common,
-            b"sha256:" + _regular_file_sha256(path=path, display=relative),
-        )
-    if stat.S_ISLNK(mode):
-        try:
-            target = os.readlink(path)
-        except OSError as exc:
-            raise GitEvidenceError(
-                f"cannot read changed symlink {os.fsdecode(relative)!r}: {exc}"
-            ) from exc
-        return (b"type:symlink", *common, _sha256(target).encode("ascii"))
-    if stat.S_ISDIR(mode):
-        return (
-            b"type:directory",
-            *common,
-            b"tree-" + _directory_digest(path=path, display=relative),
-        )
-    if stat.S_ISFIFO(mode):
-        kind = b"fifo"
-    elif stat.S_ISSOCK(mode):
-        kind = b"socket"
-    elif stat.S_ISCHR(mode):
-        kind = b"character-device"
-    elif stat.S_ISBLK(mode):
-        kind = b"block-device"
-    else:
-        kind = b"unknown"
-    return (b"type:" + kind, *common)
-
-
-def _directory_digest(*, path: bytes, display: bytes) -> bytes:
-    """Content-bind a changed directory without following symlinks.
-
-    Git reports an embedded repository as one directory status entry (and a
-    submodule as one gitlink entry).  Hashing only that directory's mode would
-    therefore make later edits beneath an already-dirty boundary invisible.
-    This Merkle-style digest walks the working-tree content while deliberately
-    omitting Git metadata and loopy-loop's runtime state.  Symlinks contribute
-    only their link text, so a link cannot make evidence escape the repository.
-    """
-
-    hasher = hashlib.sha256()
-    _hash_field(hasher, b"loopy-directory-tree-v1")
-    try:
-        with os.scandir(path) as iterator:
-            entries = sorted(iterator, key=lambda item: os.fsencode(item.name))
-    except OSError as exc:
-        raise GitEvidenceError(
-            f"cannot inspect changed directory {os.fsdecode(display)!r}: {exc}"
-        ) from exc
-    for entry in entries:
-        name = os.fsencode(entry.name)
-        child_display = display + b"/" + name
-        if name in {b".git", ENGINE_RUNTIME_DIR} or _is_engine_path(child_display):
-            continue
-        try:
-            metadata = entry.stat(follow_symlinks=False)
-        except OSError as exc:
-            raise GitEvidenceError(
-                f"cannot inspect changed path {os.fsdecode(child_display)!r}: {exc}"
-            ) from exc
-        _hash_field(hasher, b"entry")
-        _hash_field(hasher, name)
-        for field in _directory_entry_fact(
-            path=os.fsencode(entry.path), display=child_display, metadata=metadata
-        ):
-            _hash_field(hasher, field)
-    return b"sha256:" + hasher.hexdigest().encode("ascii")
-
-
-def _directory_entry_fact(
-    *, path: bytes, display: bytes, metadata: os.stat_result
-) -> tuple[bytes, ...]:
-    mode = metadata.st_mode
-    common = (f"mode:{mode:o}".encode("ascii"),)
-    if stat.S_ISREG(mode):
-        return (
-            b"type:regular",
-            *common,
-            b"sha256:" + _regular_file_sha256(path=path, display=display),
-        )
-    if stat.S_ISLNK(mode):
-        try:
-            target = os.readlink(path)
-        except OSError as exc:
-            raise GitEvidenceError(
-                f"cannot read changed symlink {os.fsdecode(display)!r}: {exc}"
-            ) from exc
-        return (b"type:symlink", *common, _sha256(target).encode("ascii"))
-    if stat.S_ISDIR(mode):
-        return (
-            b"type:directory",
-            *common,
-            b"tree-" + _directory_digest(path=path, display=display),
-        )
-    if stat.S_ISFIFO(mode):
-        kind = b"fifo"
-    elif stat.S_ISSOCK(mode):
-        kind = b"socket"
-    elif stat.S_ISCHR(mode):
-        kind = b"character-device"
-    elif stat.S_ISBLK(mode):
-        kind = b"block-device"
-    else:
-        kind = b"unknown"
-    return (b"type:" + kind, *common)
-
-
-def _regular_file_sha256(*, path: bytes, display: bytes) -> bytes:
-    digest = hashlib.sha256()
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags)
-        with os.fdopen(descriptor, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError as exc:
-        raise GitEvidenceError(
-            f"cannot hash changed path {os.fsdecode(display)!r}: {exc}"
-        ) from exc
-    return digest.hexdigest().encode("ascii")
-
-
-def _reject_symlink_parents(*, root: bytes, relative: bytes) -> None:
-    """Reject a Git path whose intermediate component became a symlink."""
-
-    cursor = root
-    for component in relative.split(b"/")[:-1]:
-        cursor = os.path.join(cursor, component)
-        try:
-            metadata = os.lstat(cursor)
-        except OSError as exc:
-            raise GitEvidenceError(
-                f"cannot inspect changed path {os.fsdecode(relative)!r}: {exc}"
-            ) from exc
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            raise GitEvidenceError(
-                f"changed path {os.fsdecode(relative)!r} has an unsafe parent"
-            )
+    common = (
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--",
+        *_DIFF_PATHSPECS,
+    )
+    unstaged = _git(root=root, arguments=("diff", *common)).stdout
+    staged = _git(root=root, arguments=("diff", "--cached", *common)).stdout
+    return b"# unstaged\n" + unstaged + b"\n# staged\n" + staged
 
 
 def _sanitize_remote(raw_url: bytes) -> tuple[str, str | None, bytes]:
+    """Reduce one remote URL to transport, host, and credential-free identity."""
+
     value = raw_url.decode("utf-8", "surrogateescape").strip()
     value = value.split("?", 1)[0].split("#", 1)[0]
     if "://" in value:
@@ -482,11 +321,8 @@ def _sanitize_remote(raw_url: bytes) -> tuple[str, str | None, bytes]:
         hostname = parsed.hostname.lower() if parsed.hostname else None
         path = unquote(parsed.path).rstrip("/")
         canonical = _remote_identity(hostname=hostname, port=port, path=path)
-        transport = "file" if scheme == "file" else scheme
-        return transport, hostname, canonical
+        return ("file" if scheme == "file" else scheme), hostname, canonical
 
-    # Git's scp-like syntax is [user@]host:path. A slash before the first
-    # colon identifies a local filesystem path instead.
     colon = value.find(":")
     slash = value.find("/")
     if colon > 0 and (slash == -1 or colon < slash):
@@ -501,6 +337,8 @@ def _sanitize_remote(raw_url: bytes) -> tuple[str, str | None, bytes]:
 
 
 def _remote_identity(*, hostname: str | None, port: int | None, path: str) -> bytes:
+    """Build the canonical remote identity bytes used for fingerprinting."""
+
     normalized_path = path.replace("\\", "/").strip("/")
     if normalized_path.endswith(".git"):
         normalized_path = normalized_path[:-4]
@@ -512,23 +350,9 @@ def _remote_identity(*, hostname: str | None, port: int | None, path: str) -> by
     ).encode("utf-8", "surrogatepass")
 
 
-def _verbose_diff(root: Path) -> bytes:
-    common = (
-        "--binary",
-        "--full-index",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--",
-        ".",
-        ":(exclude).loopy_loop",
-        ":(exclude).loopy_loop/**",
-    )
-    unstaged = _git(root, "diff", *common).stdout
-    staged = _git(root, "diff", "--cached", *common).stdout
-    return b"# unstaged\n" + unstaged + b"\n# staged\n" + staged
+def _render_status(*, entries: tuple[_StatusEntry, ...]) -> bytes:
+    """Render status records as deterministic newline-delimited JSON bytes."""
 
-
-def _render_status(entries: tuple[_StatusEntry, ...]) -> bytes:
     lines = []
     for entry in entries:
         item: dict[str, str] = {
@@ -542,7 +366,9 @@ def _render_status(entries: tuple[_StatusEntry, ...]) -> bytes:
     return ("\n".join(lines) + suffix).encode("utf-8")
 
 
-def _write_bytes_atomic(path: Path, content: bytes) -> None:
+def _write_bytes_atomic(*, path: Path, content: bytes) -> None:
+    """Atomically replace a file with the supplied byte content."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=path.parent, prefix=path.name + ".", suffix=".tmp"
@@ -560,8 +386,10 @@ def _write_bytes_atomic(path: Path, content: bytes) -> None:
 
 
 def _git(
-    root: Path, *arguments: str, allowed: tuple[int, ...] = (0,)
+    *, root: Path, arguments: tuple[str, ...], allowed: tuple[int, ...] = (0,)
 ) -> subprocess.CompletedProcess[bytes]:
+    """Run one Git command and accept only the explicitly allowed exit codes."""
+
     try:
         result = subprocess.run(
             ("git", "-C", os.fspath(root), *arguments), check=False, capture_output=True
@@ -577,25 +405,22 @@ def _git(
     return result
 
 
-def _validate_git_path(path: bytes) -> None:
+def _normalize_git_path(path: bytes) -> bytes:
+    """Normalize Git's trailing slash for an untracked repository boundary."""
+    normalized = path[:-1] if path.endswith(b"/") else path
     if (
-        not path
-        or path.startswith(b"/")
-        or b"\x00" in path
-        or any(part in {b"", b".", b".."} for part in path.split(b"/"))
+        not normalized
+        or normalized.startswith(b"/")
+        or b"\x00" in normalized
+        or any(part in {b"", b".", b".."} for part in normalized.split(b"/"))
     ):
         raise GitEvidenceError("Git returned an unsafe working-tree path")
-
-
-def _normalize_git_path(path: bytes) -> bytes:
-    """Normalize Git's directory presentation without relaxing path safety."""
-
-    normalized = path[:-1] if path.endswith(b"/") else path
-    _validate_git_path(normalized)
     return normalized
 
 
-def _is_engine_path(path: bytes) -> bool:
+def _is_engine_path(*, path: bytes) -> bool:
+    """Return whether a Git path names coordinator-owned runtime state."""
+
     prefix = ENGINE_RUNTIME_DIR + b"/"
     if not path.startswith(prefix):
         return False
@@ -608,11 +433,15 @@ def _is_engine_path(path: bytes) -> bool:
     )
 
 
-def _hash_field(hasher: object, value: bytes) -> None:
+def _hash_field(*, hasher: object, value: bytes) -> None:
+    """Add one length-delimited field to the dirty-tree digest."""
+
     assert isinstance(hasher, type(hashlib.sha256()))
     hasher.update(len(value).to_bytes(8, "big"))
     hasher.update(value)
 
 
-def _sha256(value: bytes) -> str:
+def _sha256(*, value: bytes) -> str:
+    """Return a prefixed SHA-256 digest for canonical evidence bytes."""
+
     return "sha256:" + hashlib.sha256(value).hexdigest()

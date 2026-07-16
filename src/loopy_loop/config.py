@@ -292,6 +292,8 @@ class RootConfig(BaseModel):
     @field_validator("workflow_set")
     @classmethod
     def validate_workflow_set(cls, value: str) -> str:
+        """Require workflow-set names that are safe as durable directory IDs."""
+
         if not value.strip():
             raise ValueError("workflow_set must not be empty")
         if not SAFE_DURABLE_ID_PATTERN.fullmatch(value):
@@ -544,11 +546,9 @@ def render_model_tier_guidance(*, config: RootConfig) -> str:
     """
     lines = [
         "Model tier policy:",
-        "- When spawning worker agents you may pass `model` per spawn to move "
-        "a single task to a different tier. Pass `effort` too if the spawn "
-        "tool accepts it; if it rejects `effort` (older team-harness "
-        "versions), pass the worker CLI's own reasoning-effort flag via "
-        "`flags` instead (e.g. codex: `-c model_reasoning_effort=<level>`).",
+        "- When spawning worker agents, pass the tier's `model` and structured "
+        "`effort` arguments together. Omit both to use the default tier; do not "
+        "translate effort into raw worker CLI flags.",
         "- Named tiers:",
     ]
     for tier_name, agents in config.model_tiers.items():
@@ -594,6 +594,8 @@ def workflow_set_workflows_dir_path(*, repo_root: Path, workflow_set: str) -> Pa
 def load_workflow_definitions(
     *, repo_root: Path, workflow_set: str
 ) -> list[WorkflowDefinition]:
+    """Load validated workflow definitions for one configured workflow set."""
+
     selected_workflow_set = workflow_set
     workflows_dir = workflow_set_workflows_dir_path(
         repo_root=repo_root, workflow_set=selected_workflow_set
@@ -620,8 +622,8 @@ def load_workflow_definitions(
                     "config_path": config_path,
                     "prompt_text": prompt_text,
                     "config_text": config_text,
-                    "prompt_sha256": _sha256_text(prompt_text),
-                    "config_sha256": _sha256_text(config_text),
+                    "prompt_sha256": _sha256_text(value=prompt_text),
+                    "config_sha256": _sha256_text(value=config_text),
                 }
             )
         except ValidationError as exc:
@@ -633,6 +635,8 @@ def load_workflow_definitions(
 
 
 def workflow_set_contract_path(*, repo_root: Path, workflow_set: str) -> Path:
+    """Return the declared role-contract path for a workflow set."""
+
     return (
         workflow_set_dir_path(repo_root=repo_root, workflow_set=workflow_set)
         / WORKFLOW_SET_CONTRACT_FILENAME
@@ -683,10 +687,12 @@ def load_workflow_set_contract(
             child_interface="recursive",
         )
         text = yaml.safe_dump(json.loads(contract.model_dump_json()), sort_keys=False)
-    return contract, text, _sha256_text(text)
+    return contract, text, _sha256_text(value=text)
 
 
-def _sha256_text(value: str) -> str:
+def _sha256_text(*, value: str) -> str:
+    """Return the prefixed SHA-256 digest used by frozen contracts."""
+
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
@@ -728,6 +734,8 @@ def resolve_api_key(*, config: RootConfig) -> str | None:
 def run_preflight(
     *, repo_root: Path, workflow_set: str | None = None, goal_file: Path | None = None
 ) -> PreflightResult:
+    """Validate the selected root configuration and workflow-set contract."""
+
     errors: list[str] = []
     root_config: RootConfig | None = None
     workflows: list[WorkflowDefinition] = []

@@ -64,6 +64,8 @@ class LogicalReferenceResolver:
         sessions: Mapping[str, SessionIdentity],
         supplied_trace_roots: Mapping[str, Path],
     ) -> None:
+        """Initialize a resolver from one already validated session tree."""
+
         self.repo_root = repo_root
         self.current = current
         self.sessions = dict(sessions)
@@ -82,15 +84,22 @@ class LogicalReferenceResolver:
         session_id: str,
         trace_roots: Mapping[str, Path] | None = None,
     ) -> LogicalReferenceResolver:
-        _validate_id(session_id, label="session ID")
-        root = _canonicalize(Path(repo_root), label="repository root")
+        """Build a resolver after validating the requested session's tree."""
+
+        _validate_id(value=session_id, label="session ID")
+        root = _canonicalize(path=Path(repo_root), label="repository root")
         if not root.is_dir():
             raise LogicalReferenceError(f"repository root does not exist: {root}")
 
         sessions_root = root / LOOPY_DIRNAME / SESSIONS_DIRNAME
-        resolved_sessions_root = _canonicalize(sessions_root, label="sessions root")
+        resolved_sessions_root = _canonicalize(
+            path=sessions_root, label="sessions root"
+        )
         _require_within(
-            resolved_sessions_root, root, label="sessions root", allow_equal=False
+            path=resolved_sessions_root,
+            root=root,
+            label="sessions root",
+            allow_equal=False,
         )
         identities = _validated_tree_containing_session(
             sessions_root=resolved_sessions_root, session_id=session_id
@@ -110,6 +119,8 @@ class LogicalReferenceResolver:
         )
 
     def _resolved_trace_roots(self) -> Mapping[str, Path]:
+        """Lazily discover trace identities only when resolving a trace ref."""
+
         if self._trace_roots is None:
             self._trace_roots = _trace_roots_for_tree(
                 repo_root=self.repo_root,
@@ -120,7 +131,9 @@ class LogicalReferenceResolver:
         return self._trace_roots
 
     def resolve(self, reference: str) -> Path:
-        scope, identifier, relative_parts = _parse_reference(reference)
+        """Resolve one logical reference beneath its validated scope root."""
+
+        scope, identifier, relative_parts = _parse_reference(reference=reference)
         if identifier is None:
             if scope == "repo":
                 base = self.repo_root
@@ -167,15 +180,17 @@ def resolve_logical_reference(
     """Validate the session tree and resolve one logical reference."""
     return LogicalReferenceResolver.for_session(
         repo_root=repo_root, session_id=session_id, trace_roots=trace_roots
-    ).resolve(reference)
+    ).resolve(reference=reference)
 
 
 def _scan_session_records(*, sessions_root: Path) -> dict[str, _SessionRecord]:
+    """Scan every manifest-bearing session subtree below a sessions root."""
+
     if not sessions_root.is_dir():
         raise LogicalReferenceError(f"sessions root does not exist: {sessions_root}")
 
     records: dict[str, _SessionRecord] = {}
-    for entry in _directory_entries(sessions_root):
+    for entry in _directory_entries(directory=sessions_root):
         if entry.is_symlink():
             raise LogicalReferenceError(
                 f"session topology may not use a symlink: {entry}"
@@ -237,7 +252,7 @@ def _validated_tree_containing_session(
         selected_root = selected[next(iter(selected))].directory
         while selected_root.parent != sessions_root:
             selected_root = selected_root.parent.parent
-        for tree_root in _top_level_session_directories(sessions_root):
+        for tree_root in _top_level_session_directories(sessions_root=sessions_root):
             if tree_root == selected_root:
                 continue
             other_records: dict[str, _SessionRecord] = {}
@@ -271,9 +286,13 @@ def _validated_tree_containing_session(
 
 
 def _candidate_tree_roots(*, sessions_root: Path, session_id: str) -> list[Path]:
+    """Locate physical root trees that may contain the requested session ID."""
+
     roots: set[Path] = set()
 
-    def walk(directory: Path, *, tree_root: Path) -> None:
+    def walk(*, directory: Path, tree_root: Path) -> None:
+        """Search one physical tree without following topology symlinks."""
+
         if directory.name == session_id:
             manifest = directory / SESSION_MANIFEST_FILENAME
             if manifest.is_symlink():
@@ -286,7 +305,7 @@ def _candidate_tree_roots(*, sessions_root: Path, session_id: str) -> list[Path]
         if children.is_symlink() or not children.is_dir():
             return
         try:
-            entries = _directory_entries(children)
+            entries = _directory_entries(directory=children)
         except LogicalReferenceError:
             return
         for child in entries:
@@ -299,9 +318,9 @@ def _candidate_tree_roots(*, sessions_root: Path, session_id: str) -> list[Path]
                     )
                 continue
             if child.is_dir():
-                walk(child, tree_root=tree_root)
+                walk(directory=child, tree_root=tree_root)
 
-    for entry in _directory_entries(sessions_root):
+    for entry in _directory_entries(directory=sessions_root):
         if entry.is_symlink():
             if entry.name == session_id:
                 raise LogicalReferenceError(
@@ -310,14 +329,16 @@ def _candidate_tree_roots(*, sessions_root: Path, session_id: str) -> list[Path]
             continue
         if not entry.is_dir():
             continue
-        walk(entry, tree_root=entry)
+        walk(directory=entry, tree_root=entry)
     return sorted(roots, key=lambda path: path.as_posix())
 
 
-def _top_level_session_directories(sessions_root: Path) -> list[Path]:
+def _top_level_session_directories(*, sessions_root: Path) -> list[Path]:
+    """List regular top-level session directories in deterministic order."""
+
     return [
         entry
-        for entry in _directory_entries(sessions_root)
+        for entry in _directory_entries(directory=sessions_root)
         if not entry.is_symlink() and entry.is_dir()
     ]
 
@@ -329,22 +350,27 @@ def _scan_session_subtree(
     sessions_root: Path,
     records: dict[str, _SessionRecord],
 ) -> None:
+    """Load one physical session subtree while ignoring non-session children."""
+
     if directory.is_symlink():
         raise LogicalReferenceError(
             f"session topology may not use a symlink: {directory}"
         )
-    resolved_directory = _canonicalize(directory, label="session directory")
+    resolved_directory = _canonicalize(path=directory, label="session directory")
     _require_within(
-        resolved_directory, sessions_root, label="session directory", allow_equal=False
+        path=resolved_directory,
+        root=sessions_root,
+        label="session directory",
+        allow_equal=False,
     )
     manifest_path = directory / SESSION_MANIFEST_FILENAME
     if manifest_path.is_symlink():
         raise LogicalReferenceError(
             f"session manifest may not be a symlink: {manifest_path}"
         )
-    payload = _read_mapping(manifest_path, label="session manifest")
-    session_id = _required_string(payload, "session_id", manifest_path)
-    _validate_id(session_id, label="session ID")
+    payload = _read_mapping(path=manifest_path, label="session manifest")
+    session_id = _required_string(payload=payload, key="session_id", path=manifest_path)
+    _validate_id(value=session_id, label="session ID")
     if directory.name != session_id:
         raise LogicalReferenceError(
             f"session manifest ID {session_id!r} does not match directory "
@@ -371,14 +397,14 @@ def _scan_session_subtree(
             f"parent_session_id must be a string or null: {manifest_path}"
         )
     if isinstance(parent_value, str):
-        _validate_id(parent_value, label="parent session ID")
+        _validate_id(value=parent_value, label="parent session ID")
     root_value = payload.get("root_session_id")
     if root_value is not None and not isinstance(root_value, str):
         raise LogicalReferenceError(
             f"root_session_id must be a string: {manifest_path}"
         )
     if isinstance(root_value, str):
-        _validate_id(root_value, label="root session ID")
+        _validate_id(value=root_value, label="root session ID")
     depth_value = payload.get("depth")
     if depth_value is not None and (
         isinstance(depth_value, bool)
@@ -416,7 +442,7 @@ def _scan_session_subtree(
         raise LogicalReferenceError(
             f"session children path is not a directory: {children}"
         )
-    for child in _directory_entries(children):
+    for child in _directory_entries(directory=children):
         if child.is_symlink():
             raise LogicalReferenceError(
                 f"session topology may not use a symlink: {child}"
@@ -429,9 +455,10 @@ def _scan_session_subtree(
         if child.name.startswith(".staging-"):
             continue
         if not (child / SESSION_MANIFEST_FILENAME).is_file():
-            raise LogicalReferenceError(
-                f"child session directory has no session manifest: {child}"
-            )
+            # Agent work can accidentally leave ordinary directories below
+            # the engine-owned children root.  Without an identity manifest
+            # they are not topology and must not poison a healthy session.
+            continue
         _scan_session_subtree(
             directory=child,
             physical_parent_id=session_id,
@@ -441,6 +468,8 @@ def _scan_session_subtree(
 
 
 def _validate_parent_manifest(*, record: _SessionRecord, sessions_root: Path) -> None:
+    """Verify a child's optional parent manifest against physical topology."""
+
     path = record.directory / PARENT_MANIFEST_FILENAME
     if record.physical_parent_id is None:
         if path.exists() or path.is_symlink():
@@ -452,26 +481,26 @@ def _validate_parent_manifest(*, record: _SessionRecord, sessions_root: Path) ->
         raise LogicalReferenceError(f"parent manifest may not be a symlink: {path}")
     if not path.exists():
         return
-    payload = _read_mapping(path, label="parent manifest")
-    parent_id = _required_string(payload, "parent_session_id", path)
+    payload = _read_mapping(path=path, label="parent manifest")
+    parent_id = _required_string(payload=payload, key="parent_session_id", path=path)
     if parent_id != record.physical_parent_id:
         raise LogicalReferenceError(
             f"parent manifest contradicts session topology at {path}"
         )
-    relative = _required_string(payload, "parent_relative_path", path)
+    relative = _required_string(payload=payload, key="parent_relative_path", path=path)
     if "\x00" in relative or "\\" in relative or Path(relative).is_absolute():
         raise LogicalReferenceError(f"invalid parent_relative_path at {path}")
     resolved_parent = _canonicalize(
-        record.directory / relative, label="parent manifest target"
+        path=record.directory / relative, label="parent manifest target"
     )
     _require_within(
-        resolved_parent,
-        sessions_root,
+        path=resolved_parent,
+        root=sessions_root,
         label="parent manifest target",
         allow_equal=False,
     )
     expected_parent = _canonicalize(
-        record.directory.parent.parent, label="physical parent session"
+        path=record.directory.parent.parent, label="physical parent session"
     )
     if resolved_parent != expected_parent:
         raise LogicalReferenceError(
@@ -482,6 +511,8 @@ def _validate_parent_manifest(*, record: _SessionRecord, sessions_root: Path) ->
 def _validate_session_records(
     *, records: Mapping[str, _SessionRecord]
 ) -> dict[str, SessionIdentity]:
+    """Validate parent/root/depth declarations and build session identities."""
+
     identities: dict[str, SessionIdentity] = {}
     for record in records.values():
         if record.declared_parent_id != record.physical_parent_id:
@@ -531,23 +562,33 @@ def _trace_roots_for_tree(
     session_ids: frozenset[str],
     supplied: Mapping[str, Path],
 ) -> dict[str, Path]:
+    """Discover valid trace identities without trusting unrelated manifests."""
+
     traces_root = _canonicalize(
-        repo_root / LOOPY_DIRNAME / TRACES_DIRNAME, label="traces root"
+        path=repo_root / LOOPY_DIRNAME / TRACES_DIRNAME, label="traces root"
     )
-    _require_within(traces_root, repo_root, label="traces root", allow_equal=False)
+    _require_within(
+        path=traces_root, root=repo_root, label="traces root", allow_equal=False
+    )
     result: dict[str, Path] = {}
     if traces_root.is_dir():
-        for manifest_path in _walk_trace_manifests(traces_root):
-            payload = _read_mapping(manifest_path, label="trace manifest")
-            identifier = _trace_manifest_id(payload)
-            if identifier is None:
+        for manifest_path in _walk_trace_manifests(traces_root=traces_root):
+            try:
+                payload = _read_mapping(path=manifest_path, label="trace manifest")
+                identifier = _trace_manifest_id(payload=payload)
+                if identifier is None:
+                    continue
+                _validate_id(value=identifier, label="trace manifest ID")
+                manifest_identity = payload.get("identity", {})
+                if not isinstance(manifest_identity, dict):
+                    raise LogicalReferenceError(
+                        f"trace manifest identity must be an object: {manifest_path}"
+                    )
+            except LogicalReferenceError:
+                # Trace data is diagnostic and independently repairable. An
+                # invalid manifest cannot identify any trace, so skip it and
+                # continue looking for the exact healthy identity requested.
                 continue
-            _validate_id(identifier, label="trace manifest ID")
-            manifest_identity = payload.get("identity", {})
-            if not isinstance(manifest_identity, dict):
-                raise LogicalReferenceError(
-                    f"trace manifest identity must be an object: {manifest_path}"
-                )
             manifest_root_id = payload.get(
                 "root_session_id", manifest_identity.get("root_session_id")
             )
@@ -562,7 +603,7 @@ def _trace_roots_for_tree(
             ):
                 continue
             trace_root = _canonicalize(
-                manifest_path.parent, label="trace manifest root"
+                path=manifest_path.parent, label="trace manifest root"
             )
             relative = trace_root.relative_to(traces_root)
             if not relative.parts or relative.parts[0] != root_session_id:
@@ -572,15 +613,15 @@ def _trace_roots_for_tree(
             )
 
     for identifier, raw_path in supplied.items():
-        _validate_id(identifier, label="trace manifest ID")
+        _validate_id(value=identifier, label="trace manifest ID")
         raw = Path(raw_path)
         trace_root = _canonicalize(
-            raw.parent if raw.name == TRACE_MANIFEST_FILENAME else raw,
+            path=raw.parent if raw.name == TRACE_MANIFEST_FILENAME else raw,
             label=f"trace root {identifier!r}",
         )
         _require_within(
-            trace_root,
-            traces_root,
+            path=trace_root,
+            root=traces_root,
             label=f"trace root {identifier!r}",
             allow_equal=False,
         )
@@ -596,7 +637,9 @@ def _trace_roots_for_tree(
     return result
 
 
-def _walk_trace_manifests(traces_root: Path) -> list[Path]:
+def _walk_trace_manifests(*, traces_root: Path) -> list[Path]:
+    """List regular trace manifests without following symlinked trace data."""
+
     manifests: list[Path] = []
     for directory, directory_names, file_names in os.walk(
         traces_root, followlinks=False
@@ -608,14 +651,14 @@ def _walk_trace_manifests(traces_root: Path) -> list[Path]:
         if TRACE_MANIFEST_FILENAME in file_names:
             manifest = current / TRACE_MANIFEST_FILENAME
             if manifest.is_symlink():
-                raise LogicalReferenceError(
-                    f"trace manifest may not be a symlink: {manifest}"
-                )
+                continue
             manifests.append(manifest)
     return sorted(manifests)
 
 
-def _trace_manifest_id(payload: Mapping[str, Any]) -> str | None:
+def _trace_manifest_id(*, payload: Mapping[str, Any]) -> str | None:
+    """Extract the first supported logical identity from a trace manifest."""
+
     for key in ("trace_manifest_id", "manifest_id", "trace_id", "attempt_id"):
         value = payload.get(key)
         if value is not None:
@@ -630,6 +673,8 @@ def _trace_manifest_id(payload: Mapping[str, Any]) -> str | None:
 def _register_trace_root(
     *, result: dict[str, Path], identifier: str, trace_root: Path
 ) -> None:
+    """Register one unambiguous trace identity and canonical root."""
+
     existing = result.get(identifier)
     if existing is not None and existing != trace_root:
         raise LogicalReferenceError(
@@ -638,7 +683,9 @@ def _register_trace_root(
     result[identifier] = trace_root
 
 
-def _parse_reference(reference: str) -> tuple[str, str | None, tuple[str, ...]]:
+def _parse_reference(*, reference: str) -> tuple[str, str | None, tuple[str, ...]]:
+    """Parse and validate the durable logical-reference grammar."""
+
     if not reference:
         raise LogicalReferenceError("logical reference must be a non-empty string")
     if "\x00" in reference or "\\" in reference:
@@ -659,7 +706,7 @@ def _parse_reference(reference: str) -> tuple[str, str | None, tuple[str, ...]]:
         len(prefix_parts) == 2 and prefix_parts[0] in _NAMED_SCOPES and prefix_parts[1]
     ):
         scope, identifier = prefix_parts
-        _validate_id(identifier, label=f"{scope} reference ID")
+        _validate_id(value=identifier, label=f"{scope} reference ID")
     else:
         raise LogicalReferenceError(
             f"logical reference has an unknown or malformed scope: {reference!r}"
@@ -677,13 +724,15 @@ def _parse_reference(reference: str) -> tuple[str, str | None, tuple[str, ...]]:
 
 
 def _resolve_beneath(*, base: Path, parts: tuple[str, ...], reference: str) -> Path:
-    canonical_base = _canonicalize(base, label="logical-reference root")
+    """Resolve reference parts while enforcing containment beneath the scope."""
+
+    canonical_base = _canonicalize(path=base, label="logical-reference root")
     _reject_symlink_loops(base=canonical_base, parts=parts, reference=reference)
     candidate = canonical_base.joinpath(*parts)
-    resolved = _canonicalize(candidate, label=f"logical reference {reference!r}")
+    resolved = _canonicalize(path=candidate, label=f"logical reference {reference!r}")
     _require_within(
-        resolved,
-        canonical_base,
+        path=resolved,
+        root=canonical_base,
         label=f"logical reference {reference!r}",
         allow_equal=True,
     )
@@ -693,6 +742,8 @@ def _resolve_beneath(*, base: Path, parts: tuple[str, ...], reference: str) -> P
 def _reject_symlink_loops(
     *, base: Path, parts: tuple[str, ...], reference: str
 ) -> None:
+    """Reject symlink cycles before canonical containment resolution."""
+
     current = base
     for part in parts:
         current /= part
@@ -714,19 +765,25 @@ def _reject_symlink_loops(
             ) from exc
 
 
-def _canonicalize(path: Path, *, label: str) -> Path:
+def _canonicalize(*, path: Path, label: str) -> Path:
+    """Resolve a path without requiring its final component to exist."""
+
     try:
         return path.resolve(strict=False)
     except (OSError, RuntimeError) as exc:
         raise LogicalReferenceError(f"cannot resolve {label} at {path}: {exc}") from exc
 
 
-def _require_within(path: Path, root: Path, *, label: str, allow_equal: bool) -> None:
+def _require_within(*, path: Path, root: Path, label: str, allow_equal: bool) -> None:
+    """Require a canonical path to remain beneath its trusted root."""
+
     if (not allow_equal and path == root) or not path.is_relative_to(root):
         raise LogicalReferenceError(f"{label} escapes its validated root: {path}")
 
 
-def _directory_entries(directory: Path) -> list[Path]:
+def _directory_entries(*, directory: Path) -> list[Path]:
+    """List directory entries in byte-stable filename order."""
+
     try:
         return sorted(directory.iterdir(), key=lambda path: os.fsencode(path.name))
     except OSError as exc:
@@ -735,7 +792,9 @@ def _directory_entries(directory: Path) -> list[Path]:
         ) from exc
 
 
-def _read_mapping(path: Path, *, label: str) -> dict[str, Any]:
+def _read_mapping(*, path: Path, label: str) -> dict[str, Any]:
+    """Read a JSON file and require a top-level object."""
+
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -745,13 +804,17 @@ def _read_mapping(path: Path, *, label: str) -> dict[str, Any]:
     return payload
 
 
-def _required_string(payload: Mapping[str, Any], key: str, path: Path) -> str:
+def _required_string(*, payload: Mapping[str, Any], key: str, path: Path) -> str:
+    """Read one required non-empty string from a persisted object."""
+
     value = payload.get(key)
     if not isinstance(value, str) or not value:
         raise LogicalReferenceError(f"{key} must be a non-empty string at {path}")
     return value
 
 
-def _validate_id(value: str, *, label: str) -> None:
+def _validate_id(*, value: str, label: str) -> None:
+    """Require an identifier that is safe for durable path and ref segments."""
+
     if not _SAFE_ID.fullmatch(value):
         raise LogicalReferenceError(f"invalid {label}: {value!r}")

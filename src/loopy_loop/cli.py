@@ -32,10 +32,7 @@ from loopy_loop.sessions import state_path
 from loopy_loop.sessions import user_updates_journal_path
 from loopy_loop.sessions import write_json_atomic
 from loopy_loop.state_store import StateStore
-from loopy_loop.tracing import enqueue_trace_export
-from loopy_loop.tracing import export_trace_to_directory
 from loopy_loop.tracing import list_trace_manifests
-from loopy_loop.tracing import prune_trace
 from loopy_loop.tracing import read_trace_manifest
 from loopy_loop.tracing import resolve_trace_manifest
 from loopy_loop.tracing import TraceError
@@ -95,7 +92,6 @@ PACKAGED_TEMPLATE_NAMES = list(PACKAGED_TEMPLATE_FILES_BY_NAME)
 GITIGNORE_LINES = [
     ".loopy_loop/sessions/",
     ".loopy_loop/traces/",
-    ".loopy_loop/trace_export_outbox/",
     ".loopy_loop/trace_finalization_outbox/",
     ".loopy_loop/repository.json",
     ".loopy_loop/state.json",
@@ -674,7 +670,7 @@ def _validate_update_session(*, repo_root: Path, session_id: str) -> str:
 
 @main.group()
 def traces() -> None:
-    """Inspect and manage local attempt traces."""
+    """Inspect local attempt traces."""
 
 
 @traces.command("list")
@@ -723,51 +719,6 @@ def inspect_trace(manifest_or_id: str) -> None:
     except TraceError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(manifest, indent=2, sort_keys=True))
-
-
-@traces.command("prune")
-@click.argument("manifest_or_id")
-def prune_trace_command(manifest_or_id: str) -> None:
-    """Delete one finalized trace and report its last observed integrity."""
-    repo_root = Path.cwd().resolve()
-    try:
-        manifest_path = resolve_trace_manifest(
-            repo_root=repo_root, reference=manifest_or_id
-        )
-        manifest = read_trace_manifest(manifest_path=manifest_path)
-        manifest_id = str(manifest.get("manifest_id", manifest_or_id))
-        integrity = prune_trace(trace_root=manifest_path.parent)
-    except TraceError as exc:
-        raise click.ClickException(str(exc)) from exc
-    click.echo(f"pruned {manifest_id} integrity={integrity['status']}")
-
-
-@traces.command("export")
-@click.argument("manifest_or_id")
-@click.option(
-    "--destination",
-    required=True,
-    type=click.Path(path_type=Path, file_okay=False),
-    help="Local directory used by the durable export adapter.",
-)
-def export_trace(manifest_or_id: str, destination: Path) -> None:
-    """Export one finalized trace through its durable outbox record."""
-    repo_root = Path.cwd().resolve()
-    try:
-        manifest_path = resolve_trace_manifest(
-            repo_root=repo_root, reference=manifest_or_id
-        )
-        outbox_path = enqueue_trace_export(
-            repo_root=repo_root,
-            trace_root=manifest_path.parent,
-            destination=destination,
-        )
-        exported_path = export_trace_to_directory(
-            outbox_path=outbox_path, destination=destination
-        )
-    except (KeyError, OSError, ValueError, TraceError) as exc:
-        raise click.ClickException(str(exc)) from exc
-    click.echo(str(exported_path))
 
 
 def _write_if_missing(*, path: Path, content: str) -> list[str]:

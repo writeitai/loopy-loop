@@ -211,6 +211,8 @@ def root_tree_usage_totals(
     read_children = children_reader or _read_children_payload
 
     def accumulate(node: LoopState) -> SessionUsageTotals:
+        """Accumulate one session subtree without double-counting live children."""
+
         if node.active_session_id in seen:
             raise ChildLedgerError(
                 f"cycle detected in usage projection at {node.active_session_id}"
@@ -249,7 +251,7 @@ def root_tree_usage_totals(
                     raise ChildLedgerError(
                         f"active child {child_id} has no state for usage projection"
                     )
-                _add_usage(total=total, addition=accumulate(child))
+                _add_usage(total=total, addition=accumulate(node=child))
                 continue
             usage = record.get("usage")
             if isinstance(usage, dict):
@@ -261,10 +263,12 @@ def root_tree_usage_totals(
                     total.iterations_without_usage += 1
         return total
 
-    return accumulate(root_state)
+    return accumulate(node=root_state)
 
 
 def _add_usage(*, total: SessionUsageTotals, addition: SessionUsageTotals) -> None:
+    """Add one usage subtotal to an existing aggregate in place."""
+
     total.prompt_tokens += addition.prompt_tokens
     total.completion_tokens += addition.completion_tokens
     total.iterations_with_usage += addition.iterations_with_usage
@@ -287,6 +291,8 @@ def create_coordinator_app(
     workflow_set: str | None = None,
     goal_file: Path | None = None,
 ) -> FastAPI:
+    """Create the HTTP coordinator bound to one repository checkout."""
+
     preflight = run_preflight(
         repo_root=repo_root, workflow_set=workflow_set, goal_file=goal_file
     )
@@ -299,6 +305,8 @@ def create_coordinator_app(
 
     @app.post("/register", response_model=TaskResponse)
     def register_worker(request: RegisterRequest | None = None) -> TaskResponse:
+        """Validate a worker and return its current or next assignment."""
+
         # Breaking change (0.3): identity is required. It guarantees every
         # dispatched task has a recorded owner, so liveness verification and
         # the stale-/finished owner check are always possible. Old workers
@@ -324,6 +332,8 @@ def create_coordinator_app(
 
     @app.post("/finished", response_model=TaskResponse)
     def finish_assignment(request: FinishedRequest) -> TaskResponse:
+        """Accept one attempt completion and advance its active session."""
+
         try:
             return service.finish_assignment(request=request)
         except WorkerUpgradeRequired as exc:
@@ -349,6 +359,8 @@ class CoordinatorService:
         state_store: StateStore,
         resume: bool,
     ) -> None:
+        """Initialize scheduling state and recover pending trace finalizations."""
+
         self.repo_root = repo_root
         self.repo_root = repo_root.resolve()
         self.repository_identity = ensure_repository_identity(repo_root=self.repo_root)
@@ -378,6 +390,8 @@ class CoordinatorService:
     def register_worker(
         self, *, request: RegisterRequest | None = None
     ) -> TaskResponse:
+        """Recover interrupted work and dispatch the next eligible assignment."""
+
         if request is not None:
             self._validate_worker_handshake(request=request)
         caller = request.worker if request is not None else None
@@ -450,6 +464,8 @@ class CoordinatorService:
         )
 
     def _validate_worker_handshake(self, *, request: RegisterRequest) -> None:
+        """Validate worker protocol, capability, and repository identity binding."""
+
         top_state = StateStore(repo_root=self.repo_root).read_state()
         requires_v2 = top_state is not None and top_state.schema_version >= 2
         version = request.worker_protocol_version or 1
@@ -506,6 +522,8 @@ class CoordinatorService:
 
     @staticmethod
     def _worker_contract_key(worker: WorkerIdentity) -> tuple[str, int, str | None]:
+        """Return the process identity key used for worker protocol tracking."""
+
         return (worker.hostname, worker.pid, worker.starttime)
 
     def _remember_v2_completion_caller(
@@ -522,9 +540,11 @@ class CoordinatorService:
             return
         caller = request.worker
         assert caller is not None  # checked by _validate_finished_binding
-        self._worker_contracts[self._worker_contract_key(caller)] = 2
+        self._worker_contracts[self._worker_contract_key(worker=caller)] = 2
 
-    def _emit(self, session_id: str, event_type: str, payload: dict) -> None:
+    def _emit(self, *, session_id: str, event_type: str, payload: dict) -> None:
+        """Buffer one session event until its producing mutation commits."""
+
         self._pending_events.append((session_id, event_type, payload))
 
     def _flush_pending_events(self) -> None:
@@ -543,11 +563,13 @@ class CoordinatorService:
                 )
 
     def _emit_stop_transition(self, *, state: LoopState, was_terminal: bool) -> None:
+        """Emit the session-stopped event only for a new terminal transition."""
+
         if not was_terminal and self.state_store.is_terminal_state(state=state):
             self._emit(
-                state.active_session_id,
-                "session_stopped",
-                {"status": state.status, "stop_reason": state.stop_reason},
+                session_id=state.active_session_id,
+                event_type="session_stopped",
+                payload={"status": state.status, "stop_reason": state.stop_reason},
             )
 
     def _plan_orphan_recovery(self) -> tuple[CurrentTask, RecoveryOutcome] | None:
@@ -580,6 +602,8 @@ class CoordinatorService:
         recovered_requests: list[FinishedRequest] = []
 
         def mutator(state: LoopState | None) -> tuple[LoopState, TaskResponse | None]:
+            """Commit recovery and scheduling against the latest session state."""
+
             current = _require_state(state=state)
             was_terminal = self.state_store.is_terminal_state(state=current)
             now = utc_now()
@@ -614,7 +638,7 @@ class CoordinatorService:
                         workflow_contract=frozen_workflow_contract,
                     )
                     recovered_requests.append(recovered_request)
-                elif recovery is not None and _same_task(orphaned, recovery[0]):
+                elif recovery is not None and _same_task(a=orphaned, b=recovery[0]):
                     # The interrupted task's agent processes were handled in
                     # phase A (outside the lock); commit the abandonment.
                     outcome = recovery[1]
@@ -642,9 +666,9 @@ class CoordinatorService:
                     )
                     current.usage_totals.iterations_without_usage += 1
                     self._emit(
-                        current.active_session_id,
-                        "iteration_abandoned",
-                        {
+                        session_id=current.active_session_id,
+                        event_type="iteration_abandoned",
+                        payload={
                             "workflow_id": orphaned.workflow_id,
                             "iteration": orphaned.iteration,
                             "attempt_id": orphaned.attempt_id,
@@ -799,10 +823,13 @@ class CoordinatorService:
         caller: WorkerIdentity | None,
         now: datetime,
     ) -> CurrentTask:
+        """Create and freeze the next task for a validated worker caller."""
+
         completion_contract_version = 1
         if state.schema_version >= 2:
             if caller is None or (
-                self._worker_contracts.get(self._worker_contract_key(caller)) != 2
+                self._worker_contracts.get(self._worker_contract_key(worker=caller))
+                != 2
             ):
                 raise WorkerUpgradeRequired(
                     "v2 task dispatch requires a validated worker handshake; "
@@ -858,14 +885,16 @@ class CoordinatorService:
                 ),
             )
             write_attempt_assignment(path=assignment_file, assignment=assignment)
-            task.assignment_sha256 = file_sha256(assignment_file)
+            task.assignment_sha256 = file_sha256(path=assignment_file)
         return task
 
     def _emit_task_dispatched(self, *, session_id: str, task: CurrentTask) -> None:
+        """Emit the compact ownership record for a newly dispatched task."""
+
         self._emit(
-            session_id,
-            "task_dispatched",
-            {
+            session_id=session_id,
+            event_type="task_dispatched",
+            payload={
                 "workflow_id": task.workflow_id,
                 "iteration": task.iteration,
                 "attempt_id": task.attempt_id,
@@ -878,7 +907,9 @@ class CoordinatorService:
         )
 
     def _raise_if_worker_alive(self, *, current_task: CurrentTask) -> None:
-        if is_worker_alive(current_task.worker) is not True:
+        """Refuse recovery while the task's recorded worker is verifiably alive."""
+
+        if is_worker_alive(identity=current_task.worker) is not True:
             return
         worker = current_task.worker
         assert worker is not None
@@ -890,6 +921,8 @@ class CoordinatorService:
         )
 
     def finish_assignment(self, *, request: FinishedRequest) -> TaskResponse:
+        """Commit an attempt result and finalize its externally visible trace."""
+
         caller = request.worker
         with self._transition_lock:
             response, completion_accepted = self._finish_assignment_locked(
@@ -960,16 +993,20 @@ class CoordinatorService:
                     if current.active_child_session_id is None:
                         stop_response = self._stop_response_if_needed(state=current)
                         if stop_response is not None:
-                            return finish(stop_response)
+                            return finish(response=stop_response)
                     if caller is None or (
-                        self._worker_contracts.get(self._worker_contract_key(caller))
+                        self._worker_contracts.get(
+                            self._worker_contract_key(worker=caller)
+                        )
                         != 2
                     ):
                         raise WorkerUpgradeRequired(
                             "v2 /finished cannot dispatch work without a validated "
                             "worker handshake; call /register with protocol v2"
                         )
-                return finish(self._advance(state=current, caller=caller, now=now))
+                return finish(
+                    response=self._advance(state=current, caller=caller, now=now)
+                )
 
             # Step 4: Mismatch check — stale call for a different task.
             # Do NOT mutate state; return the current task's run response so the
@@ -1017,7 +1054,7 @@ class CoordinatorService:
                         f"{active.worker.hostname}"
                     )
                 return finish(
-                    _build_run_response(
+                    response=_build_run_response(
                         current_task=active,
                         config_snapshot=current.config_snapshot,
                         repo_root=self.repo_root,
@@ -1049,13 +1086,15 @@ class CoordinatorService:
             # Step 6: Special cases that stop immediately.
             if current.stop_reason == "goal_check_broken":
                 return finish(
-                    TaskResponse(action=STOP_ACTION, stop_reason="goal_check_broken"),
+                    response=TaskResponse(
+                        action=STOP_ACTION, stop_reason="goal_check_broken"
+                    ),
                     completion_accepted=True,
                 )
 
             # Step 7+: stop conditions, child dispatch, next workflow.
             return finish(
-                self._advance(state=current, caller=caller, now=now),
+                response=self._advance(state=current, caller=caller, now=now),
                 completion_accepted=True,
             )
 
@@ -1152,9 +1191,9 @@ class CoordinatorService:
                 failure_kind = "unknown"
                 state.goal_check_consecutive_failures += 1
                 self._emit(
-                    state.active_session_id,
-                    "goal_check",
-                    {"valid": False, "iteration": active.iteration},
+                    session_id=state.active_session_id,
+                    event_type="goal_check",
+                    payload={"valid": False, "iteration": active.iteration},
                 )
                 if (
                     state.goal_check_consecutive_failures
@@ -1165,9 +1204,9 @@ class CoordinatorService:
             else:
                 state.goal_check_consecutive_failures = 0
                 self._emit(
-                    state.active_session_id,
-                    "goal_check",
-                    {
+                    session_id=state.active_session_id,
+                    event_type="goal_check",
+                    payload={
                         "valid": True,
                         "goal_met": goal_signal.goal_met,
                         "reason": goal_signal.reason,
@@ -1229,9 +1268,9 @@ class CoordinatorService:
         if request.duration_s:
             totals.duration_s += request.duration_s
         self._emit(
-            state.active_session_id,
-            "task_finished",
-            {
+            session_id=state.active_session_id,
+            event_type="task_finished",
+            payload={
                 "workflow_id": active.workflow_id,
                 "iteration": active.iteration,
                 "attempt_id": active.attempt_id,
@@ -1300,7 +1339,7 @@ class CoordinatorService:
                 or active.assignment_sha256 is None
                 or request.assignment_sha256 != active.assignment_sha256
                 or not assignment_file.is_file()
-                or active.assignment_sha256 != file_sha256(assignment_file)
+                or active.assignment_sha256 != file_sha256(path=assignment_file)
             ):
                 raise WorkerBusyError(
                     "v2 finished assignment does not match its immutable "
@@ -1309,7 +1348,7 @@ class CoordinatorService:
             if active.workflow_snapshot is None:
                 raise WorkerBusyError("v2 finished assignment has no frozen snapshot")
             try:
-                _, _, frozen_workflow_contract = verify_workflow_snapshot(
+                _, _, frozen_workflow_contract, _ = verify_workflow_snapshot(
                     descriptor=active.workflow_snapshot,
                     repo_root=self.repo_root,
                     expected_task=active,
@@ -1354,7 +1393,7 @@ class CoordinatorService:
             workflow_id=workflow_id,
             attempt_id=attempt_id,
         )
-        if not path.is_file() or file_sha256(path) != assignment_sha256:
+        if not path.is_file() or file_sha256(path=path) != assignment_sha256:
             raise TraceError("attempt assignment no longer matches its accepted hash")
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1595,6 +1634,8 @@ class CoordinatorService:
             )
 
     def _trace_finalization_path(self, *, request: FinishedRequest) -> Path | None:
+        """Return the durable finalization-intent path for a v2 completion."""
+
         if not request.attempt_id or not request.assignment_sha256:
             return None
         outbox = trace_finalization_outbox_dir_path(repo_root=self.repo_root)
@@ -1643,6 +1684,8 @@ class CoordinatorService:
             )
 
     def _clear_trace_finalization(self, *, request: FinishedRequest) -> None:
+        """Remove a completion's finalization intent after successful sealing."""
+
         path = self._trace_finalization_path(request=request)
         if path is not None:
             path.unlink(missing_ok=True)
@@ -1650,6 +1693,8 @@ class CoordinatorService:
     def _retry_trace_finalizations(
         self, *, allow_unavailable_responses: bool = False
     ) -> None:
+        """Retry durable completion and abandonment finalization intents."""
+
         outbox = trace_finalization_outbox_dir_path(repo_root=self.repo_root)
         if not outbox.is_dir():
             return
@@ -1835,6 +1880,8 @@ class CoordinatorService:
             return False
 
     def _abandonment_is_committed(self, *, task: CurrentTask) -> bool:
+        """Return whether durable state records this exact task as abandoned."""
+
         try:
             states = self._current_and_archived_states(session_id=task.session_id)
         except Exception:
@@ -1847,7 +1894,9 @@ class CoordinatorService:
         if not states:
             return False
         current = states[0]
-        if current.current_task is not None and _same_task(current.current_task, task):
+        if current.current_task is not None and _same_task(
+            a=current.current_task, b=task
+        ):
             return False
         return any(
             any(
@@ -2058,6 +2107,8 @@ class CoordinatorService:
     def _read_recoverable_finished_request(
         self, *, current_task: CurrentTask
     ) -> tuple[FinishedRequest, Path | None, WorkflowSetContract | None] | None:
+        """Recover a provenance-valid completion from worker outbox artifacts."""
+
         pending = pending_finished_request_path(
             repo_root=self.repo_root,
             session_id=current_task.session_id,
@@ -2131,6 +2182,8 @@ class CoordinatorService:
         return recovered_request, None, frozen_workflow_contract
 
     def _prepare_state(self, *, resume: bool) -> None:
+        """Create fresh state or reconstruct the active session stack on resume."""
+
         existing_state = self.state_store.read_state()
         if existing_state is None:
             self._write_fresh_state()
@@ -2200,6 +2253,8 @@ class CoordinatorService:
             ) from exc
 
     def _validate_session_contract(self, *, state: LoopState) -> None:
+        """Verify a v2 session's manifest and immutable identity contracts."""
+
         session_root = session_dir_path(
             repo_root=self.repo_root, session_id=state.active_session_id
         )
@@ -2224,13 +2279,13 @@ class CoordinatorService:
                     f"immutable v2 session artifact is missing: {required}"
                 )
         expected_hash = manifest.get("goal_contract_hash")
-        if expected_hash != file_sha256(goal_path):
+        if expected_hash != file_sha256(path=goal_path):
             raise ConfigError(
                 f"immutable goal contract hash mismatch for session "
                 f"{state.active_session_id}"
             )
         expected_workflow_hash = manifest.get("workflow_contract_hash")
-        if expected_workflow_hash != file_sha256(contract_path):
+        if expected_workflow_hash != file_sha256(path=contract_path):
             raise ConfigError(
                 f"immutable workflow contract hash mismatch for session "
                 f"{state.active_session_id}"
@@ -2273,6 +2328,8 @@ class CoordinatorService:
             )
 
     def _validate_active_path_contracts(self, *, state: LoopState) -> None:
+        """Validate every session contract on the active child-to-root path."""
+
         current = state
         seen: set[str] = set()
         while True:
@@ -2474,7 +2531,7 @@ class CoordinatorService:
                 changed = True
             adoptable = child_id
         if changed:
-            _bump_children_revision(payload)
+            _bump_children_revision(payload=payload)
             write_json_atomic(
                 path=children_path(
                     repo_root=self.repo_root, session_id=parent_session_id
@@ -2537,6 +2594,8 @@ class CoordinatorService:
     def _physical_child_store(
         self, *, parent_session_id: str, child_session_id: str
     ) -> StateStore:
+        """Return the state store physically nested beneath a parent session."""
+
         if not SAFE_DURABLE_ID_PATTERN.fullmatch(child_session_id):
             raise ChildLedgerError(
                 f"child ledger contains an unsafe session ID: {child_session_id!r}"
@@ -2550,6 +2609,8 @@ class CoordinatorService:
     def _read_child_manifest_for_edge(
         self, *, parent_session_id: str, child_session_id: str, required: bool = True
     ) -> dict[str, Any] | None:
+        """Read the immutable child manifest that corroborates a ledger edge."""
+
         parent_root = session_dir_path(
             repo_root=self.repo_root, session_id=parent_session_id
         )
@@ -2579,6 +2640,8 @@ class CoordinatorService:
         record: dict[str, Any],
         child_manifest: dict[str, Any] | None,
     ) -> None:
+        """Require child state, manifest, and parent ledger identity to agree."""
+
         child_id = record.get("session_id")
         if child_manifest is None:
             raise ChildLedgerError(
@@ -2649,6 +2712,8 @@ class CoordinatorService:
     def _validated_child_edge(
         self, *, parent_state: LoopState, child_session_id: str
     ) -> tuple[dict[str, Any], StateStore, LoopState | None]:
+        """Resolve a unique, identity-valid child edge and its durable state."""
+
         payload = self._read_or_repair_children_payload(
             path=children_path(
                 repo_root=self.repo_root, session_id=parent_state.active_session_id
@@ -2702,6 +2767,8 @@ class CoordinatorService:
     def _mark_child_record_failed_dispatch(
         self, *, parent_session_id: str, child_session_id: str, reason: str
     ) -> None:
+        """Mark a child edge failed when publication did not complete."""
+
         path = children_path(repo_root=self.repo_root, session_id=parent_session_id)
         payload = self._read_or_repair_children_payload(path=path)
         matches = [
@@ -2726,10 +2793,12 @@ class CoordinatorService:
             return
         record["status"] = "failed_dispatch"
         record["stop_reason"] = reason
-        _bump_children_revision(payload)
+        _bump_children_revision(payload=payload)
         write_json_atomic(path=path, payload=payload)
 
     def _write_fresh_state(self) -> None:
+        """Create a new root session with frozen v2 identity contracts."""
+
         session_id = create_session_id(goal_hash=self.preflight.root_config.goal_hash)
         goal_hash = derive_full_goal_hash(goal=self.preflight.root_config.goal)
         create_session_dir(
@@ -2766,9 +2835,9 @@ class CoordinatorService:
         )
         self.state_store.write_state(state=state)
         self._emit(
-            session_id,
-            "session_started",
-            {
+            session_id=session_id,
+            event_type="session_started",
+            payload={
                 "goal_hash": goal_hash,
                 "workflow_set": self.preflight.workflow_set,
                 "max_turns": self.preflight.root_config.max_turns,
@@ -2804,6 +2873,8 @@ class CoordinatorService:
     def _dispatch_child_session_if_requested(
         self, *, state: LoopState, caller: WorkerIdentity | None = None
     ) -> TaskResponse | None:
+        """Accept at most one pending child request and dispatch its first task."""
+
         requests_dir = child_requests_dir_path(
             repo_root=self.repo_root, session_id=state.active_session_id
         )
@@ -2824,11 +2895,13 @@ class CoordinatorService:
         for request_path in sorted(candidates):
             request = _read_signal(path=request_path, model=ChildSessionRequest)
             if request is None:
-                _reject_request(request_path, reason="invalid JSON or schema")
+                _reject_request(
+                    request_path=request_path, reason="invalid JSON or schema"
+                )
                 continue
             if not SAFE_DURABLE_ID_PATTERN.fullmatch(request.workflow_set):
                 _reject_request(
-                    request_path,
+                    request_path=request_path,
                     reason="workflow_set must be a filesystem-safe durable ID",
                 )
                 continue
@@ -2838,7 +2911,7 @@ class CoordinatorService:
                 and request.schema_version < 2
             ):
                 _reject_request(
-                    request_path,
+                    request_path=request_path,
                     reason="this session contract requires child request v2",
                 )
                 continue
@@ -2851,7 +2924,7 @@ class CoordinatorService:
                 )
                 if replay_state == "conflict":
                     _reject_request(
-                        request_path,
+                        request_path=request_path,
                         reason=(
                             f"child request id {request_id!r} was reused with a "
                             "different body than its immutable accepted archive"
@@ -2866,7 +2939,7 @@ class CoordinatorService:
                         request_path.unlink(missing_ok=True)
                     else:
                         _reject_request(
-                            request_path,
+                            request_path=request_path,
                             reason=(
                                 "a live child tombstone exists, but its immutable "
                                 "accepted request is missing"
@@ -2887,7 +2960,7 @@ class CoordinatorService:
                     or request.origin.parent_attempt_id != latest.attempt_id
                 ):
                     _reject_request(
-                        request_path,
+                        request_path=request_path,
                         reason=(
                             "child request origin.parent_attempt_id must match "
                             "the latest successful parent attempt"
@@ -2899,7 +2972,7 @@ class CoordinatorService:
                     parent_state=state, request=request
                 )
             except ConfigError as exc:
-                _reject_request(request_path, reason=str(exc))
+                _reject_request(request_path=request_path, reason=str(exc))
                 continue
             # Total transition (M6): a schema-valid request that cannot be
             # dispatched — unknown workflow set, broken workflow configs, or a
@@ -2909,7 +2982,7 @@ class CoordinatorService:
             try:
                 preflight = self._preflight_for(workflow_set=request.workflow_set)
             except ConfigError as exc:
-                _reject_request(request_path, reason=str(exc))
+                _reject_request(request_path=request_path, reason=str(exc))
                 continue
             workflows = preflight.workflows
             workflow = choose_next_workflow(
@@ -2917,7 +2990,7 @@ class CoordinatorService:
             )
             if workflow is None:
                 _reject_request(
-                    request_path,
+                    request_path=request_path,
                     reason="workflow set has no initially eligible workflow",
                 )
                 continue
@@ -2937,14 +3010,14 @@ class CoordinatorService:
                     request_path=request_path,
                 )
             except ConfigError as exc:
-                _reject_request(request_path, reason=str(exc))
+                _reject_request(request_path=request_path, reason=str(exc))
                 continue
             assignment = request.assignment
             accepted_request_ref = (
                 f"session:{state.active_session_id}:/child_requests/accepted/"
                 f"{accepted_path.name}"
             )
-            accepted_request_sha256 = file_sha256(accepted_path)
+            accepted_request_sha256 = file_sha256(path=accepted_path)
             frozen_input_files: dict[str, bytes] = {
                 "accepted_request.json": accepted_path.read_bytes()
             }
@@ -3082,18 +3155,18 @@ class CoordinatorService:
             )
             child_task = child_state.current_task
             self._emit(
-                state.active_session_id,
-                "child_started",
-                {
+                session_id=state.active_session_id,
+                event_type="child_started",
+                payload={
                     "child_session_id": child_session_id,
                     "workflow_set": request.workflow_set,
                     "request_file": request_path.name,
                 },
             )
             self._emit(
-                child_session_id,
-                "session_started",
-                {
+                session_id=child_session_id,
+                event_type="session_started",
+                payload={
                     "workflow_set": request.workflow_set,
                     "parent_session_id": state.active_session_id,
                 },
@@ -3162,6 +3235,8 @@ class CoordinatorService:
     def _archive_accepted_request(
         self, *, parent_session_id: str, request_id: str, request_path: Path
     ) -> Path:
+        """Freeze an accepted child request under its durable request identity."""
+
         accepted_dir = child_requests_accepted_dir_path(
             repo_root=self.repo_root, session_id=parent_session_id
         )
@@ -3192,7 +3267,7 @@ class CoordinatorService:
         try:
             return (
                 "exact"
-                if file_sha256(accepted_path) == file_sha256(request_path)
+                if file_sha256(path=accepted_path) == file_sha256(path=request_path)
                 else "conflict"
             )
         except OSError:
@@ -3201,6 +3276,8 @@ class CoordinatorService:
     def _mark_child_record_running(
         self, *, parent_session_id: str, child_session_id: str
     ) -> None:
+        """Promote a published child ledger edge from dispatching to running."""
+
         path = children_path(repo_root=self.repo_root, session_id=parent_session_id)
         payload = self._read_or_repair_children_payload(path=path)
         matches = [
@@ -3224,7 +3301,7 @@ class CoordinatorService:
         )
         record["status"] = "running"
         record["goal_contract_hash"] = manifest.get("goal_contract_hash")
-        _bump_children_revision(payload)
+        _bump_children_revision(payload=payload)
         write_json_atomic(path=path, payload=payload)
 
     def _dispatch_child_session_after_success(
@@ -3308,6 +3385,8 @@ class CoordinatorService:
             )
 
         def mutator(state: LoopState | None) -> tuple[LoopState, None]:
+            """Clear a parent's active-child pointer if it still names the child."""
+
             parent = _require_state(state=state)
             if parent.active_child_session_id == child_session_id:
                 parent.active_child_session_id = None
@@ -3350,6 +3429,8 @@ class CoordinatorService:
         }
 
     def _dispatched_request_ids(self, *, parent_session_id: str) -> set[str]:
+        """Return request IDs already represented by non-retryable child edges."""
+
         payload = self._read_or_repair_children_payload(
             path=children_path(repo_root=self.repo_root, session_id=parent_session_id)
         )
@@ -3408,6 +3489,8 @@ class CoordinatorService:
     def _record_child_dispatch_intent(
         self, *, parent_session_id: str, record: ChildSessionRecord
     ) -> None:
+        """Persist the child edge before publishing the child session state."""
+
         path = children_path(repo_root=self.repo_root, session_id=parent_session_id)
         payload = self._read_or_repair_children_payload(path=path)
         serialized = json.loads(record.model_dump_json())
@@ -3434,12 +3517,14 @@ class CoordinatorService:
                 break
         else:
             payload["children"].append(serialized)
-        _bump_children_revision(payload)
+        _bump_children_revision(payload=payload)
         write_json_atomic(path=path, payload=payload)
 
     def _mark_child_record_complete(
         self, *, child_state: LoopState, parent_state: LoopState | None = None
     ) -> None:
+        """Project a terminal child result and subtree usage into its parent."""
+
         assert child_state.parent_session_id is not None
         path = children_path(
             repo_root=self.repo_root, session_id=child_state.parent_session_id
@@ -3488,13 +3573,13 @@ class CoordinatorService:
             )
         first_finalization = record.get("status") in _LIVE_CHILD_STATUSES
         self._project_terminal_child_record(record=record, child_state=child_state)
-        _bump_children_revision(payload)
+        _bump_children_revision(payload=payload)
         write_json_atomic(path=path, payload=payload)
         if first_finalization:
             self._emit(
-                child_state.parent_session_id,
-                "child_finished",
-                {
+                session_id=child_state.parent_session_id,
+                event_type="child_finished",
+                payload={
                     "child_session_id": child_state.active_session_id,
                     "status": child_state.status,
                     "stop_reason": child_state.stop_reason,
@@ -3646,13 +3731,14 @@ class CoordinatorService:
                     / "trace_manifest.json"
                 )
                 trace_ref, trace_sealed = _trace_outcome_projection(
-                    str(canonical_manifest), repo_root=self.repo_root
+                    value=str(canonical_manifest), repo_root=self.repo_root
                 )
         elif child_state.schema_version == 1 and child_state.history:
             # Legacy controls did not carry producer identity; the final
             # history entry is the strongest evidence that old protocol has.
             trace_ref, trace_sealed = _trace_outcome_projection(
-                child_state.history[-1].trace_manifest_path, repo_root=self.repo_root
+                value=child_state.history[-1].trace_manifest_path,
+                repo_root=self.repo_root,
             )
 
         return (
@@ -3669,6 +3755,8 @@ class CoordinatorService:
     def _delivery_ref_for_attempt(
         self, *, session_id: str, attempt_id: str, evidence_refs: list[str]
     ) -> str | None:
+        """Select the unique delivery receipt produced by a child attempt."""
+
         candidates: dict[Path, str] = {}
         for reference in evidence_refs:
             try:
@@ -3886,7 +3974,10 @@ class CoordinatorService:
                         raise ChildLedgerError(
                             f"child {child_id} accepted request is missing"
                         )
-                    if file_sha256(accepted_path) != validated.accepted_request_sha256:
+                    if (
+                        file_sha256(path=accepted_path)
+                        != validated.accepted_request_sha256
+                    ):
                         raise ChildLedgerError(
                             f"child {child_id} accepted request hash contradicts ledger"
                         )
@@ -3973,6 +4064,8 @@ class CoordinatorService:
     def _read_json_object_if_present(
         *, path: Path, label: str
     ) -> dict[str, Any] | None:
+        """Read an optional JSON object or raise a contextual ledger error."""
+
         if not path.exists():
             return None
         if not path.is_file():
@@ -3986,6 +4079,8 @@ class CoordinatorService:
         return payload
 
     def _read_or_repair_children_payload(self, *, path: Path) -> dict[str, Any]:
+        """Read a valid child ledger or reconstruct it from durable evidence."""
+
         try:
             payload = _read_children_payload(path=path)
             self._validate_v2_children_payload(path=path, payload=payload)
@@ -4087,6 +4182,12 @@ class CoordinatorService:
             else []
         ):
             child_manifest_path = child_dir / "session.json"
+            if not child_manifest_path.is_file():
+                # A directory without an immutable session identity is not a
+                # topology node. Ignore it while rebuilding the canonical
+                # ledger so accidental agent scratch cannot block terminal
+                # child projection or autonomous repair.
+                continue
             try:
                 child_manifest = json.loads(
                     child_manifest_path.read_text(encoding="utf-8")
@@ -4128,7 +4229,7 @@ class CoordinatorService:
                 raise ChildLedgerError(
                     f"{cause}; child {child_id} has no immutable accepted request"
                 ) from cause
-            accepted_hash = file_sha256(accepted_path)
+            accepted_hash = file_sha256(path=accepted_path)
             expected_manifest = {
                 "root_session_id": parent_state.root_session_id,
                 "depth": parent_state.depth + 1,
@@ -4204,7 +4305,7 @@ class CoordinatorService:
                         "failure_id": failure_id,
                         "kind": "children_ledger_reconstruction_refused",
                         "original_ref": f"session:/protocol_failures/{preserved.name}",
-                        "original_sha256": file_sha256(preserved),
+                        "original_sha256": file_sha256(path=preserved),
                         "reason": (
                             f"{cause}; no immutable child manifest or accepted request "
                             "proves that an empty reconstruction is lossless"
@@ -4253,7 +4354,7 @@ class CoordinatorService:
                     "failure_id": failure_id,
                     "kind": "children_ledger_reconstructed",
                     "original_ref": f"session:/protocol_failures/{preserved.name}",
-                    "original_sha256": file_sha256(preserved),
+                    "original_sha256": file_sha256(path=preserved),
                     "reason": str(cause),
                     "reconstructed_child_ids": [
                         record["session_id"] for record in records
@@ -4267,6 +4368,8 @@ class CoordinatorService:
         return repaired
 
     def _apply_stop_precedence(self, *, state: LoopState) -> str | None:
+        """Apply terminal conditions in their documented precedence order."""
+
         if state.goal_met:
             state.status = "goal_met"
             state.stop_reason = "goal_met"
@@ -4311,6 +4414,8 @@ class CoordinatorService:
         return None
 
     def _stop_response_if_needed(self, *, state: LoopState) -> TaskResponse | None:
+        """Return a stop response when root or active-session state is terminal."""
+
         root_id = state.root_session_id or state.active_session_id
         if root_id != state.active_session_id:
             root_state = self._store_for(session_id=root_id).read_state()
@@ -4334,6 +4439,8 @@ class CoordinatorService:
         workflow_contract: WorkflowSetContract | None = None,
         receipt_validation_errors: list[str] | None = None,
     ) -> GoalCheckSignal | None:
+        """Read a goal-check signal bound to the current attempt and eval receipt."""
+
         path = goal_check_path(
             repo_root=self.repo_root,
             session_id=current_task.session_id,
@@ -4384,6 +4491,8 @@ class CoordinatorService:
         return signal
 
     def _workflow_expects_goal_check_signal(self, *, current_task: CurrentTask) -> bool:
+        """Return whether this frozen workflow is responsible for goal checking."""
+
         if current_task.workflow_id == "goal_check":
             return True
         descriptor = current_task.workflow_snapshot
@@ -4403,6 +4512,8 @@ class CoordinatorService:
     def _apply_session_control(
         self, *, state: LoopState, workflow_contract: WorkflowSetContract | None = None
     ) -> str | None:
+        """Validate and apply the active session's role-bound terminal control."""
+
         path = control_path(
             repo_root=self.repo_root, session_id=state.active_session_id
         )
@@ -4438,7 +4549,7 @@ class CoordinatorService:
                 or effective_workflow_contract.session_protocol_version >= 2
             ):
                 is_engine_placeholder, rejected_attempt_id = (
-                    _control_repair_placeholder_identity(raw)
+                    _control_repair_placeholder_identity(raw=raw)
                 )
                 active_attempt_id = (
                     state.current_task.attempt_id
@@ -4495,6 +4606,8 @@ class CoordinatorService:
         signal: ControlSignal,
         workflow_contract: WorkflowSetContract,
     ) -> list[str]:
+        """Return every identity or evidence contradiction in a v2 control."""
+
         reasons: list[str] = []
         producer = signal.producer
         if producer is None:
@@ -4570,6 +4683,15 @@ class CoordinatorService:
                     reasons.append("eval receipt producer iteration does not match")
                 if not receipt.verdict.goal_met:
                     reasons.append("eval receipt verdict does not report goal_met")
+                if (
+                    projection is not None
+                    and projection.schema_version == 2
+                    and projection.reason != receipt.verdict.reason
+                ):
+                    reasons.append(
+                        "goal_check projection reason does not match eval receipt "
+                        "verdict reason"
+                    )
                 reasons.extend(
                     self._validate_eval_receipt_artifacts(
                         session_id=state.active_session_id, receipt=receipt
@@ -4585,6 +4707,8 @@ class CoordinatorService:
         return reasons
 
     def _read_workflow_contract(self, *, session_id: str) -> WorkflowSetContract:
+        """Load a session's persisted workflow role contract."""
+
         path = workflow_contract_path(repo_root=self.repo_root, session_id=session_id)
         try:
             return WorkflowSetContract.model_validate_json(
@@ -4622,12 +4746,16 @@ class CoordinatorService:
         reference: str | None,
         validation_errors: list[str] | None = None,
     ) -> EvalReceipt | None:
+        """Resolve and validate a current-session eval receipt reference."""
+
         def reject(reason: str) -> None:
+            """Append one receipt validation reason when a sink was supplied."""
+
             if validation_errors is not None:
                 validation_errors.append(reason)
 
         if reference is None:
-            reject("eval receipt reference is missing")
+            reject(reason="eval receipt reference is missing")
             return None
         try:
             path = resolve_logical_reference(
@@ -4636,19 +4764,21 @@ class CoordinatorService:
                 session_id=state_session_id,
             )
         except LogicalReferenceError as exc:
-            reject(f"eval receipt reference is invalid: {exc}")
+            reject(reason=f"eval receipt reference is invalid: {exc}")
             return None
         expected_parent = (
             session_dir_path(repo_root=self.repo_root, session_id=state_session_id)
             / "eval_receipts"
         ).resolve()
         if path.parent != expected_parent or path.suffix != ".json":
-            reject("eval receipt must be a current-session eval_receipts JSON file")
+            reject(
+                reason="eval receipt must be a current-session eval_receipts JSON file"
+            )
             return None
         try:
             return EvalReceipt.model_validate_json(path.read_text(encoding="utf-8"))
         except OSError as exc:
-            reject(f"eval receipt cannot be read: {exc}")
+            reject(reason=f"eval receipt cannot be read: {exc}")
             return None
         except ValidationError as exc:
             messages = []
@@ -4656,15 +4786,17 @@ class CoordinatorService:
                 location = ".".join(str(part) for part in item.get("loc", ()))
                 message = str(item.get("msg", "invalid value"))
                 messages.append(f"{location}: {message}" if location else message)
-            reject("eval receipt schema is invalid: " + "; ".join(messages[:8]))
+            reject(reason="eval receipt schema is invalid: " + "; ".join(messages[:8]))
             return None
         except ValueError as exc:
-            reject(f"eval receipt JSON is invalid: {exc}")
+            reject(reason=f"eval receipt JSON is invalid: {exc}")
             return None
 
     def _validate_eval_receipt_artifacts(
         self, *, session_id: str, receipt: EvalReceipt
     ) -> list[str]:
+        """Return transport and provenance defects in a claimed eval receipt."""
+
         reasons: list[str] = []
         raw_paths: list[Path] = []
         checks_dir = (
@@ -4703,7 +4835,7 @@ class CoordinatorService:
                 reasons.append(
                     f"eval check {check.check_id!r} does not resolve uniquely"
                 )
-            elif file_sha256(matches[0]) != check.definition_sha256:
+            elif file_sha256(path=matches[0]) != check.definition_sha256:
                 reasons.append(
                     f"eval check {check.check_id!r} definition hash does not match"
                 )
@@ -4729,7 +4861,7 @@ class CoordinatorService:
                 )
             elif not canonical.is_file():
                 reasons.append("canonical eval report does not exist")
-            elif file_sha256(canonical) != receipt.canonical_report_sha256:
+            elif file_sha256(path=canonical) != receipt.canonical_report_sha256:
                 reasons.append("canonical eval report hash does not match")
         except LogicalReferenceError:
             reasons.append("canonical eval report reference is invalid")
@@ -4759,7 +4891,7 @@ class CoordinatorService:
                         "raw eval report is not the producer attempt's canonical "
                         "eval/report.json"
                     )
-                elif file_sha256(raw_report) != receipt.raw_report_sha256s.get(
+                elif file_sha256(path=raw_report) != receipt.raw_report_sha256s.get(
                     reference
                 ):
                     reasons.append("raw eval report hash does not match")
@@ -4882,6 +5014,8 @@ class CoordinatorService:
     def _reject_v2_control(
         self, *, state: LoopState, path: Path, raw: object, reasons: list[str]
     ) -> None:
+        """Archive invalid v2 control and publish a repairable protocol failure."""
+
         raw_control_id = raw.get("control_id") if isinstance(raw, dict) else None
         control_id = (
             raw_control_id
@@ -4896,7 +5030,7 @@ class CoordinatorService:
         rejected_path = rejected_dir / f"{control_id}.json"
         if rejected_path.exists():
             rejected_path = rejected_dir / f"{control_id}-{uuid.uuid4().hex[:8]}.json"
-        original_hash = file_sha256(path)
+        original_hash = file_sha256(path=path)
         path.rename(rejected_path)
         state.control_protocol_consecutive_failures += 1
         failure_id = f"protocol-failure-{uuid.uuid4().hex[:12]}"
@@ -4948,7 +5082,9 @@ class CoordinatorService:
             state.stop_reason = "control_protocol_broken"
 
 
-def _control_repair_placeholder_identity(raw: object) -> tuple[bool, str | None]:
+def _control_repair_placeholder_identity(*, raw: object) -> tuple[bool, str | None]:
+    """Recognize the coordinator placeholder left after rejecting v2 control."""
+
     if not isinstance(raw, dict):
         return False, None
     marker = raw.get("engine_repair")
@@ -4967,6 +5103,8 @@ def _new_attempt_id() -> str:
 def _build_run_response(
     *, current_task: CurrentTask, config_snapshot: RootConfigSnapshot, repo_root: Path
 ) -> TaskResponse:
+    """Build the worker-facing response for one frozen current task."""
+
     descriptor = current_task.workflow_snapshot
     v2 = descriptor is not None
     return TaskResponse(
@@ -5005,7 +5143,7 @@ def _require_state(*, state: LoopState | None) -> LoopState:
     return state
 
 
-def _reject_request(request_path: Path, *, reason: str) -> None:
+def _reject_request(*, request_path: Path, reason: str) -> None:
     """Terminally reject a child request, keeping an inspectable record.
 
     Collision-safe: a second rejection with the same original name never
@@ -5031,7 +5169,7 @@ def _reject_request(request_path: Path, *, reason: str) -> None:
             rejected = request_path.with_suffix(
                 request_path.suffix + f".{uuid.uuid4().hex[:8]}.rejected"
             )
-    original_hash = file_sha256(request_path)
+    original_hash = file_sha256(path=request_path)
     request_path.rename(rejected)
     receipt_dir = requests_root / "rejected"
     receipt_dir.mkdir(parents=True, exist_ok=True)
@@ -5055,7 +5193,9 @@ def _reject_request(request_path: Path, *, reason: str) -> None:
     )
 
 
-def _same_task(a: CurrentTask, b: CurrentTask) -> bool:
+def _same_task(*, a: CurrentTask, b: CurrentTask) -> bool:
+    """Compare durable task coordinates with legacy attempt-ID tolerance."""
+
     return (
         a.session_id == b.session_id
         and a.workflow_id == b.workflow_id
@@ -5167,6 +5307,8 @@ class ChildLedgerError(RuntimeError):
 
 
 def _read_children_payload(*, path: Path) -> dict[str, Any]:
+    """Read and structurally validate a v1 or v2 child-session ledger."""
+
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -5227,21 +5369,27 @@ def _read_children_payload(*, path: Path) -> dict[str, Any]:
     raise ChildLedgerError(f"children ledger has an invalid schema at {path}")
 
 
-def _bump_children_revision(payload: dict[str, Any]) -> None:
+def _bump_children_revision(*, payload: dict[str, Any]) -> None:
+    """Increment a v2 child ledger's optimistic revision counter."""
+
     if payload.get("schema_version") == 2:
         payload["revision"] = int(payload.get("revision", 0)) + 1
 
 
 def _child_request_id(*, request: ChildSessionRequest, path: Path) -> str:
+    """Return an explicit request ID or a stable legacy content-derived ID."""
+
     if request.request_id:
         return request.request_id
-    digest = file_sha256(path).split(":", 1)[1][:20]
+    digest = file_sha256(path=path).split(":", 1)[1][:20]
     return f"legacy-{digest}"
 
 
 def _latest_artifact_ref(
     *, repo_root: Path, session_id: str, directory: str
 ) -> str | None:
+    """Return a logical reference to the latest regular file in a session dir."""
+
     root = session_dir_path(repo_root=repo_root, session_id=session_id) / directory
     if not root.exists():
         return None
@@ -5254,6 +5402,8 @@ def _latest_artifact_ref(
 def _artifact_ref_if_present(
     *, repo_root: Path, session_id: str, relative_path: str
 ) -> str | None:
+    """Return a session reference when the requested artifact exists."""
+
     path = session_dir_path(repo_root=repo_root, session_id=session_id) / relative_path
     if not path.is_file():
         return None
@@ -5261,8 +5411,10 @@ def _artifact_ref_if_present(
 
 
 def _trace_outcome_projection(
-    value: str | None, *, repo_root: Path
+    *, value: str | None, repo_root: Path
 ) -> tuple[str | None, bool]:
+    """Project a trace-manifest path into a logical ref and integrity flag."""
+
     if not value:
         return None, False
     path = Path(value)
@@ -5286,6 +5438,8 @@ SignalModel = TypeVar("SignalModel", bound=BaseModel)
 
 
 def _read_signal(*, path: Path, model: type[SignalModel]) -> SignalModel | None:
+    """Read an optional typed protocol signal without treating absence as error."""
+
     if not path.exists():
         return None
     try:

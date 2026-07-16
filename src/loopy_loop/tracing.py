@@ -7,14 +7,11 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 from typing import Any
-import uuid
 
 from loopy_loop.sessions import assignment_path
 from loopy_loop.sessions import attempt_trace_dir_path
 from loopy_loop.sessions import session_dir_path
-from loopy_loop.sessions import trace_export_outbox_dir_path
 from loopy_loop.sessions import trace_ref_path
 from loopy_loop.sessions import trace_seal_receipt_path
 from loopy_loop.sessions import traces_root_path
@@ -99,7 +96,6 @@ def create_attempt_trace(
         "inventory": [],
         "usage": None,
         "failure": None,
-        "export": {"status": "not_requested"},
         "created_at": _utc_now(),
         "sealed_at": None,
     }
@@ -821,227 +817,6 @@ def _validated_inventory(
     return expected, errors
 
 
-def _require_finalized_trace_integrity(*, trace_root: Path) -> dict[str, Any]:
-    """Return a verified report or raise when a trace is unsafe to export."""
-
-    report = verify_trace_integrity(trace_root=trace_root)
-    if report["status"] == "not_finalized":
-        raise TraceError("active traces are not finalized")
-    if report["status"] != "verified":
-        summary = ", ".join(
-            f"{key}={len(report[key])}"
-            for key in ("added", "removed", "modified", "manifest_errors")
-            if report[key]
-        )
-        raise TraceError(f"sealed trace integrity verification failed ({summary})")
-    return report
-
-
-def enqueue_trace_export(
-    *, repo_root: Path, trace_root: Path, destination: Path
-) -> Path:
-    """Bind one finalized trace durably to one exact local destination."""
-
-    manifest = _read_manifest(path=trace_root / TRACE_MANIFEST_FILENAME)
-    if manifest.get("lifecycle") not in {"sealed", "incomplete"} or not manifest.get(
-        "sealed_at"
-    ):
-        raise TraceError("active traces cannot be exported")
-    _require_finalized_trace_integrity(trace_root=trace_root)
-    manifest_id = str(manifest["manifest_id"])
-    target = destination.resolve() / manifest_id
-    outbox = trace_export_outbox_dir_path(repo_root=repo_root.resolve())
-    outbox.mkdir(parents=True, exist_ok=True)
-    path = outbox / f"{manifest_id}.json"
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise TraceError(f"invalid trace export outbox record: {path}") from exc
-        if (
-            not isinstance(existing, dict)
-            or Path(str(existing.get("trace_root", ""))).resolve()
-            != trace_root.resolve()
-        ):
-            raise TraceError(
-                f"trace export identity {manifest_id!r} is already bound to "
-                "a different trace root"
-            )
-        recorded_destination = existing.get("destination")
-        if recorded_destination is not None and (
-            Path(str(recorded_destination)).resolve() != target
-        ):
-            raise TraceError(
-                f"trace export identity {manifest_id!r} is already bound to "
-                "a different destination"
-            )
-        if recorded_destination is None:
-            existing["destination"] = str(target)
-            write_json_atomic(path=path, payload=existing)
-    else:
-        write_json_atomic(
-            path=path,
-            payload={
-                "schema_version": 1,
-                "export_id": f"export-{manifest_id}",
-                "manifest_id": manifest_id,
-                "trace_root": str(trace_root.resolve()),
-                "destination": str(target),
-                "status": "pending",
-                "attempts": 0,
-                "last_error": None,
-                "created_at": _utc_now(),
-            },
-        )
-    return path
-
-
-def export_trace_to_directory(*, outbox_path: Path, destination: Path) -> Path:
-    """Atomically publish an exact unfiltered local copy from an export outbox."""
-
-    payload = json.loads(outbox_path.read_text(encoding="utf-8"))
-    trace_root = Path(str(payload["trace_root"]))
-    manifest = _read_manifest(path=trace_root / TRACE_MANIFEST_FILENAME)
-    _require_finalized_trace_integrity(trace_root=trace_root)
-    manifest_bytes_before = (trace_root / TRACE_MANIFEST_FILENAME).read_bytes()
-    target = destination.resolve() / str(manifest["manifest_id"])
-    recorded_destination = payload.get("destination")
-    if recorded_destination is None:
-        # Compatibility for an older unbound pending record. Persist the
-        # choice before publication so a crash cannot rebind it.
-        payload["destination"] = str(target)
-        write_json_atomic(path=outbox_path, payload=payload)
-        recorded_target = target
-    else:
-        recorded_target = Path(str(recorded_destination)).resolve()
-    if recorded_target != target:
-        raise TraceError(
-            "this export is bound to "
-            f"{recorded_target}; refusing a different destination"
-        )
-    if payload.get("status") == "exported":
-        if recorded_target.is_dir():
-            _verify_exported_copy(source_root=trace_root, target=recorded_target)
-            return recorded_target
-    if target.exists():
-        _verify_exported_copy(source_root=trace_root, target=target)
-        payload.update(
-            {
-                "status": "exported",
-                "attempts": int(payload.get("attempts", 0)) + 1,
-                "destination": str(target),
-                "exported_at": _utc_now(),
-                "last_error": None,
-            }
-        )
-        write_json_atomic(path=outbox_path, payload=payload)
-        return target
-    staging = target.with_name(f".{target.name}.staging-{uuid.uuid4().hex}")
-    try:
-        destination.resolve().mkdir(parents=True, exist_ok=True)
-        staging.mkdir(parents=False, exist_ok=False)
-        expected, inventory_errors = _validated_inventory(manifest=manifest)
-        if inventory_errors:
-            raise TraceError("cannot export a malformed sealed inventory")
-        for relative, (expected_size, expected_sha256) in sorted(expected.items()):
-            source = trace_root / relative
-            data = source.read_bytes()
-            actual_sha256 = "sha256:" + hashlib.sha256(data).hexdigest()
-            if len(data) != expected_size or actual_sha256 != expected_sha256:
-                raise TraceError(f"trace changed while exporting: {relative}")
-            destination_path = staging / relative
-            destination_path.parent.mkdir(parents=True, exist_ok=True)
-            destination_path.write_bytes(data)
-        manifest_bytes = (trace_root / TRACE_MANIFEST_FILENAME).read_bytes()
-        if manifest_bytes != manifest_bytes_before:
-            raise TraceError("trace manifest changed while exporting")
-        (staging / TRACE_MANIFEST_FILENAME).write_bytes(manifest_bytes)
-        _verify_exported_copy(source_root=trace_root, target=staging)
-        os.replace(staging, target)
-    except (OSError, TraceError) as exc:
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
-        payload["attempts"] = int(payload.get("attempts", 0)) + 1
-        payload["last_error"] = str(exc)
-        write_json_atomic(path=outbox_path, payload=payload)
-        raise
-    payload.update(
-        {
-            "status": "exported",
-            "attempts": int(payload.get("attempts", 0)) + 1,
-            "destination": str(target),
-            "exported_at": _utc_now(),
-            "last_error": None,
-        }
-    )
-    write_json_atomic(path=outbox_path, payload=payload)
-    return target
-
-
-def _verify_exported_copy(*, source_root: Path, target: Path) -> None:
-    """Verify that an exported directory exactly matches its sealed source."""
-
-    source_manifest = (source_root / TRACE_MANIFEST_FILENAME).read_bytes()
-    target_manifest = target / TRACE_MANIFEST_FILENAME
-    if not target_manifest.is_file() or target_manifest.read_bytes() != source_manifest:
-        raise TraceError("exported trace manifest does not match the sealed source")
-    manifest = _read_manifest(path=source_root / TRACE_MANIFEST_FILENAME)
-    expected, errors = _validated_inventory(manifest=manifest)
-    if errors:
-        raise TraceError("sealed source inventory is malformed")
-    actual: set[str] = set()
-    for directory, directory_names, file_names in os.walk(target, followlinks=False):
-        current = Path(directory)
-        for name in list(directory_names):
-            child = current / name
-            if child.is_symlink():
-                raise TraceError(f"exported trace contains a symlink: {child}")
-        for name in file_names:
-            path = current / name
-            if path.is_symlink() or not path.is_file():
-                raise TraceError(f"exported trace contains a non-file: {path}")
-            relative = path.relative_to(target).as_posix()
-            if relative != TRACE_MANIFEST_FILENAME:
-                actual.add(relative)
-    if actual != set(expected):
-        raise TraceError(
-            "exported trace file inventory does not match the sealed source"
-        )
-    for relative, (expected_size, expected_sha256) in expected.items():
-        data = (target / relative).read_bytes()
-        if (
-            len(data) != expected_size
-            or ("sha256:" + hashlib.sha256(data).hexdigest()) != expected_sha256
-        ):
-            raise TraceError(f"exported trace artifact does not match: {relative}")
-
-
-def prune_trace(*, trace_root: Path) -> dict[str, Any]:
-    """Delete finalized detail after validating its authentic seal shape."""
-
-    manifest = _read_manifest(path=trace_root / TRACE_MANIFEST_FILENAME)
-    if manifest.get("lifecycle") not in {"sealed", "incomplete"} or not manifest.get(
-        "sealed_at"
-    ):
-        raise TraceError("refusing to prune an active or unsealed trace")
-    # The manifest lives inside the agent-writable trace plane. A lifecycle
-    # string alone is not an engine seal, so require a valid inventory and,
-    # for v2 session traces, the matching session-plane receipt. Ordinary
-    # post-seal file drift is still removable: prune is the operator's cleanup
-    # path and returns that last failed observation, while export remains
-    # strict about every byte.
-    integrity = verify_trace_integrity(trace_root=trace_root)
-    manifest_errors = integrity.get("manifest_errors")
-    if not isinstance(manifest_errors, list) or manifest_errors:
-        summary = "; ".join(str(error) for error in manifest_errors or [])
-        raise TraceError(
-            "sealed trace integrity verification failed"
-            + (f" ({summary})" if summary else "")
-        )
-    shutil.rmtree(trace_root)
-    return integrity
-
-
 def list_trace_manifests(*, repo_root: Path) -> list[Path]:
     """List canonical trace manifests under one repository's trace root."""
 
@@ -1057,9 +832,8 @@ def read_trace_manifest(*, manifest_path: Path) -> dict[str, Any]:
 def resolve_trace_manifest(*, repo_root: Path, reference: str) -> Path:
     """Resolve a trace-root path, manifest path, or manifest ID in this repo.
 
-    Path references are deliberately confined to ``.loopy_loop/traces``. This
-    makes the path-taking prune command incapable of deleting an unrelated
-    directory that happens to contain a file named ``trace_manifest.json``.
+    Path references are deliberately confined to ``.loopy_loop/traces`` so
+    inspection cannot accidentally select a similarly named external file.
     """
     root = traces_root_path(repo_root=repo_root.resolve()).resolve()
     candidate = Path(reference).expanduser()

@@ -1,6 +1,5 @@
 .loopy_loop/sessions/
 .loopy_loop/traces/
-.loopy_loop/trace_export_outbox/
 .loopy_loop/trace_finalization_outbox/
 .loopy_loop/repository.json
 .loopy_loop/state.json

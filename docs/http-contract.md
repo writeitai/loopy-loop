@@ -48,12 +48,6 @@ team-harness through `get_capabilities()` and forwarded by
 installation that can run agents but cannot satisfy the selected provenance
 and trace contract.
 
-The trace contract preserves observable local bytes without credential
-detection or redaction. `.loopy_loop/traces/` is gitignored by default but may
-contain sensitive data. Sealing and the current local exporter provide
-integrity and exact-copy semantics only; a future cloud exporter must define
-and enforce its own data-safety policy before transmission.
-
 `nested_caller_context_v1` means a built-in `type=harness` spawn inherits the
 same root/current session, depth, workflow role, and loopy attempt; changes to
 the direct agent's absolute assignment and nested trace root; and records the
@@ -331,22 +325,13 @@ HTTP call. It removes the pending handoff only after acknowledgement. This is
 why a worker crash between local completion and `/finished` can be recovered
 without rerunning the harness.
 
-For an exact matching completion, the coordinator journals a trace-finalization
-intent with the request and an unavailable response before committing state.
-After it determines the next `TaskResponse`, it updates the intent and records
-the exact pair in `service/finished_exchange.json` before sealing. If the
-process dies after state acceptance but before the response becomes durable,
-startup confirms the committed attempt from history, records the response as
-unavailable, and seals the trace incomplete. It never invents a response or
-uses an uncommitted intent as proof of completion. Failure to persist the
-intent itself is logged and does not roll back the semantic transition; trace
-storage is deliberately not an acceptance dependency. Finalization recovers
-root/session/workflow/iteration/attempt identity from the immutable,
-hash-bound assignment. A mismatch or invalid session topology leaves the
-intent visible for repair. An unanchored workflow-authored final lifecycle is
-reopened and coordinator-sealed incomplete; if the attempt instead commits
-crash abandonment, the successfully anchored abandonment removes its
-conflicting uncommitted finished intent.
+For an exact matching completion, the coordinator writes a trace-finalization
+intent before committing state, then records the exact observed response and
+seals. Startup acts only when history proves that completion or abandonment
+committed; an interrupted response is marked unavailable rather than invented.
+Trace failure is logged and does not roll back semantic state. The full
+artifact ordering and repair rules are in
+[`session-layout.md`](./session-layout.md#caller-owned-attempt-traces).
 
 ## File protocols consumed during `/finished`
 
@@ -483,9 +468,10 @@ passing report must additionally record the exact absolute target
 every status `passed` and exit code zero, and per-check
 `details.agent_type`/`details.model`/`details.reasoning_effort` matching the
 receipt's judge. At terminal acceptance the coordinator recaptures live Git
-state and requires its HEAD and `loopy-dirty-tree-v2-sha256` digest to match the
-receipt. That digest binds the complete non-runtime Git index as well as
-changed working-tree bytes, including partial-staging state.
+state and requires its HEAD and `loopy-git-status-diff-v1-sha256` digest to
+match the receipt. The digest binds filtered porcelain records plus Git's
+staged and unstaged binary diffs. It intentionally relies on Git's observable
+boundary rather than independently parsing and re-hashing the complete index.
 
 These checks establish provenance and all-pass mechanics. The coordinator does
 not re-evaluate the LLM judge's semantic reasons or require stock deterministic

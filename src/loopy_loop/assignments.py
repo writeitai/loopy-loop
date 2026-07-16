@@ -58,6 +58,8 @@ class AssignmentContractError(RuntimeError):
 
 
 def repository_identity_path(*, repo_root: Path) -> Path:
+    """Return the canonical path for the checkout identity document."""
+
     return repo_root.resolve() / LOOPY_DIRNAME / REPOSITORY_IDENTITY_FILENAME
 
 
@@ -84,7 +86,9 @@ def ensure_repository_identity(*, repo_root: Path) -> dict[str, object]:
     payload = {
         "schema_version": 1,
         "repository_id": f"repo-{uuid.uuid4().hex}",
-        "config_sha256": file_sha256(config_path) if config_path.exists() else None,
+        "config_sha256": (
+            file_sha256(path=config_path) if config_path.exists() else None
+        ),
         "remote_fingerprint": remote,
     }
     write_json_atomic(path=path, payload=payload)
@@ -92,6 +96,8 @@ def ensure_repository_identity(*, repo_root: Path) -> dict[str, object]:
 
 
 def repository_id(*, repo_root: Path) -> str:
+    """Return the stable repository identifier for this checkout."""
+
     value = ensure_repository_identity(repo_root=repo_root).get("repository_id")
     assert isinstance(value, str)
     return value
@@ -105,6 +111,8 @@ def materialize_workflow_snapshot(
     preflight: PreflightResult,
     config_snapshot: RootConfigSnapshot | None = None,
 ) -> WorkflowSnapshotDescriptor:
+    """Freeze the workflow inputs selected for one dispatched attempt."""
+
     root = repo_root.resolve()
     snapshot_root = workflow_snapshot_dir_path(
         repo_root=root,
@@ -136,7 +144,7 @@ def materialize_workflow_snapshot(
         )
     )
     root_config_snapshot_sha256 = _sha256_text(
-        json.dumps(root_config_payload, indent=2)
+        value=json.dumps(root_config_payload, indent=2)
     )
 
     persisted_contract_path = workflow_contract_path(
@@ -149,7 +157,7 @@ def materialize_workflow_snapshot(
         raise AssignmentContractError(
             f"invalid immutable session workflow contract: {exc}"
         ) from exc
-    persisted_contract_sha256 = file_sha256(persisted_contract_path)
+    persisted_contract_sha256 = file_sha256(path=persisted_contract_path)
 
     expected = {
         "schema_version": 1,
@@ -164,7 +172,7 @@ def materialize_workflow_snapshot(
         "root_config_snapshot_sha256": root_config_snapshot_sha256,
         "repository_id": repository_id(repo_root=root),
         "tree_system_extension_sha256": _sha256_text(
-            (
+            value=(
                 config_snapshot.team_harness_system_prompt_extension
                 if config_snapshot is not None
                 else preflight.root_config.team_harness_system_prompt_extension
@@ -217,7 +225,9 @@ def verify_workflow_snapshot(
     descriptor: WorkflowSnapshotDescriptor,
     repo_root: Path,
     expected_task: CurrentTask,
-) -> tuple[dict[str, object], str, WorkflowSetContract]:
+) -> tuple[dict[str, object], str, WorkflowSetContract, RootConfigSnapshot]:
+    """Verify and load every immutable member of an attempt snapshot."""
+
     root = repo_root.resolve()
     snapshot_root = Path(descriptor.snapshot_root).resolve()
     session_runtime_root = root / LOOPY_DIRNAME / "sessions"
@@ -304,11 +314,14 @@ def verify_workflow_snapshot(
         contract = WorkflowSetContract.model_validate(
             yaml.safe_load(contract_path.read_text(encoding="utf-8"))
         )
+        root_config = RootConfigSnapshot.model_validate_json(
+            root_config_path.read_text(encoding="utf-8")
+        )
     except (OSError, ValueError, yaml.YAMLError, ValidationError) as exc:
         raise AssignmentContractError(
             f"invalid frozen workflow snapshot: {exc}"
         ) from exc
-    return config_payload, prompt, contract
+    return config_payload, prompt, contract, root_config
 
 
 def build_attempt_assignment(
@@ -319,32 +332,36 @@ def build_attempt_assignment(
     trace_root: Path,
     git_before_ref: str,
 ) -> AttemptAssignment:
+    """Build the identity-bound, absolute-path envelope for an attempt."""
+
     root = repo_root.resolve()
     session_root = session_dir_path(
         repo_root=root, session_id=task.session_id
     ).resolve()
     manifest = _load_model(
-        session_root / "session.json", SessionManifest, "session manifest"
+        path=session_root / "session.json",
+        model=SessionManifest,
+        label="session manifest",
     )
     goal_contract = _load_model(
-        goal_contract_path(repo_root=root, session_id=task.session_id),
-        GoalContract,
-        "goal contract",
+        path=goal_contract_path(repo_root=root, session_id=task.session_id),
+        model=GoalContract,
+        label="goal contract",
     )
     contract = _load_model(
-        workflow_contract_path(repo_root=root, session_id=task.session_id),
-        WorkflowSetContract,
-        "workflow contract",
+        path=workflow_contract_path(repo_root=root, session_id=task.session_id),
+        model=WorkflowSetContract,
+        label="workflow contract",
     )
     frozen_goal_path = goal_contract_path(repo_root=root, session_id=task.session_id)
     frozen_workflow_path = workflow_contract_path(
         repo_root=root, session_id=task.session_id
     )
-    if file_sha256(frozen_goal_path) != manifest.goal_contract_hash:
+    if file_sha256(path=frozen_goal_path) != manifest.goal_contract_hash:
         raise AssignmentContractError(
             "session goal contract no longer matches its manifest hash"
         )
-    if file_sha256(frozen_workflow_path) != manifest.workflow_contract_hash:
+    if file_sha256(path=frozen_workflow_path) != manifest.workflow_contract_hash:
         raise AssignmentContractError(
             "session workflow contract no longer matches its manifest hash"
         )
@@ -437,7 +454,7 @@ def build_attempt_assignment(
         if (
             goal_contract.accepted_request_sha256 is None
             or not accepted_request_path.is_file()
-            or file_sha256(accepted_request_path)
+            or file_sha256(path=accepted_request_path)
             != goal_contract.accepted_request_sha256
         ):
             raise AssignmentContractError(
@@ -454,7 +471,7 @@ def build_attempt_assignment(
             raise AssignmentContractError(
                 f"child input reference is invalid ({item.ref}): {exc}"
             ) from exc
-        if not input_path.is_file() or file_sha256(input_path) != item.sha256:
+        if not input_path.is_file() or file_sha256(path=input_path) != item.sha256:
             raise AssignmentContractError(
                 f"child input no longer matches its frozen hash: {item.ref}"
             )
@@ -510,7 +527,7 @@ def build_attempt_assignment(
             "workflow_prompt_sha256": descriptor.workflow_prompt_sha256,
             "workflow_contract_sha256": descriptor.workflow_contract_sha256,
             "goal_contract_sha256": file_sha256(
-                goal_contract_path(repo_root=root, session_id=task.session_id)
+                path=goal_contract_path(repo_root=root, session_id=task.session_id)
             ),
             "git_before_ref": git_before_ref,
         },
@@ -518,6 +535,8 @@ def build_attempt_assignment(
 
 
 def write_attempt_assignment(*, path: Path, assignment: AttemptAssignment) -> None:
+    """Persist an attempt envelope, preserving a conflicting non-file object."""
+
     if path.is_symlink() or (path.exists() and not path.is_file()):
         # D8 repair: preserve a conflicting agent-created object, then restore
         # the coordinator-derived envelope at its canonical path. Atomic file
@@ -529,7 +548,9 @@ def write_attempt_assignment(*, path: Path, assignment: AttemptAssignment) -> No
     write_json_atomic(path=path, payload=assignment.model_dump(mode="json"))
 
 
-def _load_model(path: Path, model: type, label: str):
+def _load_model(*, path: Path, model: type, label: str):
+    """Load and validate a persisted Pydantic contract model."""
+
     try:
         return model.model_validate_json(path.read_text(encoding="utf-8"))
     except (OSError, ValidationError, ValueError) as exc:
@@ -537,8 +558,10 @@ def _load_model(path: Path, model: type, label: str):
 
 
 def _verify_hash(*, path: Path, expected: str) -> None:
+    """Raise when an artifact is absent or differs from its frozen digest."""
+
     try:
-        actual = file_sha256(path)
+        actual = file_sha256(path=path)
     except OSError as exc:
         raise AssignmentContractError(
             f"missing snapshot artifact {path}: {exc}"
@@ -549,11 +572,15 @@ def _verify_hash(*, path: Path, expected: str) -> None:
         )
 
 
-def _sha256_text(value: str) -> str:
+def _sha256_text(*, value: str) -> str:
+    """Return the contract's prefixed SHA-256 representation of text."""
+
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _remote_fingerprint(*, repo_root: Path) -> str | None:
+    """Return a stable fingerprint for the configured origin, when present."""
+
     try:
         result = subprocess.run(
             ["git", "remote", "get-url", "origin"],
@@ -573,4 +600,4 @@ def _remote_fingerprint(*, repo_root: Path) -> str | None:
         rest = rest.split("@", 1)[-1]
         value = f"{scheme}://{rest}"
     value = value.split("?", 1)[0].split("#", 1)[0]
-    return _sha256_text(value)
+    return _sha256_text(value=value)

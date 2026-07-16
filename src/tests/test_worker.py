@@ -508,7 +508,8 @@ def test_run_worker_loop_prepares_path_for_agents(
     repo_root = repo_builder()
     seen: list[object] = []
     monkeypatch.setattr(
-        "loopy_loop.worker.ensure_interpreter_scripts_on_path", seen.append
+        "loopy_loop.worker.ensure_interpreter_scripts_on_path",
+        lambda *, environ: seen.append(environ),
     )
     monkeypatch.setattr(
         "loopy_loop.worker.httpx.Client",

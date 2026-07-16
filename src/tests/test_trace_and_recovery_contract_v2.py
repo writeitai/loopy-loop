@@ -10,15 +10,10 @@ from loopy_loop import recovery as recovery_module
 from loopy_loop.recovery import recover_interrupted_iteration
 from loopy_loop.sessions import assignment_path
 from loopy_loop.sessions import create_session_dir
-from loopy_loop.sessions import git_receipts_dir_path
 from loopy_loop.sessions import iteration_dir_path
-from loopy_loop.sessions import trace_seal_receipt_path
 from loopy_loop.sessions import write_json_atomic
 from loopy_loop.tracing import create_attempt_trace
-from loopy_loop.tracing import enqueue_trace_export
-from loopy_loop.tracing import export_trace_to_directory
 from loopy_loop.tracing import import_harness_artifacts
-from loopy_loop.tracing import prune_trace
 from loopy_loop.tracing import read_trace_manifest
 from loopy_loop.tracing import seal_attempt_trace
 from loopy_loop.tracing import trace_write_json
@@ -146,7 +141,7 @@ def _caller_owned_harness_run(
     return trace_root, run_dir, run_payload
 
 
-def test_sealed_trace_preserves_raw_artifacts_and_pruning_preserves_compact_evidence(
+def test_sealed_trace_preserves_raw_artifacts_and_has_verifiable_inventory(
     tmp_path: Path,
 ) -> None:
     repo_root = tmp_path
@@ -186,19 +181,6 @@ def test_sealed_trace_preserves_raw_artifacts_and_pruning_preserves_compact_evid
     direct_agent_output.write_text("direct-log-observable-value\n", encoding="utf-8")
     direct_binary = trace_root / "eval" / "opaque.bin"
     direct_binary.write_bytes(b"\x00opaque-trace-fixture")
-    compact_path = (
-        git_receipts_dir_path(repo_root=repo_root, session_id=session_id)
-        / f"git-after-{attempt_id}.json"
-    )
-    write_json_atomic(
-        path=compact_path,
-        payload={
-            "schema_version": 1,
-            "attempt_id": attempt_id,
-            "head": "abc123",
-            "dirty_tree_digest": "sha256:" + "3" * 64,
-        },
-    )
 
     manifest = seal_attempt_trace(
         trace_root=trace_root, usage={"prompt_tokens": 10, "completion_tokens": 5}
@@ -222,37 +204,7 @@ def test_sealed_trace_preserves_raw_artifacts_and_pruning_preserves_compact_evid
     assert "protocol/provider-input.json" in inventory_paths
     assert "agents/output.txt" in inventory_paths
     assert "eval/opaque.bin" in inventory_paths
-    compact_before = compact_path.read_bytes()
-
-    prune_trace(trace_root=trace_root)
-
-    assert not trace_root.exists()
-    assert compact_path.is_file()
-    assert compact_path.read_bytes() == compact_before
-
-
-def test_prune_refuses_agent_forged_lifecycle_without_session_seal(
-    tmp_path: Path,
-) -> None:
-    trace_root, _, _ = _caller_owned_harness_run(
-        repo_root=tmp_path, attempt_id="attempt-forged-prune"
-    )
-    manifest_path = trace_root / "trace_manifest.json"
-    manifest = read_trace_manifest(manifest_path=manifest_path)
-    manifest["lifecycle"] = "sealed"
-    manifest["sealed_at"] = "2026-07-16T12:00:00Z"
-    manifest["inventory"] = []
-    write_json_atomic(path=manifest_path, payload=manifest)
-
-    with pytest.raises(TraceError, match="integrity verification failed"):
-        prune_trace(trace_root=trace_root)
-
-    assert trace_root.is_dir()
-    assert not trace_seal_receipt_path(
-        repo_root=tmp_path,
-        session_id="session-attempt-forged-prune",
-        attempt_id="attempt-forged-prune",
-    ).exists()
+    assert verify_trace_integrity(trace_root=trace_root)["status"] == "verified"
 
 
 def test_missing_harness_artifacts_are_never_claimed_complete(tmp_path: Path) -> None:
@@ -446,7 +398,7 @@ def test_incomplete_nested_harness_keeps_direct_agent_channel_incomplete(
     assert manifest["channels"]["direct_agents"] == "incomplete"
 
 
-def test_sealed_trace_integrity_detects_drift_and_blocks_export(tmp_path: Path) -> None:
+def test_sealed_trace_integrity_detects_drift(tmp_path: Path) -> None:
     trace_root, _ = create_attempt_trace(
         repo_root=tmp_path,
         root_session_id="root",
@@ -476,10 +428,6 @@ def test_sealed_trace_integrity_detects_drift_and_blocks_export(tmp_path: Path) 
         "modified": [],
         "manifest_errors": [],
     }
-    outbox = enqueue_trace_export(
-        repo_root=tmp_path, trace_root=trace_root, destination=tmp_path / "cloud"
-    )
-
     trace_root.joinpath("agents/modified.txt").write_text("changed", encoding="utf-8")
     trace_root.joinpath("agents/removed.txt").unlink()
     trace_root.joinpath("agents/added.txt").write_text("added", encoding="utf-8")
@@ -489,138 +437,6 @@ def test_sealed_trace_integrity_detects_drift_and_blocks_export(tmp_path: Path) 
     assert drift["added"] == ["agents/added.txt"]
     assert drift["removed"] == ["agents/removed.txt"]
     assert [item["path"] for item in drift["modified"]] == ["agents/modified.txt"]
-    with pytest.raises(TraceError, match="integrity verification failed"):
-        enqueue_trace_export(
-            repo_root=tmp_path, trace_root=trace_root, destination=tmp_path / "cloud"
-        )
-    with pytest.raises(TraceError, match="integrity verification failed"):
-        export_trace_to_directory(outbox_path=outbox, destination=tmp_path / "cloud")
-    assert not (tmp_path / "cloud").exists()
-
-
-def test_trace_export_is_exact_idempotent_and_recovers_post_rename_crash(
-    tmp_path: Path,
-) -> None:
-    trace_root, _ = create_attempt_trace(
-        repo_root=tmp_path,
-        root_session_id="root",
-        session_id="leaf",
-        request_id=None,
-        work_item_id=None,
-        workflow_set="delivery",
-        workflow_id="inner",
-        iteration=1,
-        attempt_id="attempt-export",
-    )
-    trace_write_text(
-        trace_root=trace_root, relative_path="agents/output.txt", content="done\n"
-    )
-    trace_write_json(
-        trace_root=trace_root,
-        relative_path="protocol/task_response.json",
-        payload={"action": "run", "workflow_id": "inner"},
-    )
-    trace_root.joinpath("eval/raw.bin").write_bytes(b"\x00raw-export-fixture")
-    seal_attempt_trace(trace_root=trace_root, usage=None)
-    destination = tmp_path / "cloud"
-    outbox = enqueue_trace_export(
-        repo_root=tmp_path, trace_root=trace_root, destination=destination
-    )
-
-    with pytest.raises(TraceError, match="bound to .*different destination"):
-        export_trace_to_directory(
-            outbox_path=outbox, destination=tmp_path / "other-cloud"
-        )
-
-    target = export_trace_to_directory(outbox_path=outbox, destination=destination)
-    # Model a crash after the atomic directory rename but before the outbox
-    # acknowledgement. A retry recognizes the exact existing copy.
-    payload = json.loads(outbox.read_text(encoding="utf-8"))
-    payload["status"] = "pending"
-    write_json_atomic(path=outbox, payload=payload)
-    retried = export_trace_to_directory(outbox_path=outbox, destination=destination)
-
-    assert retried == target
-    assert json.loads(outbox.read_text(encoding="utf-8"))["status"] == "exported"
-    exported_response = json.loads(
-        target.joinpath("protocol/task_response.json").read_text(encoding="utf-8")
-    )
-    assert exported_response == {"action": "run", "workflow_id": "inner"}
-    assert target.joinpath("eval/raw.bin").read_bytes() == b"\x00raw-export-fixture"
-
-
-def test_trace_export_rejects_extra_or_drifted_destination_files(
-    tmp_path: Path,
-) -> None:
-    trace_root, _ = create_attempt_trace(
-        repo_root=tmp_path,
-        root_session_id="root",
-        session_id="leaf",
-        request_id=None,
-        work_item_id=None,
-        workflow_set="delivery",
-        workflow_id="inner",
-        iteration=1,
-        attempt_id="attempt-export-drift",
-    )
-    trace_write_text(
-        trace_root=trace_root, relative_path="agents/output.txt", content="done\n"
-    )
-    seal_attempt_trace(trace_root=trace_root, usage=None)
-    outbox = enqueue_trace_export(
-        repo_root=tmp_path, trace_root=trace_root, destination=tmp_path / "cloud"
-    )
-    target = export_trace_to_directory(
-        outbox_path=outbox, destination=tmp_path / "cloud"
-    )
-    extra = target / "nested" / "trace_manifest.json"
-    extra.parent.mkdir()
-    extra.write_text("{}", encoding="utf-8")
-
-    with pytest.raises(TraceError, match="inventory does not match"):
-        export_trace_to_directory(outbox_path=outbox, destination=tmp_path / "cloud")
-
-    extra.unlink()
-    target.joinpath("agents/output.txt").write_text("drift\n", encoding="utf-8")
-    with pytest.raises(TraceError, match="artifact does not match"):
-        export_trace_to_directory(outbox_path=outbox, destination=tmp_path / "cloud")
-
-
-def test_trace_export_manifest_id_cannot_rebind_to_another_trace(
-    tmp_path: Path,
-) -> None:
-    first, _ = create_attempt_trace(
-        repo_root=tmp_path,
-        root_session_id="root-one",
-        session_id="leaf-one",
-        request_id=None,
-        work_item_id=None,
-        workflow_set="delivery",
-        workflow_id="inner",
-        iteration=1,
-        attempt_id="same-attempt",
-    )
-    second, _ = create_attempt_trace(
-        repo_root=tmp_path,
-        root_session_id="root-two",
-        session_id="leaf-two",
-        request_id=None,
-        work_item_id=None,
-        workflow_set="delivery",
-        workflow_id="inner",
-        iteration=1,
-        attempt_id="same-attempt",
-    )
-    seal_attempt_trace(trace_root=first, usage=None)
-    seal_attempt_trace(trace_root=second, usage=None)
-    enqueue_trace_export(
-        repo_root=tmp_path, trace_root=first, destination=tmp_path / "cloud"
-    )
-
-    with pytest.raises(TraceError, match="different trace root"):
-        enqueue_trace_export(
-            repo_root=tmp_path, trace_root=second, destination=tmp_path / "cloud"
-        )
 
 
 def test_sealed_trace_integrity_rejects_malformed_inventory(tmp_path: Path) -> None:
@@ -648,10 +464,6 @@ def test_sealed_trace_integrity_rejects_malformed_inventory(tmp_path: Path) -> N
     assert report["manifest_errors"] == [
         "inventory[0].sha256 is not a canonical SHA-256 digest"
     ]
-    with pytest.raises(TraceError, match="manifest_errors=1"):
-        enqueue_trace_export(
-            repo_root=tmp_path, trace_root=trace_root, destination=tmp_path / "cloud"
-        )
 
 
 def test_recovery_discovers_caller_owned_run_json_in_explicit_attempt_trace(

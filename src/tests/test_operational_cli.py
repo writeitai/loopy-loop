@@ -9,7 +9,6 @@ from click.testing import CliRunner
 from loopy_loop.cli import main
 from loopy_loop.sessions import create_session_dir
 from loopy_loop.sessions import state_path
-from loopy_loop.sessions import trace_export_outbox_dir_path
 from loopy_loop.sessions import user_updates_journal_path
 from loopy_loop.state_store import StateStore
 from loopy_loop.tracing import create_attempt_trace
@@ -123,7 +122,7 @@ def test_update_rejects_missing_state_or_unknown_explicit_session(
     assert "session not found: missing" in missing_session.output
 
 
-def test_trace_commands_list_inspect_export_idempotently_and_prune(
+def test_trace_commands_list_and_inspect_lifecycle_and_integrity(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     trace_root, manifest = create_attempt_trace(
@@ -148,56 +147,37 @@ def test_trace_commands_list_inspect_export_idempotently_and_prune(
 
     listed = runner.invoke(main, ["traces", "list"])
     inspected = runner.invoke(main, ["traces", "inspect", manifest_id])
-    active_export = runner.invoke(
-        main,
-        ["traces", "export", manifest_id, "--destination", str(tmp_path / "cloud")],
-    )
-    active_prune = runner.invoke(main, ["traces", "prune", manifest_id])
+    help_result = runner.invoke(main, ["traces", "--help"])
 
     assert listed.exit_code == 0, listed.output
     assert manifest_id in listed.output
     assert "active" in listed.output
     assert str(trace_root / "trace_manifest.json") in listed.output
     assert inspected.exit_code == 0, inspected.output
-    assert json.loads(inspected.output)["identity"]["attempt_id"] == "attempt-1"
-    assert active_export.exit_code != 0
-    assert "active traces cannot be exported" in active_export.output
-    assert active_prune.exit_code != 0
-    assert "active or unsealed" in active_prune.output
-    assert trace_root.exists()
+    active_manifest = json.loads(inspected.output)
+    assert active_manifest["identity"]["attempt_id"] == "attempt-1"
+    assert active_manifest["observed_integrity"]["status"] == "not_finalized"
+    assert help_result.exit_code == 0, help_result.output
+    assert "export" not in help_result.output
+    assert "prune" not in help_result.output
 
     seal_attempt_trace(trace_root=trace_root, usage={"prompt_tokens": 10})
-    destination = tmp_path / "cloud"
-    first_export = runner.invoke(
-        main, ["traces", "export", manifest_id, "--destination", str(destination)]
+    sealed_list = runner.invoke(main, ["traces", "list"])
+    assert sealed_list.exit_code == 0, sealed_list.output
+    assert "incomplete" in sealed_list.output
+    assert "integrity=verified" in sealed_list.output
+
+    trace_root.joinpath("agents/output.txt").write_text(
+        "changed after seal", encoding="utf-8"
     )
-    second_export = runner.invoke(
-        main, ["traces", "export", manifest_id, "--destination", str(destination)]
-    )
-
-    assert first_export.exit_code == 0, first_export.output
-    assert second_export.exit_code == 0, second_export.output
-    exported_root = destination / manifest_id
-    assert first_export.output.strip() == str(exported_root.resolve())
-    assert second_export.output.strip() == str(exported_root.resolve())
-    assert (
-        exported_root.joinpath("agents/output.txt").read_text(encoding="utf-8")
-        == "raw local output\n"
-    )
-    outbox = trace_export_outbox_dir_path(repo_root=tmp_path) / f"{manifest_id}.json"
-    outbox_payload = json.loads(outbox.read_text(encoding="utf-8"))
-    assert outbox_payload["status"] == "exported"
-    assert outbox_payload["attempts"] == 1
-
-    pruned = runner.invoke(main, ["traces", "prune", str(trace_root)])
-    empty_list = runner.invoke(main, ["traces", "list"])
-    assert pruned.exit_code == 0, pruned.output
-    assert not trace_root.exists()
-    assert empty_list.output == "No traces found.\n"
-    assert outbox.exists()
+    drifted = runner.invoke(main, ["traces", "inspect", manifest_id])
+    assert drifted.exit_code == 0, drifted.output
+    observed = json.loads(drifted.output)["observed_integrity"]
+    assert observed["status"] == "failed"
+    assert [item["path"] for item in observed["modified"]] == ["agents/output.txt"]
 
 
-def test_trace_path_commands_are_confined_to_repository_trace_root(
+def test_trace_inspect_path_is_confined_to_repository_trace_root(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     outside = tmp_path / "unrelated"
@@ -215,57 +195,8 @@ def test_trace_path_commands_are_confined_to_repository_trace_root(
     )
     monkeypatch.chdir(tmp_path)
 
-    result = CliRunner().invoke(main, ["traces", "prune", str(outside)])
+    result = CliRunner().invoke(main, ["traces", "inspect", str(outside)])
 
     assert result.exit_code != 0
     assert "outside this repository's trace root" in result.output
     assert outside.exists()
-
-
-def test_trace_commands_report_drift_refuse_export_and_allow_observed_prune(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
-    trace_root, manifest = create_attempt_trace(
-        repo_root=tmp_path,
-        root_session_id="root",
-        session_id="leaf",
-        request_id=None,
-        work_item_id=None,
-        workflow_set="main",
-        workflow_id="implement",
-        iteration=1,
-        attempt_id="attempt-drifted",
-    )
-    artifact = trace_write_text(
-        trace_root=trace_root,
-        relative_path="agents/output.txt",
-        content="sealed output",
-    )
-    seal_attempt_trace(trace_root=trace_root, usage=None)
-    artifact.write_text("changed after seal", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    runner = CliRunner()
-    manifest_id = str(manifest["manifest_id"])
-
-    listed = runner.invoke(main, ["traces", "list"])
-    inspected = runner.invoke(main, ["traces", "inspect", manifest_id])
-    exported = runner.invoke(
-        main,
-        ["traces", "export", manifest_id, "--destination", str(tmp_path / "cloud")],
-    )
-
-    assert listed.exit_code == 0, listed.output
-    assert "integrity=failed" in listed.output
-    assert inspected.exit_code == 0, inspected.output
-    observed = json.loads(inspected.output)["observed_integrity"]
-    assert observed["status"] == "failed"
-    assert [item["path"] for item in observed["modified"]] == ["agents/output.txt"]
-    assert exported.exit_code != 0
-    assert "sealed trace integrity verification failed" in exported.output
-    assert not (tmp_path / "cloud").exists()
-
-    pruned = runner.invoke(main, ["traces", "prune", manifest_id])
-
-    assert pruned.exit_code == 0, pruned.output
-    assert "integrity=failed" in pruned.output
-    assert not trace_root.exists()
