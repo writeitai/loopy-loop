@@ -40,6 +40,8 @@ def run_harness_iteration(
     caller_context: object | None = None,
     harness_factory: Callable[..., TeamHarnessLike] = TeamHarness,
 ) -> IterationResult:
+    """Run one rendered assignment and normalize its harness outcome."""
+
     root_config = RootConfig.model_validate(
         config_snapshot.model_dump(exclude={"goal_hash"})
     )
@@ -158,6 +160,8 @@ def _build_harness_kwargs(
     harness_factory: Callable[..., TeamHarnessLike],
     caller_context: object | None = None,
 ) -> dict[str, object]:
+    """Build supported TeamHarness arguments from the frozen root config."""
+
     kwargs: dict[str, object] = {
         "provider": config_snapshot.team_harness_provider,
         "model": config_snapshot.team_harness_model,
@@ -235,6 +239,8 @@ def _supports_kwargs(
 def _failure_harness_paths(
     *, detail: dict[str, object] | None, harness_output_root: Path | None
 ) -> tuple[str, str]:
+    """Extract the run ID and output directory from harness failure detail."""
+
     if not detail:
         return "", ""
     run_id_value = detail.get("run_id")
@@ -280,6 +286,8 @@ def write_iteration_inputs(*, iteration_dir: Path, rendered_prompt: str) -> None
 def _normalize_harness_result(
     *, result: TeamHarnessResult, harness_output_root: Path | None = None
 ) -> IterationResult:
+    """Convert a successful TeamHarness result to Loopy's iteration model."""
+
     harness_output_dir = ""
     if harness_output_root is not None and result.run_id:
         harness_output_dir = str(harness_output_root / result.run_id)

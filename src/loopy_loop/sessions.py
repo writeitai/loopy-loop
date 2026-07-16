@@ -142,6 +142,8 @@ def create_session_dir(
     workflow_contract: dict[str, object] | None = None,
     schema_version: int = 1,
 ) -> Path:
+    """Create or idempotently materialize a durable session directory."""
+
     created_at = utc_now().isoformat().replace("+00:00", "Z")
     publish_from_staging = False
     published_session_dir: Path | None = None
@@ -174,7 +176,7 @@ def create_session_dir(
         else:
             assert parent_session_dir is not None
             parent_manifest = _read_json_mapping(
-                parent_session_dir / SESSION_METADATA_FILENAME
+                path=parent_session_dir / SESSION_METADATA_FILENAME
             )
             root_session_id = root_session_id or str(
                 parent_manifest.get("root_session_id") or parent_session_id
@@ -227,14 +229,14 @@ def create_session_dir(
             write_json_atomic(
                 path=goal_contract_path_value, payload=goal_contract_payload
             )
-        goal_contract_hash = file_sha256(goal_contract_path_value)
+        goal_contract_hash = file_sha256(path=goal_contract_path_value)
     workflow_contract_hash: str | None = None
     if workflow_contract is not None:
         contract_path = session_dir / WORKFLOW_CONTRACT_FILENAME
         if not contract_path.exists():
             write_json_atomic(path=contract_path, payload=workflow_contract)
         if schema_version >= 2:
-            workflow_contract_hash = file_sha256(contract_path)
+            workflow_contract_hash = file_sha256(path=contract_path)
 
     metadata_path = session_dir / SESSION_METADATA_FILENAME
     if not metadata_path.exists():
@@ -345,6 +347,8 @@ def sessions_root_path(*, repo_root: Path) -> Path:
 
 
 def session_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Resolve a session ID through the validated recursive topology."""
+
     root = sessions_root_path(repo_root=repo_root)
     direct = root / session_id
     if not root.exists():
@@ -393,6 +397,8 @@ def child_requests_dir_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def child_requests_pending_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the directory for child requests awaiting dispatch."""
+
     return (
         child_requests_dir_path(repo_root=repo_root, session_id=session_id)
         / CHILD_REQUEST_PENDING_DIRNAME
@@ -400,6 +406,8 @@ def child_requests_pending_dir_path(*, repo_root: Path, session_id: str) -> Path
 
 
 def child_requests_accepted_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the directory for child requests accepted for dispatch."""
+
     return (
         child_requests_dir_path(repo_root=repo_root, session_id=session_id)
         / CHILD_REQUEST_ACCEPTED_DIRNAME
@@ -407,6 +415,8 @@ def child_requests_accepted_dir_path(*, repo_root: Path, session_id: str) -> Pat
 
 
 def child_requests_rejected_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the directory for invalid or conflicting child requests."""
+
     return (
         child_requests_dir_path(repo_root=repo_root, session_id=session_id)
         / CHILD_REQUEST_REJECTED_DIRNAME
@@ -424,6 +434,8 @@ def session_goal_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def goal_contract_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the immutable goal-contract path for a session."""
+
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / GOAL_CONTRACT_FILENAME
@@ -431,6 +443,8 @@ def goal_contract_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def workflow_contract_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the agent-visible workflow-contract projection path."""
+
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / WORKFLOW_CONTRACT_FILENAME
@@ -537,6 +551,8 @@ def eval_checks_dir_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def eval_readiness_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the directory for eval-readiness declarations."""
+
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / EVAL_READINESS_DIRNAME
@@ -544,6 +560,8 @@ def eval_readiness_dir_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def eval_receipts_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the directory for validated evaluation receipts."""
+
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / EVAL_RECEIPTS_DIRNAME
@@ -551,6 +569,8 @@ def eval_receipts_dir_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def child_outcomes_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the directory for outcomes reported by child sessions."""
+
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / CHILD_OUTCOMES_DIRNAME
@@ -558,6 +578,8 @@ def child_outcomes_dir_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def parent_acceptance_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the directory for a parent's child-outcome decisions."""
+
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / PARENT_ACCEPTANCE_DIRNAME
@@ -565,6 +587,8 @@ def parent_acceptance_dir_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def git_receipts_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the directory for session-bound Git evidence receipts."""
+
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / GIT_RECEIPTS_DIRNAME
@@ -572,6 +596,8 @@ def git_receipts_dir_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def delivery_receipts_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the directory for branch and PR delivery receipts."""
+
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / DELIVERY_RECEIPTS_DIRNAME
@@ -579,6 +605,8 @@ def delivery_receipts_dir_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def control_rejected_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the archive for rejected control signals."""
+
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / CONTROL_REJECTED_DIRNAME
@@ -586,6 +614,8 @@ def control_rejected_dir_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def protocol_failures_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the archive for repairable protocol failures."""
+
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / PROTOCOL_FAILURES_DIRNAME
@@ -593,6 +623,8 @@ def protocol_failures_dir_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def trace_seals_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the directory for committed attempt trace seals."""
+
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / TRACE_SEALS_DIRNAME
@@ -602,12 +634,16 @@ def trace_seals_dir_path(*, repo_root: Path, session_id: str) -> Path:
 def trace_seal_receipt_path(
     *, repo_root: Path, session_id: str, attempt_id: str
 ) -> Path:
+    """Return the trace-seal receipt path for one attempt."""
+
     return trace_seals_dir_path(repo_root=repo_root, session_id=session_id) / (
         f"{attempt_id}.json"
     )
 
 
 def user_updates_journal_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the append-only user-input journal path for a session."""
+
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / INPUTS_DIRNAME
@@ -677,6 +713,8 @@ def assignment_path(
     workflow_id: str,
     attempt_id: str,
 ) -> Path:
+    """Return the frozen assignment-envelope path for one attempt."""
+
     return (
         workflow_snapshot_dir_path(
             repo_root=repo_root,
@@ -697,6 +735,8 @@ def workflow_snapshot_dir_path(
     workflow_id: str,
     attempt_id: str,
 ) -> Path:
+    """Return the immutable workflow snapshot directory for one attempt."""
+
     return (
         ensure_iteration_dir(
             repo_root=repo_root,
@@ -712,6 +752,8 @@ def workflow_snapshot_dir_path(
 def trace_ref_path(
     *, repo_root: Path, session_id: str, iteration: int, workflow_id: str
 ) -> Path:
+    """Return the iteration's logical reference to its raw trace."""
+
     return (
         ensure_iteration_dir(
             repo_root=repo_root,
@@ -724,12 +766,16 @@ def trace_ref_path(
 
 
 def traces_root_path(*, repo_root: Path) -> Path:
+    """Return the repository-local root for ignored raw traces."""
+
     return repo_root / LOOPY_DIRNAME / TRACES_DIRNAME
 
 
 def attempt_trace_dir_path(
     *, repo_root: Path, root_session_id: str, session_id: str, attempt_id: str
 ) -> Path:
+    """Return the raw trace directory owned by a specific attempt."""
+
     return (
         traces_root_path(repo_root=repo_root)
         / root_session_id
@@ -741,6 +787,8 @@ def attempt_trace_dir_path(
 
 
 def trace_finalization_outbox_dir_path(*, repo_root: Path) -> Path:
+    """Return the crash-recovery outbox for pending trace finalization."""
+
     return repo_root / LOOPY_DIRNAME / TRACE_FINALIZATION_OUTBOX_DIRNAME
 
 
@@ -803,11 +851,15 @@ def goal_check_path(
 
 
 def file_sha256(path: Path) -> str:
+    """Return a file's SHA-256 digest with its algorithm prefix."""
+
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     return f"sha256:{digest}"
 
 
 def _read_json_mapping(path: Path) -> dict[str, object]:
+    """Read a JSON object, returning an empty mapping on invalid input."""
+
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):

@@ -1,7 +1,8 @@
 # Design: Recursive Loop Layers, Dynamic Agent Delegation, and Execution Records
 
-**Status:** Implemented in loopy-loop 0.7.0 with team-harness 0.5.0 and
-eval-banana 0.3.2
+**Status:** Implemented on coordinated feature branches targeting loopy-loop
+0.7.0, team-harness 0.5.0, and eval-banana 0.3.2. Rollout awaits publication
+of the support packages and refresh of loopy-loop's dependency lock.
 
 **Date accepted:** 2026-07-15
 
@@ -225,13 +226,15 @@ files inspectable. An explicit `contract.yaml` that omits
 `session_protocol_version` selects v2; only a workflow set with no contract at
 all uses the documented derived-v1 compatibility path.
 
-Before dispatch, the coordinator freezes the selected workflow config, prompt,
-workflow contract, and root execution config beneath that attempt's
+Before dispatch, the coordinator freezes the selected workflow config, prompt
+body, workflow contract, and root execution config beneath that attempt's
 `workflow_snapshot/`, records their hashes, writes the assignment atomically,
 and freezes its SHA-256 in the task. The worker verifies the repository,
 snapshot identity, hashes, reconstructed assignment, and absolute location
 before calling a model. Scheduler and worker therefore cannot silently execute
-different live files after an attempt was selected.
+different live files after an attempt was selected. Runtime semantic context,
+such as the newest eval-readiness record, remains deliberately late-bound and
+is captured in the rendered attempt input.
 
 The rendered loopy prompt and team-harness coordinator input are persisted
 before their respective provider calls. A pre-first-turn crash still leaves a

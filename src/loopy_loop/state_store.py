@@ -56,11 +56,13 @@ class StateStore:
             return self._read_state_unlocked()
 
     def write_state(self, *, state: LoopState) -> LoopState:
+        """Validate and durably replace the session's complete loop state."""
+
         with self._lock():
             current = self._read_state_unlocked()
             validated = LoopState.model_validate(state.model_dump())
             if validated.schema_version >= 2:
-                _validate_committed_shape(validated, repo_root=self.repo_root)
+                _validate_committed_shape(state=validated, repo_root=self.repo_root)
                 validated.state_revision = (
                     current.state_revision + 1 if current is not None else 0
                 )
@@ -69,11 +71,13 @@ class StateStore:
             return validated
 
     def mutate(self, mutator: Callable[[LoopState | None], tuple[LoopState, T]]) -> T:
+        """Apply one locked state transition and persist its validated result."""
+
         with self._lock():
             current = self._read_state_unlocked()
             next_state, result = mutator(current)
             if next_state.schema_version >= 2:
-                _validate_committed_shape(next_state, repo_root=self.repo_root)
+                _validate_committed_shape(state=next_state, repo_root=self.repo_root)
                 prior_revision = current.state_revision if current is not None else -1
                 next_state.state_revision = prior_revision + 1
                 # Revalidate after the complete mutation, never halfway
@@ -85,7 +89,7 @@ class StateStore:
     def validate_committed_state(self, *, state: LoopState) -> None:
         """Validate a state read for startup/recovery without rewriting it."""
         if state.schema_version >= 2:
-            _validate_committed_shape(state, repo_root=self.repo_root)
+            _validate_committed_shape(state=state, repo_root=self.repo_root)
 
     def archive_state(self) -> Path | None:
         with self._lock():
@@ -262,7 +266,7 @@ def _validate_committed_shape(state: LoopState, *, repo_root: Path) -> None:
             raise StateInvariantError(
                 f"v2 workflow snapshot member {field!r} has an invalid hash"
             )
-        if not path.is_file() or file_sha256(path) != expected_hash:
+        if not path.is_file() or file_sha256(path=path) != expected_hash:
             raise AttemptArtifactInvariantError(
                 f"v2 workflow snapshot member {field!r} changed or is missing"
             )
@@ -276,7 +280,7 @@ def _validate_committed_shape(state: LoopState, *, repo_root: Path) -> None:
     ).resolve()
     if (
         not expected_assignment.is_file()
-        or file_sha256(expected_assignment) != task.assignment_sha256
+        or file_sha256(path=expected_assignment) != task.assignment_sha256
     ):
         raise AttemptArtifactInvariantError(
             "v2 current task assignment changed or is missing"

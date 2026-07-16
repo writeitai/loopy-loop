@@ -279,7 +279,7 @@ def _discover_run_records(
                 continue
             seen.add(resolved)
             records.append((path.parent.name, path, "caller"))
-    for run_id in _discover_run_ids(output_root):
+    for run_id in _discover_run_ids(output_root=output_root):
         path = legacy_runs_root / run_id / "run.json"
         resolved = path.resolve()
         if resolved in seen:

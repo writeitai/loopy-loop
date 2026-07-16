@@ -250,6 +250,8 @@ def init(template_name: str) -> None:
 
 
 def _init_default_template(*, repo_root: Path) -> list[str]:
+    """Create the default workflow files that are absent from a repository."""
+
     loopy_dir = repo_root / LOOPY_DIRNAME
     workflow_dir = (
         loopy_dir
@@ -594,7 +596,7 @@ def stop() -> None:
                 repo_root=repo_root,
                 state_path=state_path(repo_root=repo_root, session_id=child_id),
             )
-            child_store.mutate(mutator)
+            child_store.mutate(mutator=mutator)
             state = child_store.read_state()
     except FileLockTimeout:
         raise click.ClickException(
@@ -657,6 +659,8 @@ def update(text: tuple[str, ...], target_session_id: str | None) -> None:
 
 
 def _validate_update_session(*, repo_root: Path, session_id: str) -> str:
+    """Return a session ID after verifying its manifest identity."""
+
     session_root = session_dir_path(repo_root=repo_root, session_id=session_id)
     manifest_path = session_root / SESSION_METADATA_FILENAME
     try:

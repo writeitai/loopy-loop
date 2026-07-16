@@ -1105,7 +1105,7 @@ class CoordinatorService:
 
         checkpoint = len(self._pending_events)
         try:
-            response, completion_accepted = self.state_store.mutate(mutator)
+            response, completion_accepted = self.state_store.mutate(mutator=mutator)
         except BaseException:
             del self._pending_events[checkpoint:]
             if intent_created_by_call:
@@ -1160,7 +1160,7 @@ class CoordinatorService:
             matches[0].finished_response_sha256 = _model_sha256(model=response)
             return current, None
 
-        store.mutate(mutator)
+        store.mutate(mutator=mutator)
 
     def _record_finished_task(
         self,
@@ -3350,6 +3350,8 @@ class CoordinatorService:
     def _dispatch_child_session_after_success(
         self, *, state: LoopState, caller: WorkerIdentity | None = None
     ) -> TaskResponse | None:
+        """Dispatch a requested child only after the parent attempt succeeds."""
+
         if not state.history or not state.history[-1].success:
             return None
         return self._dispatch_child_session_if_requested(state=state, caller=caller)

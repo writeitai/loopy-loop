@@ -1,6 +1,8 @@
 # Loop-layer state, agent contract, and trace review
 
-**Status:** architecture analysis; not a binding design or decision  
+**Status:** historical architecture analysis; superseded by D10-D12 and the
+binding recursive-loop design
+
 **Date:** 2026-07-15  
 **Scope:** the current one-layer session, the planner/dispatcher two-layer
 session tree, and a future three-layer session tree
@@ -18,6 +20,12 @@ Independent passes were also run with Claude Code and Antigravity:
 Those are intentionally independent working notes. This document checks their
 claims against the code and reconciles them with the binding decisions in
 [`design/decisions.md`](../decisions.md).
+
+This file preserves the reasoning that led to the binding design. It is not an
+implementation queue. In particular, its credential-redaction, trace-export,
+cloud transport, retention, and pruning ideas were deliberately excluded from
+the recursive-contract implementation. Any such subsystem requires a separate
+proposal, decision, and review.
 
 ## Executive verdict
 
@@ -1273,6 +1281,11 @@ machine-readable.
 
 ## Trace manifest and cloud export
 
+> **Superseded future-work discussion.** The implemented contract retains raw,
+> gitignored local traces plus integrity/finalization records. It does not
+> implement generic credential detection, redaction, export, cloud transport,
+> retention, or pruning. The material below is historical analysis only.
+
 Every attempt should have one `trace_manifest.json` with:
 
 - schema version and lifecycle (`active`, `sealed`, `incomplete`);
@@ -1431,6 +1444,9 @@ No layer reads a descendant's `goal_met` as proof of its own goal.
 9. Only then remove the current child-of-child dispatch guard.
 
 ### P2 — make traces operational products
+
+This historical phase was not accepted as part of D10-D12. Its redaction,
+pruning, and export items require a separate future proposal and decision.
 
 1. Introduce the separate trace root and sealed manifest.
 2. Capture loopy protocol/service logs and state/git effects.

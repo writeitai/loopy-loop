@@ -279,6 +279,8 @@ class LoopState(BaseModel):
     @field_validator("schema_version")
     @classmethod
     def validate_schema_version(cls, value: int) -> int:
+        """Accept only state schemas supported by this coordinator."""
+
         if value not in {1, 2}:
             raise ValueError(f"unsupported loop state schema_version: {value}")
         return value
@@ -302,6 +304,8 @@ class LoopState(BaseModel):
 
     @property
     def phase(self) -> Literal["ready", "executing", "suspended", "terminal"]:
+        """Return the scheduling phase implied by the durable loop state."""
+
         if self.status in {"stopped", "goal_met", "failed", "max_turns"}:
             return "terminal"
         if self.current_task is not None:
@@ -356,12 +360,16 @@ class ControlSignal(BaseModel):
     @field_validator("schema_version")
     @classmethod
     def validate_schema_version(cls, value: int) -> int:
+        """Accept the legacy or identity-bound control schema."""
+
         if value not in {1, CONTROL_SCHEMA_VERSION}:
             raise ValueError(f"schema_version must be 1 or {CONTROL_SCHEMA_VERSION}")
         return value
 
     @model_validator(mode="after")
     def validate_stop_reason(self) -> Self:
+        """Validate control state, terminal reason, and v2 evidence fields."""
+
         if self.state == "running" and self.stop_reason is not None:
             raise ValueError("running control state must not set stop_reason")
         if self.state == "stopped" and self.stop_reason is None:
@@ -403,6 +411,8 @@ class GoalCheckSignal(BaseModel):
 
     @model_validator(mode="after")
     def validate_version(self) -> Self:
+        """Require a receipt reference for identity-bound goal checks."""
+
         if self.schema_version not in {1, GOAL_CHECK_SCHEMA_VERSION}:
             raise ValueError("goal_check schema_version must be 1 or 2")
         if self.schema_version == 2 and self.eval_receipt_ref is None:
@@ -468,12 +478,16 @@ class ChildSessionRequest(BaseModel):
     @field_validator("schema_version")
     @classmethod
     def validate_schema_version(cls, value: int) -> int:
+        """Accept supported child-request schema versions."""
+
         if value not in {1, 2}:
             raise ValueError("schema_version must equal 1 or 2")
         return value
 
     @model_validator(mode="after")
     def validate_request_shape(self) -> Self:
+        """Validate the fields required by each child-request schema."""
+
         if self.schema_version == 1:
             if self.goal is None or not self.goal.strip():
                 raise ValueError("v1 child request requires goal")
@@ -494,6 +508,8 @@ class ChildSessionRequest(BaseModel):
 
     @property
     def effective_goal(self) -> str:
+        """Return the structured assignment goal or the legacy goal."""
+
         if self.assignment is not None:
             return self.assignment.goal
         assert self.goal is not None
@@ -574,6 +590,8 @@ class EvalProducer(BaseModel):
     @field_validator("harness_run_id")
     @classmethod
     def require_harness_run_id(cls, value: str) -> str:
+        """Reject eval producers that lack a concrete harness run."""
+
         if not value.strip():
             raise ValueError("eval producer harness_run_id must not be blank")
         return value
@@ -603,6 +621,8 @@ class EvalJudge(BaseModel):
 
     @model_validator(mode="after")
     def require_effective_values(self) -> Self:
+        """Require every effective judge setting to be nonblank."""
+
         if not all(
             value.strip()
             for value in (self.provider, self.model, self.reasoning_effort)
@@ -628,6 +648,8 @@ class EvalReceipt(BaseModel):
 
     @model_validator(mode="after")
     def validate_internal_consistency(self) -> Self:
+        """Validate receipt identities, digests, checks, and verdict agreement."""
+
         if self.schema_version != 1:
             raise ValueError("eval receipt schema_version must equal 1")
         if not SAFE_DURABLE_ID_PATTERN.fullmatch(self.eval_id):
@@ -647,22 +669,25 @@ class EvalReceipt(BaseModel):
         if self.verdict.goal_met != all(item.passed for item in self.check_results):
             raise ValueError("eval receipt verdict contradicts its check results")
         for item in self.checks:
-            if not _is_full_sha256(item.definition_sha256):
+            if not _is_full_sha256(value=item.definition_sha256):
                 raise ValueError("eval check definition digest must be full sha256")
-        if not _is_full_sha256(self.canonical_report_sha256):
+        if not _is_full_sha256(value=self.canonical_report_sha256):
             raise ValueError("canonical eval report digest must be full sha256")
         if not self.raw_report_refs:
             raise ValueError("eval receipt must retain at least one raw report")
         if set(self.raw_report_sha256s) != set(self.raw_report_refs):
             raise ValueError("raw eval report digests must match raw report refs")
         if any(
-            not _is_full_sha256(value) for value in self.raw_report_sha256s.values()
+            not _is_full_sha256(value=value)
+            for value in self.raw_report_sha256s.values()
         ):
             raise ValueError("raw eval report digest must be full sha256")
         return self
 
 
 def _is_full_sha256(value: str) -> bool:
+    """Return whether a value is a complete prefixed SHA-256 digest."""
+
     if not value.startswith("sha256:") or len(value) != len("sha256:") + 64:
         return False
     return all(character in "0123456789abcdef" for character in value[7:].lower())

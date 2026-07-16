@@ -363,9 +363,10 @@ session/workflow/attempt and come from a role named by the frozen workflow contr
 A spawned agent reports to its coordinator; it cannot leave durable control for
 another layer or later attempt.
 
-**Context.** The current one-layer prompts give both `outer` and `eval_runner` paths
-to close the session, so outer can stop before eval runs. The PM set can similarly
-close a root after reviewing child evidence without a separate root-goal evaluation.
+**Context.** Before D11, the one-layer prompts gave both `outer` and `eval_runner`
+paths to close the session, so outer could stop before eval ran. The PM set could
+similarly close a root after reviewing child evidence without a separate root-goal
+evaluation.
 That ambiguity becomes more dangerous at three depths: a leaf may correctly finish
 its task while the feature integration or release goal remains incomplete. Existing
 `goal_check.json` also lacks enough provenance to prove exactly what goal, checks,
