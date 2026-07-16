@@ -848,6 +848,11 @@ class CoordinatorService:
             completion_contract_version=completion_contract_version,
         )
         if state.schema_version >= 2:
+            # Reconcile agent-visible session projections from the durable
+            # engine trust root before freezing the next attempt.  Without
+            # this step, a consistent rewrite of workflow_contract.json plus
+            # its manifest hash could become the next attempt's snapshot.
+            self._workflow_contract_for_state(state=state)
             preflight = self._preflight_for(workflow_set=state.workflow_set)
             task.workflow_snapshot = materialize_workflow_snapshot(
                 repo_root=self.repo_root,
@@ -2253,7 +2258,15 @@ class CoordinatorService:
             ) from exc
 
     def _validate_session_contract(self, *, state: LoopState) -> None:
-        """Verify a v2 session's manifest and immutable identity contracts."""
+        """Verify v2 identity and restore its agent-visible contract projection.
+
+        The complete workflow contract stored in ``LoopState`` is the
+        coordinator-owned trust root.  ``session.json`` and
+        ``workflow_contract.json`` are intentionally visible to agents, so a
+        consistent rewrite of both files must not change protocol semantics.
+        When only that projection drifts, restore it from state before the
+        next attempt; unrelated identity contradictions still fail visibly.
+        """
 
         session_root = session_dir_path(
             repo_root=self.repo_root, session_id=state.active_session_id
@@ -2267,17 +2280,57 @@ class CoordinatorService:
             ) from exc
         if not isinstance(manifest, dict) or manifest.get("schema_version") != 2:
             raise ConfigError(f"v2 session has an invalid manifest at {manifest_path}")
+        expected_identity = {
+            "session_id": state.active_session_id,
+            "root_session_id": state.root_session_id,
+            "parent_session_id": state.parent_session_id,
+            "depth": state.depth,
+            "workflow_set": state.workflow_set,
+            "goal_hash": state.goal_hash,
+        }
+        for field, expected in expected_identity.items():
+            if manifest.get(field) != expected:
+                raise ConfigError(
+                    f"session manifest field {field!r} contradicts state for "
+                    f"{state.active_session_id}"
+                )
+        trusted_contract = state.workflow_contract
+        if trusted_contract is None:
+            raise ConfigError(
+                "v2 session state has no engine-owned workflow contract trust root"
+            )
         goal_path = goal_contract_path(
             repo_root=self.repo_root, session_id=state.active_session_id
         )
         contract_path = workflow_contract_path(
             repo_root=self.repo_root, session_id=state.active_session_id
         )
-        for required in (goal_path, contract_path):
-            if not required.is_file():
-                raise ConfigError(
-                    f"immutable v2 session artifact is missing: {required}"
-                )
+        if not goal_path.is_file():
+            raise ConfigError(f"immutable v2 session artifact is missing: {goal_path}")
+        projected_contract: WorkflowSetContract | None = None
+        try:
+            projected_contract = self._read_workflow_contract(
+                session_id=state.active_session_id
+            )
+        except ConfigError:
+            pass
+        projected_hash = (
+            file_sha256(path=contract_path) if contract_path.is_file() else None
+        )
+        if (
+            projected_contract != trusted_contract
+            or manifest.get("workflow_contract_hash") != projected_hash
+        ):
+            write_json_atomic(
+                path=contract_path, payload=trusted_contract.model_dump(mode="json")
+            )
+            manifest["workflow_contract_hash"] = file_sha256(path=contract_path)
+            write_json_atomic(path=manifest_path, payload=manifest)
+            logger.warning(
+                "restored workflow contract projection for v2 session %s from "
+                "engine-owned state",
+                state.active_session_id,
+            )
         expected_hash = manifest.get("goal_contract_hash")
         if expected_hash != file_sha256(path=goal_path):
             raise ConfigError(
@@ -2303,20 +2356,6 @@ class CoordinatorService:
                 f"session state identity contradicts immutable goal contract at "
                 f"{goal_path}"
             )
-        expected_identity = {
-            "session_id": state.active_session_id,
-            "root_session_id": state.root_session_id,
-            "parent_session_id": state.parent_session_id,
-            "depth": state.depth,
-            "workflow_set": state.workflow_set,
-            "goal_hash": state.goal_hash,
-        }
-        for field, expected in expected_identity.items():
-            if manifest.get(field) != expected:
-                raise ConfigError(
-                    f"session manifest field {field!r} contradicts state for "
-                    f"{state.active_session_id}"
-                )
         if (
             state.config_snapshot.goal != goal_contract.get("goal")
             or state.config_snapshot.goal_hash != state.goal_hash
@@ -2832,6 +2871,7 @@ class CoordinatorService:
             root_session_id=session_id,
             depth=0,
             config_snapshot=snapshot,
+            workflow_contract=self.preflight.workflow_contract,
         )
         self.state_store.write_state(state=state)
         self._emit(
@@ -3134,6 +3174,9 @@ class CoordinatorService:
                 work_item_id=parent_work_item_id,
                 config_snapshot=snapshot,
                 current_task=None,
+                workflow_contract=(
+                    preflight.workflow_contract if state.schema_version >= 2 else None
+                ),
             )
             child_state.current_task = self._create_current_task(
                 state=child_state,
@@ -4718,22 +4761,27 @@ class CoordinatorService:
             raise ConfigError(f"invalid workflow contract at {path}: {exc}") from exc
 
     def _workflow_contract_for_state(self, *, state: LoopState) -> WorkflowSetContract:
-        """Read the immutable contract, deriving only for a legacy v1 state.
+        """Return engine-owned v2 trust or derive a legacy-v1 contract.
 
         Pre-v2 sessions did not persist ``workflow_contract.json``. Their
         historical v1 control/goal-check/child-request behavior must remain
         usable after resume, so a missing file is projected from the current
-        workflow-set definition with protocol v1 semantics. A v2 session never
-        receives this fallback: a missing immutable contract remains a visible
-        structural failure.
+        workflow-set definition with protocol v1 semantics. A v2 session uses
+        the contract stored in engine state; its agent-visible files are only
+        synchronized projections and cannot downgrade later attempts.
         """
 
+        if state.schema_version >= 2:
+            self._validate_session_contract(state=state)
+            if state.workflow_contract is None:  # pragma: no cover - validated above
+                raise ConfigError(
+                    "v2 session state has no engine-owned workflow contract trust root"
+                )
+            return state.workflow_contract
         path = workflow_contract_path(
             repo_root=self.repo_root, session_id=state.active_session_id
         )
-        if path.is_file() or state.schema_version >= 2:
-            if state.schema_version >= 2:
-                self._validate_session_contract(state=state)
+        if path.is_file():
             return self._read_workflow_contract(session_id=state.active_session_id)
         return self._preflight_for(
             workflow_set=state.workflow_set

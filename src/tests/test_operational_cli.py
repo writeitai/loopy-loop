@@ -12,6 +12,7 @@ from loopy_loop.sessions import state_path
 from loopy_loop.sessions import user_updates_journal_path
 from loopy_loop.state_store import StateStore
 from loopy_loop.tracing import create_attempt_trace
+from loopy_loop.tracing import resolve_trace_manifest
 from loopy_loop.tracing import seal_attempt_trace
 from loopy_loop.tracing import trace_write_text
 
@@ -200,3 +201,40 @@ def test_trace_inspect_path_is_confined_to_repository_trace_root(
     assert result.exit_code != 0
     assert "outside this repository's trace root" in result.output
     assert outside.exists()
+
+
+def test_trace_id_resolution_ignores_unrelated_malformed_manifest(
+    tmp_path: Path,
+) -> None:
+    """Resolve a healthy ID without parsing unrelated broken trace data."""
+
+    trace_root, manifest = create_attempt_trace(
+        repo_root=tmp_path,
+        root_session_id="root",
+        session_id="leaf",
+        request_id="request-1",
+        work_item_id="item-1",
+        workflow_set="main",
+        workflow_id="implement",
+        iteration=1,
+        attempt_id="healthy-attempt",
+    )
+    malformed = (
+        tmp_path
+        / ".loopy_loop"
+        / "traces"
+        / "unrelated"
+        / "sessions"
+        / "stray"
+        / "attempts"
+        / "broken"
+        / "trace_manifest.json"
+    )
+    malformed.parent.mkdir(parents=True)
+    malformed.write_text("{", encoding="utf-8")
+
+    resolved = resolve_trace_manifest(
+        repo_root=tmp_path, reference=str(manifest["manifest_id"])
+    )
+
+    assert resolved == (trace_root / "trace_manifest.json").resolve()

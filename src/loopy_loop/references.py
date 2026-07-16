@@ -74,7 +74,8 @@ class LogicalReferenceResolver:
         # parent:/ paths: a corrupt diagnostic trace must not make state/control
         # paths unavailable.  Trace discovery is performed only for trace: refs.
         self._supplied_trace_roots = dict(supplied_trace_roots)
-        self._trace_roots: dict[str, Path] | None = None
+        self._trace_roots: dict[str, Path] = {}
+        self._resolved_trace_ids: set[str] = set()
 
     @classmethod
     def for_session(
@@ -118,17 +119,20 @@ class LogicalReferenceResolver:
             supplied_trace_roots=trace_roots or {},
         )
 
-    def _resolved_trace_roots(self) -> Mapping[str, Path]:
-        """Lazily discover trace identities only when resolving a trace ref."""
+    def _resolved_trace_root(self, *, identifier: str) -> Path:
+        """Resolve one trace ID without validating unrelated diagnostic traces."""
 
-        if self._trace_roots is None:
-            self._trace_roots = _trace_roots_for_tree(
+        if identifier not in self._resolved_trace_ids:
+            discovered = _trace_roots_for_tree(
                 repo_root=self.repo_root,
                 root_session_id=self.current.root_session_id,
                 session_ids=frozenset(self.sessions),
                 supplied=self._supplied_trace_roots,
+                requested_identifier=identifier,
             )
-        return self._trace_roots
+            self._trace_roots.update(discovered)
+            self._resolved_trace_ids.add(identifier)
+        return self._trace_roots[identifier]
 
     def resolve(self, reference: str) -> Path:
         """Resolve one logical reference beneath its validated scope root."""
@@ -159,7 +163,7 @@ class LogicalReferenceResolver:
                 ) from exc
         elif scope == "trace":
             try:
-                base = self._resolved_trace_roots()[identifier]
+                base = self._resolved_trace_root(identifier=identifier)
             except KeyError as exc:
                 raise LogicalReferenceError(
                     f"unknown trace manifest ID in logical reference: {identifier}"
@@ -561,8 +565,9 @@ def _trace_roots_for_tree(
     root_session_id: str,
     session_ids: frozenset[str],
     supplied: Mapping[str, Path],
+    requested_identifier: str,
 ) -> dict[str, Path]:
-    """Discover valid trace identities without trusting unrelated manifests."""
+    """Discover one requested trace identity without trusting unrelated traces."""
 
     traces_root = _canonicalize(
         path=repo_root / LOOPY_DIRNAME / TRACES_DIRNAME, label="traces root"
@@ -579,6 +584,8 @@ def _trace_roots_for_tree(
                 if identifier is None:
                     continue
                 _validate_id(value=identifier, label="trace manifest ID")
+                if identifier != requested_identifier:
+                    continue
                 manifest_identity = payload.get("identity", {})
                 if not isinstance(manifest_identity, dict):
                     raise LogicalReferenceError(
@@ -613,6 +620,8 @@ def _trace_roots_for_tree(
             )
 
     for identifier, raw_path in supplied.items():
+        if identifier != requested_identifier:
+            continue
         _validate_id(value=identifier, label="trace manifest ID")
         raw = Path(raw_path)
         trace_root = _canonicalize(

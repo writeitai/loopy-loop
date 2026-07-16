@@ -47,6 +47,7 @@ def test_packaged_workflow_contracts_name_every_role_and_owner() -> None:
         workflow.id for workflow in delivery.workflows
     }
     assert delivery.workflow_contract.layer_kind == "delivery"
+    assert delivery.workflow_contract.session_protocol_version == 2
     assert delivery.workflow_contract.child_interface == "none"
     assert delivery.workflow_contract.eval.author_role == "eval_reviewer"
     assert delivery.workflow_contract.eval.runner_role == "eval_runner"
@@ -57,11 +58,50 @@ def test_packaged_workflow_contracts_name_every_role_and_owner() -> None:
         workflow.id for workflow in parent.workflows
     }
     assert parent.workflow_contract.layer_kind == "program"
+    assert parent.workflow_contract.session_protocol_version == 2
     assert parent.workflow_contract.child_interface == "recursive"
     assert parent.workflow_contract.eval.author_role == "eval_reviewer"
     assert parent.workflow_contract.eval.runner_role == "eval_runner"
     assert parent.workflow_contract.eval.goal_control_role == "eval_runner"
     assert parent.workflow_contract.task_acceptance_role == "planner"
+
+
+def test_explicit_contract_without_protocol_version_defaults_to_v2(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    """An explicit current contract cannot inherit legacy-v1 model defaults."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    contract_path = (
+        repo_root / ".loopy_loop" / "workflow_sets" / "main" / "contract.yaml"
+    )
+    contract_path.write_text(
+        """schema_version: 1
+layer_kind: delivery
+roles:
+  planner:
+    responsibility: Plan work.
+  goal_check:
+    responsibility: Evaluate completion.
+state: []
+eval:
+  author_role: goal_check
+  runner_role: goal_check
+  goal_control_role: goal_check
+task_acceptance_role: planner
+terminal_blocker_reporting_roles: [planner, goal_check]
+child_interface: recursive
+""",
+        encoding="utf-8",
+    )
+
+    explicit = run_preflight(repo_root=repo_root)
+    contract_path.unlink()
+    derived = run_preflight(repo_root=repo_root)
+
+    assert explicit.workflow_contract.session_protocol_version == 2
+    assert derived.workflow_contract.session_protocol_version == 1
 
 
 def test_packaged_prompt_contract_uses_absolute_assignment_paths() -> None:

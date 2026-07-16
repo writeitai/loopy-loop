@@ -9,8 +9,7 @@
   repository/worker capability negotiation.
 - Added independently ignored, raw per-attempt traces with canonical
   team-harness run paths, spawn assignment envelopes, git boundary receipts,
-  sealed manifests, inspection/pruning commands, and an idempotent export
-  outbox.
+  sealed manifests, inspection commands, and crash-safe finalization records.
 - Updated the stock delivery and PM workflow sets so dynamic coordinators keep
   freedom over their teams while eval roles own each layer's semantic closure.
   Requires team-harness 0.5.0 and eval-banana 0.3.2.

@@ -2415,19 +2415,56 @@ def test_v2_completion_uses_attempt_frozen_contract_after_session_downgrade(
         response = client.post("/finished", json=finished_payload)
 
     assert response.status_code == 200, response.text
-    assert response.json()["action"] == "run"
+    next_task = response.json()
+    assert next_task["action"] == "run"
     state = _read_state(repo_root, task["session_id"])
     assert state.status == "running"
     assert state.goal_met is False
+    assert state.workflow_contract is not None
+    assert state.workflow_contract.session_protocol_version == 2
     assert state.history[-1].attempt_id == task["attempt_id"]
     assert state.history[-1].success is False
     assert state.history[-1].error == "invalid_control_output"
+    restored_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    assert restored_contract["session_protocol_version"] == 2
+    restored_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert restored_manifest["workflow_contract_hash"] == file_sha256(
+        path=contract_path
+    )
+    next_snapshot = next_task["workflow_snapshot"]
+    assert next_snapshot is not None
+    next_contract = yaml.safe_load(
+        Path(next_snapshot["workflow_contract_path"]).read_text(encoding="utf-8")
+    )
+    assert next_contract["session_protocol_version"] == 2
     failure = next(
         protocol_failures_dir_path(
             repo_root=repo_root, session_id=task["session_id"]
         ).glob("*.json")
     )
     assert "requires terminal control v2" in failure.read_text(encoding="utf-8")
+
+    # The next attempt remains v2 as well: the first rejection and the
+    # between-attempt projection repair cannot turn later work into legacy
+    # control semantics.
+    control_path(repo_root=repo_root, session_id=task["session_id"]).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "state": "stopped",
+                "reason": "retries the same downgraded completion",
+                "stop_reason": "goal_met",
+            }
+        ),
+        encoding="utf-8",
+    )
+    after_second_attempt = _finish(client=client, task=next_task)
+    after_second_state = _read_state(repo_root, task["session_id"])
+
+    assert after_second_attempt["action"] == "run"
+    assert after_second_state.goal_met is False
+    assert after_second_state.history[-1].attempt_id == next_task["attempt_id"]
+    assert after_second_state.history[-1].error == "invalid_control_output"
 
 
 def test_legacy_state_validates_v2_terminal_control_with_contract_fallback(

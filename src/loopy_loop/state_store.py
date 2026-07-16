@@ -147,6 +147,10 @@ class StateStore:
 
 def _validate_committed_shape(state: LoopState, *, repo_root: Path) -> None:
     """Reject impossible v2 phase and containing-state contradictions."""
+    if state.workflow_contract is None:
+        raise StateInvariantError(
+            "v2 state has no engine-owned workflow contract trust root"
+        )
     terminal = state.status in TERMINAL_STATUSES
     if terminal and (
         state.current_task is not None or state.active_child_session_id is not None

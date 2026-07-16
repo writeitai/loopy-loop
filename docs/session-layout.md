@@ -133,11 +133,13 @@ requires it.
 
 ### `workflow_contract.json`
 
-The selected workflow set's frozen role contract: session protocol version,
+The selected workflow set's agent-visible role-contract projection: session protocol version,
 layer kind, named role responsibilities, state declarations, eval author/
 runner/control roles, task-acceptance role, terminal-blocker reporting roles,
-and child interface. It tells an assignment which workflow role it is playing
-and prevents a later edit to `contract.yaml` from changing an active session.
+and child interface. The complete v2 contract is also stored in coordinator-owned
+`state.json`; before a later attempt, the coordinator restores this file and
+its `session.json` hash from that trust root if both projections were rewritten.
+The attempt snapshot then freezes and hashes the restored bytes.
 
 ## Coordinator state and observations
 

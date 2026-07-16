@@ -257,10 +257,19 @@ def test_status_and_stop_commands(
 def test_coordinator_requires_resume_for_running_state(
     repo_builder: Any, monkeypatch: Any, state_factory: Any
 ) -> None:
+    """Coordinator startup discovers a manifest-backed running root session."""
+
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder()
     monkeypatch.chdir(repo_root)
-    StateStore(repo_root=repo_root).write_state(state=state_factory())
+    state = state_factory()
+    create_session_dir(
+        repo_root=repo_root,
+        session_id=state.active_session_id,
+        goal_hash=state.goal_hash,
+        workflow_set=state.workflow_set,
+    )
+    StateStore(repo_root=repo_root).write_state(state=state)
     runner = CliRunner()
 
     result = runner.invoke(main, ["coordinator"])

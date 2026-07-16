@@ -379,7 +379,8 @@ workflow role's responsibility, accountable state paths, eval author/runner/
 goal-control roles, task-acceptance owner, terminal-blocker reporting roles,
 and whether the set uses the recursive child interface. This is accountability
 metadata and prompt context, not a filesystem ACL or semantic scheduler gate
-(D8). All built-in templates declare `session_protocol_version: 2`. An older
+(D8). All built-in templates declare `session_protocol_version: 2`; an explicit
+contract that omits the field also selects v2. An older
 custom set without a contract receives a conservative derived protocol-v1 role
 contract and remains executable; add and validate an explicit v2 contract
 before expecting evidence-bound terminal control and child requests.

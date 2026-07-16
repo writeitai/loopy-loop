@@ -862,11 +862,14 @@ def resolve_trace_manifest(*, repo_root: Path, reference: str) -> Path:
     for manifest_path in list_trace_manifests(repo_root=repo_root):
         resolved_manifest = manifest_path.resolve()
         if not resolved_manifest.is_relative_to(root):
-            raise TraceError(
-                "trace manifest resolves outside this repository's trace root: "
-                f"{manifest_path}"
-            )
-        manifest = _read_manifest(path=manifest_path)
+            continue
+        try:
+            manifest = _read_manifest(path=manifest_path)
+        except TraceError:
+            # A trace selected by ID is independent from malformed diagnostic
+            # data elsewhere in the repository. An explicitly selected path
+            # still reports its own malformed manifest above.
+            continue
         if manifest.get("manifest_id") == reference:
             matches.append(resolved_manifest)
     if not matches:

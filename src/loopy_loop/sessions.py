@@ -8,6 +8,7 @@ import tempfile
 import uuid
 
 from loopy_loop.config import LOOPY_DIRNAME
+from loopy_loop.models import SAFE_DURABLE_ID_PATTERN
 from loopy_loop.models import utc_now
 
 SESSIONS_DIRNAME = "sessions"
@@ -437,15 +438,73 @@ def workflow_contract_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def latest_top_level_state_path(*, repo_root: Path) -> Path | None:
+    """Return the newest state owned by a valid top-level session identity.
+
+    The sessions directory can also contain operator backups or incomplete
+    crash debris.  A directory is authoritative only when its manifest binds
+    its safe session ID to the directory name and identifies it as a root.
+    Legacy manifests have no ``schema_version`` or v2 topology fields, so this
+    intentionally relies only on the identity fields present since v1.
+    """
+
     root = sessions_root_path(repo_root=repo_root)
     if not root.exists():
         return None
     candidates = [
         path / STATE_FILENAME
         for path in root.iterdir()
-        if path.is_dir() and (path / STATE_FILENAME).exists()
+        if _is_valid_top_level_session_directory(path=path)
+        and not (path / STATE_FILENAME).is_symlink()
+        and (path / STATE_FILENAME).is_file()
     ]
     return sorted(candidates)[-1] if candidates else None
+
+
+def _is_valid_top_level_session_directory(*, path: Path) -> bool:
+    """Return whether ``path`` carries a valid v1-compatible root identity."""
+
+    if path.is_symlink() or not path.is_dir():
+        return False
+    parent_manifest_path = path / PARENT_FILENAME
+    if parent_manifest_path.exists() or parent_manifest_path.is_symlink():
+        return False
+    manifest_path = path / SESSION_METADATA_FILENAME
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return False
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    session_id = payload.get("session_id")
+    if (
+        not isinstance(session_id, str)
+        or SAFE_DURABLE_ID_PATTERN.fullmatch(session_id) is None
+        or session_id != path.name
+    ):
+        return False
+    schema_version = payload.get("schema_version", 1)
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version < 1
+    ):
+        return False
+    parent_session_id = payload.get("parent_session_id")
+    if parent_session_id is not None:
+        return False
+    root_session_id = payload.get("root_session_id")
+    if root_session_id is not None and root_session_id != session_id:
+        return False
+    depth = payload.get("depth")
+    if depth is not None and (
+        isinstance(depth, bool) or not isinstance(depth, int) or depth != 0
+    ):
+        return False
+    if schema_version >= 2:
+        return root_session_id == session_id and depth == 0
+    return True
 
 
 def latest_state_path(*, repo_root: Path) -> Path | None:

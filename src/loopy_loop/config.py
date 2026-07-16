@@ -657,6 +657,14 @@ def load_workflow_set_contract(
         text = path.read_text(encoding="utf-8")
         try:
             raw = yaml.safe_load(text)
+            if isinstance(raw, dict) and "session_protocol_version" not in raw:
+                # An explicit contract belongs to the current recursive
+                # protocol.  Default it safely here instead of inheriting the
+                # model's legacy-v1 default, which exists only so historical
+                # persisted payloads remain readable.  The no-contract branch
+                # below remains the deliberately derived v1 compatibility
+                # path.
+                raw["session_protocol_version"] = 2
             contract = WorkflowSetContract.model_validate(raw)
         except (yaml.YAMLError, ValidationError) as exc:
             raise ConfigError(
@@ -676,6 +684,7 @@ def load_workflow_set_contract(
         ]
         goal_control_role = eval_candidates[0] if eval_candidates else None
         contract = WorkflowSetContract(
+            session_protocol_version=1,
             layer_kind="legacy_work",
             roles=roles,
             eval=WorkflowEvalContract(

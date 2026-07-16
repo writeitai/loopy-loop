@@ -189,6 +189,28 @@ class TaskResponse(BaseModel):
     workflow_snapshot: WorkflowSnapshotDescriptor | None = Field(default=None)
 
 
+class WorkflowRoleContract(BaseModel):
+    responsibility: str
+
+
+class WorkflowEvalContract(BaseModel):
+    author_role: str | None = None
+    runner_role: str | None = None
+    goal_control_role: str | None = None
+
+
+class WorkflowSetContract(BaseModel):
+    schema_version: int = Field(default=1)
+    session_protocol_version: Literal[1, 2] = 1
+    layer_kind: str = "work"
+    roles: dict[str, WorkflowRoleContract]
+    state: list[dict[str, Any]] = Field(default_factory=list)
+    eval: WorkflowEvalContract = Field(default_factory=WorkflowEvalContract)
+    task_acceptance_role: str | None = None
+    terminal_blocker_reporting_roles: list[str] = Field(default_factory=list)
+    child_interface: Literal["none", "recursive"] = "recursive"
+
+
 class HistoryEntry(BaseModel):
     iteration: int = Field(...)
     workflow_set: str = Field(...)
@@ -249,6 +271,10 @@ class LoopState(BaseModel):
     request_id: str | None = Field(default=None)
     work_item_id: str | None = Field(default=None)
     control_protocol_consecutive_failures: int = Field(default=0, ge=0)
+    # Engine-owned trust root for the complete session role/protocol contract.
+    # Agent-visible session.json and workflow_contract.json are projections;
+    # they cannot replace this durable value between attempts.
+    workflow_contract: WorkflowSetContract | None = Field(default=None)
 
     @field_validator("schema_version")
     @classmethod
@@ -529,28 +555,6 @@ class GoalContract(BaseModel):
     accepted_request_sha256: str | None = None
     inputs: list[ArtifactInputRef] = Field(default_factory=list)
     created_at: datetime
-
-
-class WorkflowRoleContract(BaseModel):
-    responsibility: str
-
-
-class WorkflowEvalContract(BaseModel):
-    author_role: str | None = None
-    runner_role: str | None = None
-    goal_control_role: str | None = None
-
-
-class WorkflowSetContract(BaseModel):
-    schema_version: int = Field(default=1)
-    session_protocol_version: Literal[1, 2] = 1
-    layer_kind: str = "work"
-    roles: dict[str, WorkflowRoleContract]
-    state: list[dict[str, Any]] = Field(default_factory=list)
-    eval: WorkflowEvalContract = Field(default_factory=WorkflowEvalContract)
-    task_acceptance_role: str | None = None
-    terminal_blocker_reporting_roles: list[str] = Field(default_factory=list)
-    child_interface: Literal["none", "recursive"] = "recursive"
 
 
 class EvalSubject(BaseModel):

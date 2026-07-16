@@ -216,6 +216,15 @@ state accountability, eval author/runner/control owners, task-acceptance owner,
 terminal-blocker reporters, and child interface. This describes responsibility
 for prompts and audits; it is not a filesystem permission list.
 
+For a v2 session, the complete selected workflow contract is also stored in
+coordinator-owned `state.json`. The adjacent `workflow_contract.json` and its
+hash in `session.json` are agent-visible projections: the coordinator restores
+them from state before freezing a later attempt if both were rewritten. This
+keeps the protocol and role owners stable across attempts while leaving the
+files inspectable. An explicit `contract.yaml` that omits
+`session_protocol_version` selects v2; only a workflow set with no contract at
+all uses the documented derived-v1 compatibility path.
+
 Before dispatch, the coordinator freezes the selected workflow config, prompt,
 workflow contract, and root execution config beneath that attempt's
 `workflow_snapshot/`, records their hashes, writes the assignment atomically,

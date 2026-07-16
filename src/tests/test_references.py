@@ -164,7 +164,7 @@ def test_rejects_malformed_or_traversing_references(
 
 
 def test_root_session_has_no_parent_scope(tmp_path: Path) -> None:
-    _session(tmp_path, "root")
+    _session(repo=tmp_path, session_id="root")
     resolver = LogicalReferenceResolver.for_session(
         repo_root=tmp_path, session_id="root"
     )
@@ -297,12 +297,14 @@ def test_resolves_only_traces_bound_to_current_tree(tmp_path: Path) -> None:
 def test_corrupt_unrelated_trace_manifest_does_not_poison_healthy_trace(
     tmp_path: Path,
 ) -> None:
+    """Ignore malformed diagnostic data while resolving a healthy trace ID."""
+
     _session(tmp_path, "root")
     traces = tmp_path / ".loopy_loop" / "traces" / "root"
     healthy = traces / "sessions/root/attempts/healthy"
     _write_json(
-        healthy / "trace_manifest.json",
-        {
+        path=healthy / "trace_manifest.json",
+        payload={
             "manifest_id": "trace-healthy",
             "root_session_id": "root",
             "session_id": "root",
@@ -314,9 +316,60 @@ def test_corrupt_unrelated_trace_manifest_does_not_poison_healthy_trace(
 
     resolved = LogicalReferenceResolver.for_session(
         repo_root=tmp_path, session_id="root"
-    ).resolve("trace:trace-healthy:/artifact.json")
+    ).resolve(reference="trace:trace-healthy:/artifact.json")
 
     assert resolved == (healthy / "artifact.json").resolve()
+
+
+def test_duplicate_unrelated_trace_ids_do_not_poison_healthy_trace(
+    tmp_path: Path,
+) -> None:
+    """Defer duplicate-ID rejection until that diagnostic trace is selected."""
+
+    _session(repo=tmp_path, session_id="root")
+    traces = tmp_path / ".loopy_loop" / "traces" / "root"
+    healthy = traces / "sessions/root/attempts/healthy"
+    _write_json(
+        path=healthy / "trace_manifest.json",
+        payload={
+            "manifest_id": "trace-healthy",
+            "root_session_id": "root",
+            "session_id": "root",
+        },
+    )
+    for attempt in ("stray-a", "stray-b"):
+        _write_json(
+            path=traces / "sessions/root/attempts" / attempt / "trace_manifest.json",
+            payload={"manifest_id": "trace-stray"},
+        )
+
+    resolver = LogicalReferenceResolver.for_session(
+        repo_root=tmp_path, session_id="root"
+    )
+
+    assert (
+        resolver.resolve(reference="trace:trace-healthy:/artifact.json")
+        == (healthy / "artifact.json").resolve()
+    )
+
+
+def test_selected_duplicate_minimal_trace_ids_remain_ambiguous(tmp_path: Path) -> None:
+    """Reject a duplicate ID when the caller selects that exact trace."""
+
+    _session(repo=tmp_path, session_id="root")
+    traces = tmp_path / ".loopy_loop" / "traces" / "root"
+    for attempt in ("stray-a", "stray-b"):
+        _write_json(
+            path=traces / "sessions/root/attempts" / attempt / "trace_manifest.json",
+            payload={"manifest_id": "trace-stray"},
+        )
+
+    resolver = LogicalReferenceResolver.for_session(
+        repo_root=tmp_path, session_id="root"
+    )
+
+    with pytest.raises(LogicalReferenceError, match="duplicate trace"):
+        resolver.resolve(reference="trace:trace-stray:/artifact.json")
 
 
 def test_trace_manifest_nested_identity_is_honored(tmp_path: Path) -> None:
@@ -347,22 +400,41 @@ def test_trace_manifest_nested_identity_is_honored(tmp_path: Path) -> None:
 
 
 def test_rejects_duplicate_trace_manifest_ids(tmp_path: Path) -> None:
-    _session(tmp_path, "root")
+    """Reject duplicate canonical IDs within the selected session tree."""
+
+    root = _session(repo=tmp_path, session_id="root")
+    _session(
+        repo=tmp_path,
+        session_id="child",
+        parent=root,
+        parent_id="root",
+        root_id="root",
+        depth=1,
+    )
     traces = tmp_path / ".loopy_loop" / "traces" / "root"
-    for attempt in ("a", "b"):
+    for session_id in ("root", "child"):
         _write_json(
-            traces / "sessions/root/attempts" / attempt / "trace_manifest.json",
-            {
-                "trace_manifest_id": "same-trace",
-                "root_session_id": "root",
-                "session_id": "root",
+            path=traces
+            / "sessions"
+            / session_id
+            / "attempts/shared"
+            / "trace_manifest.json",
+            payload={
+                "schema_version": 1,
+                "manifest_id": "trace-shared",
+                "lifecycle": "active",
+                "identity": {
+                    "root_session_id": "root",
+                    "session_id": session_id,
+                    "attempt_id": "shared",
+                },
             },
         )
 
     with pytest.raises(LogicalReferenceError, match="duplicate trace"):
         LogicalReferenceResolver.for_session(
-            repo_root=tmp_path, session_id="root"
-        ).resolve("trace:same-trace:/artifact.json")
+            repo_root=tmp_path, session_id="child"
+        ).resolve(reference="trace:trace-shared:/artifact.json")
 
 
 def test_supplied_trace_root_must_be_in_current_root_tree(tmp_path: Path) -> None:
