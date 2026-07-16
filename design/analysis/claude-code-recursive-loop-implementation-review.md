@@ -1,131 +1,86 @@
 # Claude Code implementation review: recursive loop contract
 
 **Reviewer:** Claude Code, Opus 4.8
+
 **Date:** 2026-07-16
-**Reviewed repositories:** loopy-loop 0.7.0, team-harness 0.5.0, and eval-banana
-0.3.2 feature branches
-**Scope:** adversarial review of uncommitted diffs against each repository's main
-branch and conformance with D1-D12
-**Status:** **historical moving-tree review; a new final review is pending**
 
-This file does not certify the current implementation. The reviewer observed active
-edits throughout the run, test results changed repeatedly, and at least one finding was
-fixed while it was being written. Subsequent scope cleanup also removed the generic
-credential-redaction pipeline and local trace export/prune subsystem. Findings about
-those deleted mechanisms are retained only in the superseded section below.
+**Verdict:** **PASS for merge readiness after support-package publication**
 
-## Historical verdict
+## Settled implementation revisions
 
-**Not ready to merge at the observed snapshot.** Claude considered the recursive
-architecture sound and several difficult mechanisms correct, but could not issue a
-final verdict against a moving, red tree. Its release verdict was conditional on:
+- loopy-loop: `57ffa30b0db5d130313446bad0141cee530f7387`
+- team-harness: `217351f3dec830441e74e02b1c196e106e253753`
+- eval-banana: `c979f70fedd0e9ebc02f4b8e33cd3868d52b6c37`
 
-1. quiescing all three worktrees;
-2. fixing or adjudicating the live blockers;
-3. publishing/otherwise resolving the required support-package versions and lockfile;
-4. running formatting, lint, types, and full tests in all three repositories; and
-5. repeating the adversarial review against that exact settled tree.
+Claude performed an adversarial review of the complete implementation, reproduced
+critical paths with real processes and files, and then performed a focused re-review of
+the final team-harness shutdown-grace correction. Both reviews were read-only. The
+second review returned PASS and found no blocker.
 
-Those conditions must be checked afresh after the current scope reduction. This note
-does not claim which historical findings remain live.
+## Blocking findings and their disposition
 
-## Severity-ordered findings at the reviewed snapshot
+| Finding | Final disposition |
+| --- | --- |
+| A scratch or copied top-level state directory could hijack root discovery. | Fixed. Root discovery requires a structurally valid, non-symlinked root manifest whose identity matches the directory. Genuine legacy v1 roots remain readable. |
+| Unrelated malformed or duplicate trace IDs could poison a healthy referenced trace. | Fixed. Resolution filters for the requested identity first; a duplicate of the selected valid identity still fails. |
+| An explicit workflow contract without a protocol field could silently derive v1. | Fixed. An explicit contract defaults to v2; only the no-contract compatibility path derives v1. |
+| Rewriting agent-visible session and workflow projections between attempts could downgrade trust. | Fixed. The complete v2 workflow contract is persisted in engine state, restored into projections, and frozen per attempt for live and recovery completion. |
+| A process-probe failure plus a SIGTERM-ignoring worker could leave team-harness finalization pending forever. | Fixed. Shutdown and retained lifecycle work are bounded, trusted process groups receive probe-independent SIGKILL when required, tasks settle before `asyncio.run()` returns, and both snapshots retain structured timeout evidence. |
+| `check_definition_sha256` did not bind the bytes behind deterministic `script_path`. | Fixed. The digest covers exact YAML and frozen referenced-script bytes, and execution uses those same bytes while preserving the logical script path, imports, argv, and adjacent assets. |
+| Finalization evidence stored only an exception class because of a redaction rationale. | Fixed. Caller-owned raw traces retain the exact lifecycle exception message; no generic credential detector or sanitizer was introduced. |
 
-### Release blockers
+## Final lifecycle correction
 
-| Finding | Observed consequence | Recommended disposition |
-| --- | --- | --- |
-| The loopy dependency floors referenced unpublished team-harness 0.5.0 and eval-banana 0.3.2 while `uv.lock` still described older published releases. | CI dependency resolution failed before tests. Local editable siblings hid the problem. | Merge/publish support packages first (or use an atomic supported mechanism), regenerate/check the lock, then test the install path CI uses. |
-| The branch changed throughout review and its loopy suite was red at every final observation. | File hashes and line numbers became stale; no review result represented a release candidate. | Freeze the tree and rerun every gate and reviewer. |
+The first bounded-finalization fix used equal inner and outer shutdown timers. Claude
+showed that the outer timer therefore won before a worker received its intended
+SIGTERM grace period. The final team-harness revision gives the inner natural-exit
+period one named SIGTERM grace interval before the outer hard bound. A real-process
+regression proves a responsive worker receives SIGTERM and exits normally; the
+probe-failure and TERM-ignoring cases still take the bounded SIGKILL path. Claude's
+micro-review of this correction returned PASS.
 
-### High
+## Contract checks confirmed
 
-| ID | Finding at that snapshot | Contract concern |
-| --- | --- | --- |
-| H1 | An untracked nested git repository appeared as a trailing-slash directory and caused pre-harness git evidence validation to fail forever. | D8 requires a visible repair path; the agent never ran to repair it. |
-| H2 | The v2 control-protocol failure counter was reset by the engine's own running placeholder. | Repeated malformed control could avoid the intended bound. |
-| H3 | A historical passing eval receipt could close a later git state; producer role was self-declared. | Layer completion was not bound tightly enough to the state being closed. |
-| H4 | v2 control validation re-read a missing workflow contract through a non-fallback reader. | A legacy parent could wedge `/finished` with HTTP 500, including D5 blocker control. |
-| H5 | No real integration test exercised capability parity and caller-owned `run.json` across loopy and team-harness. | A support-package rename could silently make usage unknown and disable budget stopping. |
-| H6 | Re-entrant `FileLock` acquisition was reachable in child budget accounting and torn-transition recovery. | A child could repeatedly time out instead of advancing. |
-| H7 | Dirty submodule content could keep the same digest because the implementation hashed only the directory fact. | Git evidence overstated what it bound. |
-| H8 | Frozen child inputs were revalidated before every attempt, but drift caused a pre-harness permanent failure. | Detection became a preventive fence with no agent-visible repair path. |
+Claude also confirmed:
 
-### Medium
+- recursive dispatch and iterative unwind through three depths;
+- D5 identity-bound `goal_met` and `unresolvable_error` control, with no pause state;
+- layer-local eval ownership and receipt binding to session, goal, workflow, attempt,
+  check definitions, judge settings, and evaluated Git state;
+- team-harness `assignment_path` as the spawned actor's envelope and
+  `parent_assignment_path` as the direct enclosing assignment at every nesting depth;
+- raw, gitignored, attempt-owned trace capture separated from correctness state;
+- docstrings on every diff-touched production function and named arguments for
+  meaningful project-owned calls; and
+- absence of credential scanning/redaction, trace export/pruning/cloud transport,
+  deterministic stock evals, parallel loopy workers, fixed agent graphs, human pause
+  states, and preventive path fences.
 
-| ID | Finding at that snapshot | Recommendation |
-| --- | --- | --- |
-| M1 | Crash-abandoned attempts remained active rather than being finalized incomplete. | Finalize abandonment honestly without inventing missing output. |
-| M2 | Eval-channel completeness was inferred from directory non-emptiness. | Mark provider/channel availability explicitly; do not guess. |
-| M3 | Malformed eval-readiness JSON failed before the harness on every role. | Surface it as repairable context instead of bricking the session. |
-| M4 | One corrupt unrelated session could break reference resolution for a healthy tree. | Scope resolution to the validated root/session topology. |
-| M5 | The negotiated completion fence was stored only in process memory and could downgrade after restart. | Persist the negotiated protocol/fence with durable assignment state. |
-| M6 | Loopy pinned an eval model different from eval-banana's newer default. | Make the choice deliberate and auditable; do not rely on ambient defaults. |
+The final validation evidence was 380 passing loopy-loop tests, 522 passing
+team-harness tests, and 131 passing eval-banana tests, with Ruff formatting/lint and
+Pyright clean. team-harness's two ANSI assertions require `NO_COLOR` to be unset and a
+color-capable `TERM`; this pre-existing environment requirement is unrelated to the
+feature.
 
-### Low suggestions
+## Non-blocking observations and adjudication
 
-- Verify every frozen snapshot field that is claimed to be binding, or remove unused
-  hashes.
-- Attribute protocol failures to the coordinator's current task rather than only to
-  an untrusted producer field.
-- Define whether an eval receipt must cover every authored check or an explicit subset.
-- Keep design text synchronized with the actually observable `/finished` exchange.
+- `load_workflow_set_contract()` still exposes unused raw contract text that does not
+  contain the injected v2 default. The running trust path uses the validated contract
+  object, and the text has no consumer. This is not a current downgrade path; it must be
+  serialized from the validated object before any future consumer relies on it.
+- Goal-check rejection could expose more field-qualified repair detail, and the loopy
+  eval report reader could explicitly gate the report schema version. Both fail closed
+  today and were not expanded into this already large contract change.
+- Recursion has no numeric maximum depth by design. Workflow child interfaces and
+  optional tree-wide cost limits bound useful work without adding a D8 scheduling
+  fence.
 
-## Mechanisms the review found sound
+These observations are not merge blockers and do not justify reintroducing removed
+peripheral subsystems.
 
-These positive findings are historical but useful regression targets:
+## Release disposition
 
-- traversal-safe logical reference resolution and symlink containment;
-- frozen workflow definitions verified before harness execution;
-- explicit absolute assignment paths and parent assignment propagation;
-- current-attempt and pending-result fencing by `attempt_id`;
-- persistence-layer rejection of task-plus-child and terminal-plus-inflight states;
-- bounded corrupt-child-ledger refusal rather than silently rebuilding an empty ledger;
-- iterative multi-level unwind and process recovery planned outside the transition
-  lock in the paths the reviewer checked;
-- mechanical iteration success semantics (D3), one loopy worker (D2), stock
-  LLM-as-judge authoring (D4), no semantic scheduler gate (D8), uniform model tiers
-  (D9), and layer-local goal control (D11);
-- eval receipt checks for identity, goal, git subject, artifact hashes, report pass
-  threshold, check IDs, and judge identity.
-
-These checks should be preserved where the simplified implementation still claims the
-same behavior. They are not proof that the current code still has it.
-
-## Superseded findings and removed scope
-
-The reviewed branch contained a broad credential detector, capture-time stream
-redaction, trace export/outbox, pruning, and associated seal policies. That subsystem
-was later removed as unrelated to the core recursive contract.
-
-Accordingly, the following historical review material is **not a current finding**:
-
-- extension-sensitive redaction failures and signed/CLI credential patterns;
-- whether abandoned traces could be sanitized, exported, or pruned;
-- export drift refusal, export outbox idempotency, and prune retention;
-- claims that a sealed trace is sanitized or safe to upload;
-- permission-hardening recommendations tied to redacted export artifacts.
-
-The retained scope is raw, gitignored local observable capture and whatever integrity
-boundary the current binding design still specifies. Export, pruning, cloud transport,
-and generic credential spotting require a separate future design and review.
-
-## Recommendations carried forward
-
-1. Review only a quiescent tree and record the exact revisions of all three repos.
-2. Exercise the real cross-repository caller contract, not hand-written capability and
-   `run.json` fixtures alone.
-3. Ensure every pre-harness validation has an autonomous, agent-visible repair path or
-   is limited to genuine identity/integrity failure.
-4. Bind `goal_met` to the current frozen workflow contract, current attempt, and current
-   evaluated git subject.
-5. Persist negotiated protocol state across coordinator restart.
-6. Validate nested git/submodule behavior according to the documented digest limits;
-   do not overstate Git evidence as a complete security boundary.
-7. Run the support-package release/lock sequence before declaring the loopy PR ready.
-
-## New final review required
-
-No final post-cleanup Claude verdict is recorded here. Once the feature is scoped,
-green, committed, and dependency-installable, rerun Claude Code against those exact
-revisions and replace this pending status only with the reviewer’s actual result.
+Code readiness is separate from package availability. Merge and publish eval-banana
+0.3.2 and team-harness 0.5.0 first, refresh loopy-loop's dependency lock against those
+published releases, run loopy-loop's normal install-path CI, and only then merge or
+publish loopy-loop 0.7.0. Editable sibling checkouts are only the development bridge.

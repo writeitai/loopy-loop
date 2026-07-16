@@ -561,6 +561,16 @@ The three repositories test the boundary they own:
 The coordinated release gate is formatting, lint, type checking, and the full
 test suite in all three repositories.
 
+## Independent implementation review
+
+Claude Code and Antigravity independently reviewed the settled implementation and the
+final bounded-shutdown follow-up. Both returned PASS with no remaining blocker. Their
+evidence and adjudicated suggestions are recorded in the
+[Claude Code review](../analysis/claude-code-recursive-loop-implementation-review.md)
+and [Antigravity review](../analysis/antigravity-recursive-loop-implementation-review.md).
+This establishes code readiness; it does not bypass the support-package publication,
+lock refresh, and install-path CI sequence above.
+
 ## Alternatives rejected
 
 **Fixed subagent graphs.** The coordinator sees the live problem and should
