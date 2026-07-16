@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from typing import Any
 
 from click.testing import CliRunner
 
 from loopy_loop.cli import main
+from loopy_loop.sessions import create_session_dir
 from loopy_loop.state_store import StateStore
+from tests.protocol_helpers import v2_finished_body
+from tests.protocol_helpers import v2_register_body
 
 
 def test_init_scaffolds_expected_files(repo_root: Any, monkeypatch: Any) -> None:
@@ -18,9 +22,14 @@ def test_init_scaffolds_expected_files(repo_root: Any, monkeypatch: Any) -> None
     assert result.exit_code == 0
     assert repo_root.joinpath("loopy_loop_config.yaml").exists()
     assert repo_root.joinpath("loopy_loop_goal.txt").exists()
-    assert repo_root.joinpath(
+    default_goal_check = repo_root.joinpath(
         ".loopy_loop/workflow_sets/main/workflows/goal_check/prompt.txt"
-    ).exists()
+    )
+    assert default_goal_check.exists()
+    default_prompt = default_goal_check.read_text(encoding="utf-8")
+    assert "eval-banana run --no-project-config" in default_prompt
+    assert "trace:<trace_manifest_id>:/eval/report.json" in default_prompt
+    assert "loopy capture-git-receipt" in default_prompt
     root_config = repo_root.joinpath("loopy_loop_config.yaml").read_text(
         encoding="utf-8"
     )
@@ -112,10 +121,13 @@ def test_init_inner_outer_eval_template_scaffolds_expected_files(
     assert repo_root.joinpath(
         ".loopy_loop/workflow_sets/inner_outer_eval/workflows/outer/prompt.txt"
     ).exists()
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/inner_outer_eval/contract.yaml"
+    ).exists()
     assert not repo_root.joinpath(
         ".loopy_loop/workflow_sets/main/workflows/goal_check/prompt.txt"
     ).exists()
-    assert "You are the outer loop for this loopy-loop session." in repo_root.joinpath(
+    assert "harness coordinator for the `outer` workflow role" in repo_root.joinpath(
         ".loopy_loop/workflow_sets/inner_outer_eval/workflows/outer/prompt.txt"
     ).read_text(encoding="utf-8")
     assert 'gemini: "gemini-3.5-flash"' in repo_root.joinpath(
@@ -188,10 +200,19 @@ def test_init_pm_planner_dispatcher_template_scaffolds_expected_files(
     assert repo_root.joinpath(
         ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/dispatcher/prompt.txt"
     ).exists()
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/eval_reviewer/prompt.txt"
+    ).exists()
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/eval_runner/prompt.txt"
+    ).exists()
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/contract.yaml"
+    ).exists()
     assert "workflow_set: pm_planner_dispatcher" in repo_root.joinpath(
         "loopy_loop_config.yaml"
     ).read_text(encoding="utf-8")
-    assert "Child request schema:" in repo_root.joinpath(
+    assert '"schema_version": 2' in repo_root.joinpath(
         ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/dispatcher/prompt.txt"
     ).read_text(encoding="utf-8")
 
@@ -212,7 +233,14 @@ def test_status_and_stop_commands(
     repo_root = repo_builder()
     monkeypatch.chdir(repo_root)
     store = StateStore(repo_root=repo_root)
-    store.write_state(state=state_factory())
+    state = state_factory()
+    create_session_dir(
+        repo_root=repo_root,
+        session_id=state.active_session_id,
+        goal_hash=state.goal_hash,
+        workflow_set=state.workflow_set,
+    )
+    store.write_state(state=state)
     runner = CliRunner()
 
     status_result = runner.invoke(main, ["status"])
@@ -259,6 +287,9 @@ def test_init_pm_template_ships_the_child_workflow_set(
         config = prompt.with_name("config.yaml")
         assert prompt.exists(), f"missing child workflow prompt: {workflow_id}"
         assert config.exists(), f"missing child workflow config: {workflow_id}"
+    assert tmp_path.joinpath(
+        ".loopy_loop/workflow_sets/inner_outer_eval/contract.yaml"
+    ).exists()
 
 
 def test_clean_pm_init_can_dispatch_an_inner_outer_eval_child(
@@ -274,15 +305,13 @@ def test_clean_pm_init_can_dispatch_an_inner_outer_eval_child(
     from loopy_loop.sessions import child_requests_dir_path
 
     monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     runner = CliRunner()
     result = runner.invoke(main, ["init", "--template", "pm_planner_dispatcher"])
     assert result.exit_code == 0, result.output
 
-    register_body = {
-        "worker": {"hostname": "test-host", "pid": 999983, "starttime": None}
-    }
     client = TestClient(create_coordinator_app(repo_root=tmp_path, resume=False))
-    parent_task = client.post("/register", json=register_body).json()
+    parent_task = client.post("/register", json=v2_register_body(tmp_path)).json()
     assert parent_task["action"] == "run"
     assert parent_task["workflow_set"] == "pm_planner_dispatcher"
 
@@ -293,24 +322,32 @@ def test_clean_pm_init_can_dispatch_an_inner_outer_eval_child(
     request_dir.joinpath("wp.json").write_text(
         json_module.dumps(
             {
+                "schema_version": 2,
+                "request_id": "wp",
                 "workflow_set": "inner_outer_eval",
-                "goal": "Implement the selected planner item.",
-                "schema_version": 1,
+                "origin": {
+                    "parent_attempt_id": parent_task["attempt_id"],
+                    "parent_work_item_id": "wp",
+                    "supersedes_request_id": None,
+                },
+                "assignment": {
+                    "goal": "Implement the selected planner item.",
+                    "completion_criteria": [],
+                    "stop_criteria": [],
+                    "constraints": [],
+                    "deliverables": [],
+                    "required_evidence": [],
+                },
+                "inputs": [],
             }
         ),
         encoding="utf-8",
     )
     child_task = client.post(
         "/finished",
-        json={
-            "workflow_id": parent_task["workflow_id"],
-            "session_id": parent_task["session_id"],
-            "iteration": parent_task["iteration"],
-            "success": True,
-            "text": "planner selected an item",
-            "worker": register_body["worker"],
-            "attempt_id": parent_task["attempt_id"],
-        },
+        json=v2_finished_body(
+            parent_task, success=True, text="planner selected an item"
+        ),
     ).json()
     assert child_task["action"] == "run"
     assert child_task["workflow_set"] == "inner_outer_eval"

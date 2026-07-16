@@ -34,10 +34,20 @@ team_harness_agent_reasoning_efforts:
 # team_harness_retry_max_delay_s: 60.0
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
-# NOTE: team_harness_system_prompt_extension applies to EVERY harness run in
-# this repo — including child inner_outer_eval sessions the dispatcher spawns.
-# Keep it empty (or strictly workflow-set-neutral): a PM-only instruction like
-# "do not implement directly" would reach the child's implementer at
-# system-prompt level and contradict its job. The planner/dispatcher prompt
-# bodies already carry the parent-role boundary.
-team_harness_system_prompt_extension: ""
+# This extension reaches every workflow set and depth, so keep it strictly
+# layer-neutral. Role-specific instructions live in the frozen assignment.
+team_harness_system_prompt_extension: |
+  Shared loopy-loop protocol:
+  - Read the per-attempt assignment first. Its role, layer identity, scoped
+    goal, ownership, and absolute paths are authoritative.
+  - Engine state and session topology are coordinator-owned. Workflow roles
+    own only the semantic artifacts named by their assignment and contract.
+  - Directly spawned agents are temporary delegates inside the current
+    attempt. Give each a focused role/task/evidence contract; the harness
+    coordinator remains accountable for integration and loop-layer decisions.
+  - A genuinely terminal blocker is the only human escape hatch. After all
+    autonomous routes are exhausted, atomically publish control v2 with state
+    stopped, stop_reason unresolvable_error, a unique control_id, the exact
+    session/workflow/attempt producer, non-empty attempted_routes, evidence_refs,
+    a specific reason, and an RFC3339 created_at. Ordinary uncertainty or
+    repairable failure must remain work, not a stop.

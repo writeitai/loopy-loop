@@ -6,10 +6,10 @@ running, spending money and writing to the checkout. team-harness owns the
 mechanism (persisted process identity + drain/reap policies, TH-D5); this module
 is the loopy-side trigger:
 
-1. **Discover** the interrupted harness run(s): team-harness routes each run's
-   session output under the iteration's ``harness_outputs`` directory, named by
-   run id, so the run ids are the directory names — and each run's crash-durable
-   ``run.json`` lives under team-harness's runs dir.
+1. **Discover** the interrupted harness run(s): new caller-contract runs return
+   and retain their canonical ``run.json`` below the attempt trace; legacy runs
+   are still found through the iteration's ``harness_outputs`` directory and
+   team-harness's historical global runs directory.
 2. **Apply the recovery policy** via ``team_harness.tracking.reaper.reap_run``:
    ``drain`` (default — let in-flight agents finish within a shared bounded
    timeout, preserving near-complete work and a clean tree) or ``reap`` (kill).
@@ -41,6 +41,7 @@ from typing import Any
 from loopy_loop.models import utc_now
 from loopy_loop.sessions import iteration_dir_path
 from loopy_loop.sessions import iteration_harness_output_root
+from loopy_loop.sessions import traces_root_path
 from loopy_loop.sessions import write_json_atomic
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,7 @@ def recover_interrupted_iteration(
     workflow_id: str,
     policy: str,
     drain_timeout_s: float,
+    attempt_id: str | None = None,
 ) -> RecoveryOutcome:
     """Drain/reap the interrupted iteration's orphaned agents; write salvage.json.
 
@@ -151,13 +153,23 @@ def recover_interrupted_iteration(
     # timeout bounds the whole recovery, not each run separately.
     deadline = time.monotonic() + drain_timeout_s
     try:
-        for run_id in _discover_run_ids(output_root):
-            run_json = Path(th_config.RUNS_DIR) / run_id / "run.json"
+        for run_id, run_json, contract_kind in _discover_run_records(
+            output_root=output_root,
+            traces_root=traces_root_path(repo_root=repo_root),
+            session_id=session_id,
+            attempt_id=attempt_id,
+            legacy_runs_root=Path(th_config.RUNS_DIR),
+        ):
             if not run_json.exists():
                 logger.warning("no run.json for interrupted harness run %s", run_id)
                 continue
             if not _run_record_matches(
-                run_json=run_json, output_root=output_root, run_id=run_id
+                run_json=run_json,
+                output_root=output_root,
+                run_id=run_id,
+                session_id=session_id,
+                attempt_id=attempt_id,
+                contract_kind=contract_kind,
             ):
                 logger.warning(
                     "run.json for %s does not reference this iteration's "
@@ -205,7 +217,15 @@ def recover_interrupted_iteration(
     return outcome
 
 
-def _run_record_matches(*, run_json: Path, output_root: Path, run_id: str) -> bool:
+def _run_record_matches(
+    *,
+    run_json: Path,
+    output_root: Path,
+    run_id: str,
+    session_id: str | None = None,
+    attempt_id: str | None = None,
+    contract_kind: str = "legacy",
+) -> bool:
     """Guard against stray directory names: the run record must point back at
     this iteration's output directory before we act on it."""
     try:
@@ -214,6 +234,17 @@ def _run_record_matches(*, run_json: Path, output_root: Path, run_id: str) -> bo
         return False
     if payload.get("run_id") != run_id:
         return False
+    caller_context = payload.get("caller_context")
+    if contract_kind == "caller":
+        if not isinstance(caller_context, dict):
+            return False
+        if caller_context.get("session_id") != session_id:
+            return False
+        if attempt_id is not None and (
+            caller_context.get("parent_attempt_id") != attempt_id
+        ):
+            return False
+        return True
     recorded = payload.get("session_output_dir")
     if recorded is None:
         # Older team-harness run records don't carry it; fall back to the
@@ -227,6 +258,35 @@ def _discover_run_ids(output_root: Path) -> list[str]:
     if not output_root.is_dir():
         return []
     return sorted(entry.name for entry in output_root.iterdir() if entry.is_dir())
+
+
+def _discover_run_records(
+    *,
+    output_root: Path,
+    traces_root: Path,
+    session_id: str,
+    attempt_id: str | None,
+    legacy_runs_root: Path,
+) -> list[tuple[str, Path, str]]:
+    """Return explicit caller records first, then non-duplicate legacy records."""
+    records: list[tuple[str, Path, str]] = []
+    seen: set[Path] = set()
+    if attempt_id and traces_root.is_dir():
+        pattern = f"*/sessions/{session_id}/attempts/{attempt_id}/harness/*/run.json"
+        for path in sorted(traces_root.glob(pattern)):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            records.append((path.parent.name, path, "caller"))
+    for run_id in _discover_run_ids(output_root):
+        path = legacy_runs_root / run_id / "run.json"
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        records.append((run_id, path, "legacy"))
+    return records
 
 
 def _write_salvage_record(

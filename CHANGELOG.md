@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.0
+
+- Added the recursive v2 session-layer contract: immutable scoped goals and
+  workflow snapshots, typed child requests/outcomes, evidence-bound eval and
+  control, absolute per-actor assignments, three-depth session execution,
+  append-only user inputs, tree-wide stop/usage projections, and strict
+  repository/worker capability negotiation.
+- Added independently ignored, raw per-attempt traces with canonical
+  team-harness run paths, spawn assignment envelopes, git boundary receipts,
+  sealed manifests, inspection/pruning commands, and an idempotent export
+  outbox.
+- Updated the stock delivery and PM workflow sets so dynamic coordinators keep
+  freedom over their teams while eval roles own each layer's semantic closure.
+  Requires team-harness 0.5.0 and eval-banana 0.3.2.
+
 ## 0.6.0
 
 - **Named model tiers (`model_tiers` + `default_tier`).** The root config can

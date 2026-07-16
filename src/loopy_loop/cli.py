@@ -5,6 +5,7 @@ from importlib.resources.abc import Traversable
 import json
 from pathlib import Path
 import time
+import uuid
 
 import click
 from filelock import Timeout as FileLockTimeout
@@ -21,9 +22,24 @@ from loopy_loop.coordinator_app import create_coordinator_app
 from loopy_loop.coordinator_app import session_tree_usage_totals
 from loopy_loop.events import events_path
 from loopy_loop.events import read_events
+from loopy_loop.git_evidence import capture_git_evidence
 from loopy_loop.models import LoopState
+from loopy_loop.models import utc_now
+from loopy_loop.sessions import append_jsonl_record
+from loopy_loop.sessions import session_dir_path
+from loopy_loop.sessions import SESSION_METADATA_FILENAME
 from loopy_loop.sessions import state_path
+from loopy_loop.sessions import user_updates_journal_path
+from loopy_loop.sessions import write_json_atomic
 from loopy_loop.state_store import StateStore
+from loopy_loop.tracing import enqueue_trace_export
+from loopy_loop.tracing import export_trace_to_directory
+from loopy_loop.tracing import list_trace_manifests
+from loopy_loop.tracing import prune_trace
+from loopy_loop.tracing import read_trace_manifest
+from loopy_loop.tracing import resolve_trace_manifest
+from loopy_loop.tracing import TraceError
+from loopy_loop.tracing import verify_trace_integrity
 from loopy_loop.worker import run_worker_loop
 
 GOAL_CHECK_WORKFLOW_ID = "goal_check"
@@ -36,6 +52,7 @@ PACKAGED_TEMPLATE_FILES_BY_NAME = {
         ".gitignore",
         ROOT_CONFIG_FILENAME,
         DEFAULT_GOAL_FILENAME,
+        ".loopy_loop/workflow_sets/inner_outer_eval/contract.yaml",
         ".loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_reviewer/config.yaml",
         ".loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_reviewer/prompt.txt",
         ".loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_runner/config.yaml",
@@ -49,6 +66,11 @@ PACKAGED_TEMPLATE_FILES_BY_NAME = {
         ".gitignore",
         ROOT_CONFIG_FILENAME,
         DEFAULT_GOAL_FILENAME,
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/contract.yaml",
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/eval_reviewer/config.yaml",
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/eval_reviewer/prompt.txt",
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/eval_runner/config.yaml",
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/eval_runner/prompt.txt",
         ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/planner/config.yaml",
         ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/planner/prompt.txt",
         ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/dispatcher/config.yaml",
@@ -70,7 +92,16 @@ PACKAGED_TEMPLATE_EXTRA_SOURCES: dict[str, list[tuple[str, str]]] = {
     ]
 }
 PACKAGED_TEMPLATE_NAMES = list(PACKAGED_TEMPLATE_FILES_BY_NAME)
-GITIGNORE_LINES = [".loopy_loop/sessions/"]
+GITIGNORE_LINES = [
+    ".loopy_loop/sessions/",
+    ".loopy_loop/traces/",
+    ".loopy_loop/trace_export_outbox/",
+    ".loopy_loop/trace_finalization_outbox/",
+    ".loopy_loop/repository.json",
+    ".loopy_loop/state.json",
+    ".loopy_loop/state.json.lock",
+    ".loopy_loop/state.json.archive_*.json",
+]
 ROOT_CONFIG_TEMPLATE = f"""goal_file: "{DEFAULT_GOAL_FILENAME}"
 workflow_set: "{MAIN_WORKFLOW_SET_NAME}"
 max_turns: 20
@@ -100,30 +131,98 @@ run_every: 1
 must_follow: null
 not_before_iteration: 1
 description: "Evaluate whether the loop goal is already satisfied."
+emits_goal_check: true
 """
-GOAL_CHECK_PROMPT_TEMPLATE = """Evaluate whether the repo now satisfies the loopy-loop goal.
+DEFAULT_WORKFLOW_CONTRACT_TEMPLATE = """schema_version: 1
+session_protocol_version: 2
+layer_kind: work
+roles:
+  goal_check:
+    responsibility: Author and run the layer-scoped LLM judgment, publish its receipt, and own goal-met control.
+state:
+  - path: eval_checks/
+    accountable_roles: [goal_check]
+  - path: eval_receipts/
+    accountable_roles: [goal_check]
+eval:
+  author_role: goal_check
+  runner_role: goal_check
+  goal_control_role: goal_check
+terminal_blocker_reporting_roles: [goal_check]
+child_interface: recursive
+"""
+GOAL_CHECK_PROMPT_TEMPLATE = """Evaluate whether this session's scoped goal is satisfied.
 
-Write exactly one JSON file to the provided goal_check.json output path using:
-{
-  "goal_met": false,
-  "reason": "brief explanation",
-  "schema_version": 1
-}
+Read the authoritative Assignment envelope and use only its absolute paths.
+Confirm its root/session/goal/producer identity and the exact `repo_root`,
+`goal_contract`, `eval_checks`, `eval_receipts`, `raw_eval_output`,
+`git_receipts`, `control`, `trace_root`, and goal_check.json paths. Never
+substitute an ancestor goal or rediscover state by searching the checkout.
 
-If and only if goal_met is true, update the Session control path to stop the
-loop using:
-{
-  "state": "stopped",
-  "reason": "goal_check verified the loop goal is satisfied",
-  "stop_reason": "goal_met",
-  "schema_version": 1
-}
+Maintain at least one outcome-oriented `harness_judge` YAML check in the exact
+eval_checks directory. Use only eval-banana fields `schema_version`, `id`,
+`type`, `description`, optional `tags`, `instructions`, and optional `model`.
+Do not create deterministic or implementation-prescriptive stock checks.
+
+Run the hermetic evaluation from the absolute repository root:
+
+```text
+eval-banana validate --no-project-config --cwd <repo_root> --check-dir <eval_checks> --harness-agent codex
+eval-banana run --no-project-config --flat-output --cwd <repo_root> --check-dir <eval_checks> --output-dir <raw_eval_output> --pass-threshold 1.0 --harness-agent codex --harness-model gpt-5.5 --harness-reasoning-effort high
+loopy capture-git-receipt --repo-root <repo_root> --attempt-id <attempt_id> --output <git_receipts>/git-after-<attempt_id>.json
+```
+
+Missing tools/checks, validation or runner errors, and any failed check are a
+false verdict, not permission to invent evidence. Read the generated
+`<raw_eval_output>/report.json`; verify threshold 1.0, every declared check,
+each `check_definition_sha256`, status, and each result's observed agent/model.
+Use the required parent harness run id from the automatic harness context.
+Read the generated git-after
+receipt. Atomically write a concise canonical report and EvalReceipt v1 under
+eval_receipts. The receipt must bind the exact assignment subject/producer and
+parent harness run,
+nonempty check inventory, full check hashes, observed judge provider/model,
+per-check results, canonical report hash, git `head` and `dirty_tree_digest`,
+and exactly one hashed raw ref:
+`trace:<trace_manifest_id>:/eval/report.json`.
+
+Then atomically write goal_check.json v2 at the exact output path. Its verdict
+and reason must exactly match the receipt and cite
+`session:/eval_receipts/<eval-id>.json`. Only for a true verdict, atomically
+write control v2 at the assignment control path with the exact producer,
+nonblank reason, `stop_reason: goal_met`, the same receipt ref, and timestamp.
+A false verdict leaves control running and records the next repair action.
+
+Use `unresolvable_error` only for a genuinely terminal blocker after recording
+specific nonblank attempted autonomous routes and evidence; ordinary failed
+evaluation is repair work.
 """
 
 
 @click.group()
 def main() -> None:
     """loopy-loop CLI."""
+
+
+@main.command("capture-git-receipt", hidden=True)
+@click.option(
+    "--repo-root",
+    type=click.Path(path_type=Path, file_okay=False, resolve_path=True),
+    required=True,
+)
+@click.option("--attempt-id", required=True)
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path, dir_okay=False, resolve_path=True),
+    required=True,
+)
+def capture_git_receipt(repo_root: Path, attempt_id: str, output: Path) -> None:
+    """Capture the canonical after-boundary facts used by eval receipts."""
+    receipt = capture_git_evidence(
+        repo_root=repo_root, phase="after", attempt_id=attempt_id
+    )
+    write_json_atomic(path=output, payload=receipt.to_dict())
+    click.echo(str(output))
 
 
 @main.command()
@@ -163,10 +262,17 @@ def _init_default_template(*, repo_root: Path) -> list[str]:
         / "workflows"
         / GOAL_CHECK_WORKFLOW_ID
     )
+    workflow_set_dir = workflow_dir.parent.parent
     loopy_dir.mkdir(parents=True, exist_ok=True)
     workflow_dir.mkdir(parents=True, exist_ok=True)
 
     created: list[str] = []
+    created.extend(
+        _write_if_missing(
+            path=workflow_set_dir / "contract.yaml",
+            content=DEFAULT_WORKFLOW_CONTRACT_TEMPLATE,
+        )
+    )
     created.extend(
         _write_if_missing(
             path=repo_root / ROOT_CONFIG_FILENAME, content=ROOT_CONFIG_TEMPLATE
@@ -469,7 +575,7 @@ def _deepest_active_session_id(*, repo_root: Path) -> str | None:
 
 @main.command()
 def stop() -> None:
-    """Request loop stop."""
+    """Request a tree-wide stop at the next safe assignment boundary."""
     repo_root = Path.cwd()
     store = StateStore(repo_root=repo_root)
 
@@ -481,11 +587,187 @@ def stop() -> None:
 
     try:
         store.mutate(mutator)
+        state = store.read_state()
+        seen: set[str] = set()
+        while state is not None and state.active_child_session_id is not None:
+            child_id = state.active_child_session_id
+            if child_id in seen:
+                break
+            seen.add(child_id)
+            child_store = StateStore(
+                repo_root=repo_root,
+                state_path=state_path(repo_root=repo_root, session_id=child_id),
+            )
+            child_store.mutate(mutator)
+            state = child_store.read_state()
     except FileLockTimeout:
         raise click.ClickException(
             "coordinator state is locked (likely mid-request); retry shortly"
         ) from None
     click.echo("stop requested")
+
+
+@main.command()
+@click.argument("text", nargs=-1, required=True)
+@click.option(
+    "--session",
+    "target_session_id",
+    default=None,
+    help="Address this update to one session instead of the active tree.",
+)
+def update(text: tuple[str, ...], target_session_id: str | None) -> None:
+    """Append a user update without rewriting earlier input records."""
+    repo_root = Path.cwd().resolve()
+    message = " ".join(text).strip()
+    if not message:
+        raise click.ClickException("update text must not be empty")
+
+    if target_session_id is None:
+        delivery_session_id = _deepest_active_session_id(repo_root=repo_root)
+        if delivery_session_id is None:
+            raise click.ClickException("No loopy-loop state found.")
+        target_scope = "tree"
+    else:
+        delivery_session_id = _validate_update_session(
+            repo_root=repo_root, session_id=target_session_id
+        )
+        target_scope = "session"
+
+    created_at = utc_now().isoformat().replace("+00:00", "Z")
+    input_id = f"input-{uuid.uuid4().hex}"
+    record = {
+        "schema_version": 1,
+        "record_type": "user_input",
+        "input_id": input_id,
+        "target_scope": target_scope,
+        "target_session_id": target_session_id,
+        "delivered_to_session_id": delivery_session_id,
+        "delivery_state": "routed",
+        "created_at": created_at,
+        "text": message,
+        "acknowledgement_state": "pending",
+        "acknowledged_at": None,
+        "acknowledged_by_attempt_id": None,
+    }
+    journal = user_updates_journal_path(
+        repo_root=repo_root, session_id=delivery_session_id
+    )
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        append_jsonl_record(path=journal, payload=record)
+    except OSError as exc:
+        raise click.ClickException(f"cannot append user update: {exc}") from exc
+    click.echo(f"queued {input_id} for session {delivery_session_id}")
+
+
+def _validate_update_session(*, repo_root: Path, session_id: str) -> str:
+    session_root = session_dir_path(repo_root=repo_root, session_id=session_id)
+    manifest_path = session_root / SESSION_METADATA_FILENAME
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(f"session not found: {session_id}") from exc
+    if not isinstance(manifest, dict) or manifest.get("session_id") != session_id:
+        raise click.ClickException(f"session not found: {session_id}")
+    return session_id
+
+
+@main.group()
+def traces() -> None:
+    """Inspect and manage local attempt traces."""
+
+
+@traces.command("list")
+def list_traces() -> None:
+    """List attempt trace manifests in this repository."""
+    repo_root = Path.cwd().resolve()
+    manifests = list_trace_manifests(repo_root=repo_root)
+    if not manifests:
+        click.echo("No traces found.")
+        return
+    try:
+        for manifest_path in manifests:
+            manifest = read_trace_manifest(manifest_path=manifest_path)
+            integrity = verify_trace_integrity(trace_root=manifest_path.parent)
+            identity = manifest.get("identity")
+            identity = identity if isinstance(identity, dict) else {}
+            click.echo(
+                "\t".join(
+                    [
+                        str(manifest.get("manifest_id", "?")),
+                        str(manifest.get("lifecycle", "?")),
+                        f"integrity={integrity['status']}",
+                        f"session={identity.get('session_id', '?')}",
+                        f"workflow={identity.get('workflow_id', '?')}",
+                        str(manifest_path.resolve()),
+                    ]
+                )
+            )
+    except TraceError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@traces.command("inspect")
+@click.argument("manifest_or_id")
+def inspect_trace(manifest_or_id: str) -> None:
+    """Print one trace manifest and its observed integrity as JSON."""
+    repo_root = Path.cwd().resolve()
+    try:
+        manifest_path = resolve_trace_manifest(
+            repo_root=repo_root, reference=manifest_or_id
+        )
+        manifest = read_trace_manifest(manifest_path=manifest_path)
+        manifest["observed_integrity"] = verify_trace_integrity(
+            trace_root=manifest_path.parent
+        )
+    except TraceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(manifest, indent=2, sort_keys=True))
+
+
+@traces.command("prune")
+@click.argument("manifest_or_id")
+def prune_trace_command(manifest_or_id: str) -> None:
+    """Delete one finalized trace and report its last observed integrity."""
+    repo_root = Path.cwd().resolve()
+    try:
+        manifest_path = resolve_trace_manifest(
+            repo_root=repo_root, reference=manifest_or_id
+        )
+        manifest = read_trace_manifest(manifest_path=manifest_path)
+        manifest_id = str(manifest.get("manifest_id", manifest_or_id))
+        integrity = prune_trace(trace_root=manifest_path.parent)
+    except TraceError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"pruned {manifest_id} integrity={integrity['status']}")
+
+
+@traces.command("export")
+@click.argument("manifest_or_id")
+@click.option(
+    "--destination",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False),
+    help="Local directory used by the durable export adapter.",
+)
+def export_trace(manifest_or_id: str, destination: Path) -> None:
+    """Export one finalized trace through its durable outbox record."""
+    repo_root = Path.cwd().resolve()
+    try:
+        manifest_path = resolve_trace_manifest(
+            repo_root=repo_root, reference=manifest_or_id
+        )
+        outbox_path = enqueue_trace_export(
+            repo_root=repo_root,
+            trace_root=manifest_path.parent,
+            destination=destination,
+        )
+        exported_path = export_trace_to_directory(
+            outbox_path=outbox_path, destination=destination
+        )
+    except (KeyError, OSError, ValueError, TraceError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(str(exported_path))
 
 
 def _write_if_missing(*, path: Path, content: str) -> list[str]:

@@ -37,6 +37,7 @@ def run_harness_iteration(
     config_snapshot: RootConfigSnapshot,
     rendered_prompt: str,
     harness_output_root: Path | None = None,
+    caller_context: object | None = None,
     harness_factory: Callable[..., TeamHarnessLike] = TeamHarness,
 ) -> IterationResult:
     root_config = RootConfig.model_validate(
@@ -49,6 +50,7 @@ def run_harness_iteration(
         resolved_api_key=resolved_api_key,
         harness_output_root=harness_output_root,
         harness_factory=harness_factory,
+        caller_context=caller_context,
     )
     harness = harness_factory(**harness_kwargs)
     try:
@@ -68,6 +70,15 @@ def run_harness_iteration(
             failure_kind=classify_failure_detail(detail=exc.detail),
             harness_run_id=harness_run_id,
             harness_output_dir=harness_output_dir,
+            harness_run_json_path=(
+                str(
+                    exc.detail.get("run_json_path")
+                    or exc.detail.get("run_record_path")
+                    or ""
+                )
+                if exc.detail
+                else ""
+            ),
         )
     except SystemExit as exc:
         # Installed team-harness config validation can sys.exit() from SDK
@@ -145,6 +156,7 @@ def _build_harness_kwargs(
     resolved_api_key: str | None,
     harness_output_root: Path | None,
     harness_factory: Callable[..., TeamHarnessLike],
+    caller_context: object | None = None,
 ) -> dict[str, object]:
     kwargs: dict[str, object] = {
         "provider": config_snapshot.team_harness_provider,
@@ -198,6 +210,15 @@ def _build_harness_kwargs(
                 "Installed team-harness does not support SDK output_dir; "
                 "upgrade team-harness."
             )
+    if caller_context is not None:
+        if _supports_kwargs(harness_factory=harness_factory, names=["caller_context"]):
+            kwargs["caller_context"] = caller_context
+        else:
+            raise ConfigError(
+                "Installed team-harness does not support the Loopy caller "
+                "context contract; upgrade to a release advertising "
+                "caller_run_record_v1 and spawn_assignment_v1."
+            )
     return kwargs
 
 
@@ -218,10 +239,15 @@ def _failure_harness_paths(
         return "", ""
     run_id_value = detail.get("run_id")
     output_dir_value = detail.get("session_output_dir")
+    run_json_value = detail.get("run_json_path") or detail.get("run_record_path")
     run_id = run_id_value if isinstance(run_id_value, str) else ""
     output_dir = output_dir_value if isinstance(output_dir_value, str) else ""
     if not output_dir and run_id and harness_output_root is not None:
         output_dir = str(harness_output_root / run_id)
+    # The third value is intentionally not returned here to preserve this
+    # private helper's legacy tuple contract; failure normalization below
+    # reads the explicit detail path directly.
+    del run_json_value
     return run_id, output_dir
 
 
@@ -245,16 +271,31 @@ def write_iteration_artifacts(
     )
 
 
+def write_iteration_inputs(*, iteration_dir: Path, rendered_prompt: str) -> None:
+    """Persist the exact Loopy input before the first provider call."""
+    iteration_dir.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(path=iteration_dir / PROMPT_FILENAME, content=rendered_prompt)
+
+
 def _normalize_harness_result(
     *, result: TeamHarnessResult, harness_output_root: Path | None = None
 ) -> IterationResult:
     harness_output_dir = ""
     if harness_output_root is not None and result.run_id:
         harness_output_dir = str(harness_output_root / result.run_id)
+    explicit_output = getattr(result, "session_output_dir", None)
+    explicit_run_json = getattr(result, "run_json_path", None) or getattr(
+        result, "run_record_path", None
+    )
+    if isinstance(explicit_output, str) and explicit_output:
+        harness_output_dir = explicit_output
     return IterationResult(
         success=True,
         text=result.text,
         error=None,
         harness_run_id=result.run_id,
         harness_output_dir=harness_output_dir,
+        harness_run_json_path=(
+            explicit_run_json if isinstance(explicit_run_json, str) else ""
+        ),
     )

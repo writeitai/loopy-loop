@@ -10,10 +10,13 @@ import pytest
 from loopy_loop.models import IterationResult
 from loopy_loop.models import TaskResponse
 from loopy_loop.sessions import create_session_dir
+from loopy_loop.sessions import eval_readiness_dir_path
 from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.worker import _bundled_cli_scripts_dir
+from loopy_loop.worker import _eval_trace_channel_status
 from loopy_loop.worker import _render_prompt
 from loopy_loop.worker import _run_task
+from loopy_loop.worker import _semantic_prompt_context
 from loopy_loop.worker import ensure_interpreter_scripts_on_path
 from loopy_loop.worker import run_worker_loop
 
@@ -517,3 +520,44 @@ def test_run_worker_loop_prepares_path_for_agents(
     # Agents inherit os.environ, so that is the mapping that must be prepared.
     assert len(seen) == 1
     assert seen[0] is os.environ
+
+
+def test_eval_trace_channel_requires_canonical_report(tmp_path: Path) -> None:
+    trace_root = tmp_path / "trace"
+    eval_root = trace_root / "eval"
+    eval_root.mkdir(parents=True)
+
+    assert _eval_trace_channel_status(trace_root=trace_root) == "not_produced"
+    (eval_root / "nested").mkdir()
+    assert _eval_trace_channel_status(trace_root=trace_root) == "incomplete"
+    (eval_root / "report.json").write_text("{}", encoding="utf-8")
+    assert _eval_trace_channel_status(trace_root=trace_root) == "complete"
+
+
+def test_malformed_eval_readiness_is_context_not_a_worker_wedge(
+    repo_builder: Any,
+) -> None:
+    repo_root = repo_builder()
+    session_id = "readiness-session"
+    create_session_dir(
+        repo_root=repo_root,
+        session_id=session_id,
+        goal_hash="sha256:" + "1" * 64,
+        goal="Inspect readiness",
+        workflow_set="main",
+    )
+    readiness = eval_readiness_dir_path(repo_root=repo_root, session_id=session_id)
+    readiness.mkdir(parents=True, exist_ok=True)
+    valid = readiness / "ready-2.json"
+    valid.write_text('{"ready": true}', encoding="utf-8")
+    malformed = readiness / "ready-12.json"
+    malformed.write_text("{", encoding="utf-8")
+
+    context = _semantic_prompt_context(
+        repo_root=repo_root, session_id=session_id, attempt_id="attempt-test"
+    )
+
+    assert str(valid.resolve()) in context
+    assert '"ready": true' in context
+    assert str(malformed.resolve()) in context
+    assert "Ignored malformed eval-readiness receipts" in context

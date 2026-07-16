@@ -1,1 +1,5 @@
-Manage project work by selecting one concrete implementation item at a time, dispatching it to a child implementation loop, and reviewing the child evidence before accepting completion.
+REPLACE THIS TEXT with the target project, feature, or release goal.
+
+State observable completion criteria and required deliverables here. The
+planner/dispatcher workflow is only the mechanism used to pursue this goal;
+success means the target outcome itself has been evaluated and achieved.
