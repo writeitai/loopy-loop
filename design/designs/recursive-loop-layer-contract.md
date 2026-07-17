@@ -2,7 +2,8 @@
 
 **Status:** Implemented and released in loopy-loop 0.7.0, team-harness 0.5.0,
 and eval-banana 0.3.2. The canonical eval-definition digest interoperability
-fix ships in loopy-loop 0.7.1 with eval-banana 0.3.3.
+and complete per-check trace fix ships in loopy-loop 0.7.1 with eval-banana
+0.3.5.
 
 **Date accepted:** 2026-07-15
 
@@ -542,8 +543,9 @@ The cross-repository contract is fail-fast:
 - team-harness 0.5.0 supplies caller-owned run paths, input durability,
   direct-spawn envelopes/streams, nested caller context, and its capability
   API;
-- eval-banana 0.3.3 supplies hermetic config selection, exact flat output,
-  a public canonical check-definition digest, and effective judge metadata; and
+- eval-banana 0.3.5 supplies hermetic config selection, exact flat output,
+  a public canonical check-definition digest, effective judge metadata, exact
+  judge inputs, and collision-safe per-check artifacts; and
 - loopy-loop 0.7.1 requires the advertised capabilities and returns HTTP 426
   before mutation when a fresh v2 tree meets an older worker.
 

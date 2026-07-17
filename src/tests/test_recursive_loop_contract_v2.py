@@ -1875,6 +1875,40 @@ def test_eval_receipt_accepts_eval_banana_canonical_definition_digest(
     )
 
 
+def test_eval_receipt_rejects_legacy_raw_yaml_definition_digest(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raw YAML hashes cannot impersonate eval-banana's canonical digest."""
+
+    repo_root, service, _, task, state = _setup_eval_task(
+        repo_builder=repo_builder, monkeypatch=monkeypatch
+    )
+    payload, _, trace_root = _write_valid_eval_bundle(
+        repo_root=repo_root, task=task, state=state
+    )
+    check_path = (
+        session_dir_path(repo_root=repo_root, session_id=task["session_id"])
+        / "eval_checks"
+        / "judge-goal.yaml"
+    )
+    raw_yaml_sha256 = file_sha256(path=check_path)
+    assert raw_yaml_sha256 != compute_check_definition_sha256(source_path=check_path)
+
+    payload["checks"][0]["definition_sha256"] = raw_yaml_sha256
+    raw_path = trace_root / "eval" / "report.json"
+    raw_report = json.loads(s=raw_path.read_text(encoding="utf-8"))
+    raw_report["checks"][0]["check_definition_sha256"] = raw_yaml_sha256
+    raw_path.write_text(data=json.dumps(raw_report), encoding="utf-8")
+    raw_ref = payload["raw_report_refs"][0]
+    payload["raw_report_sha256s"][raw_ref] = file_sha256(path=raw_path)
+
+    reasons = service._validate_eval_receipt_artifacts(
+        session_id=task["session_id"], receipt=EvalReceipt.model_validate(obj=payload)
+    )
+
+    assert "eval check 'judge-goal' definition hash does not match" in reasons
+
+
 def test_eval_receipt_rejects_yaml_mutated_after_eval_report(
     repo_builder: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1900,7 +1934,7 @@ def test_eval_receipt_rejects_yaml_mutated_after_eval_report(
         session_id=task["session_id"], receipt=EvalReceipt.model_validate(obj=payload)
     )
 
-    assert any("definition hash does not match" in reason for reason in reasons)
+    assert "eval check 'judge-goal' definition hash does not match" in reasons
 
 
 @pytest.mark.parametrize(
@@ -3060,17 +3094,17 @@ def test_raw_eval_report_must_echo_the_exact_authored_check_hash(
         repo_root=repo_root, task=task, state=state
     )
     raw_path = trace_root / "eval" / "report.json"
-    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw = json.loads(s=raw_path.read_text(encoding="utf-8"))
     raw["checks"][0]["check_definition_sha256"] = "sha256:" + "9" * 64
-    raw_path.write_text(json.dumps(raw), encoding="utf-8")
+    raw_path.write_text(data=json.dumps(raw), encoding="utf-8")
     raw_ref = payload["raw_report_refs"][0]
-    payload["raw_report_sha256s"][raw_ref] = file_sha256(raw_path)
+    payload["raw_report_sha256s"][raw_ref] = file_sha256(path=raw_path)
 
     reasons = service._validate_eval_receipt_artifacts(
-        session_id=task["session_id"], receipt=EvalReceipt.model_validate(payload)
+        session_id=task["session_id"], receipt=EvalReceipt.model_validate(obj=payload)
     )
 
-    assert any("definition hash does not match" in reason for reason in reasons)
+    assert "eval-banana check 'judge-goal' definition hash does not match" in reasons
 
 
 @pytest.mark.parametrize(

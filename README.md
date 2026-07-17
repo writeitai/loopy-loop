@@ -51,9 +51,12 @@ uv sync --extra dev
 Version 0.7's recursive contract spans three owned projects. It requires
 `team-harness>=0.5.0` for caller-owned run records, pre-call coordinator input,
 spawn assignment envelopes, and canonical stdout/stderr capture; it requires
-`eval-banana>=0.3.3` for hermetic `--no-project-config` evaluation, explicit
+`eval-banana>=0.3.5` for hermetic `--no-project-config` evaluation, explicit
 harness-agent validation, and the public canonical check-definition digest
-used to verify eval receipts. Install all three companion changes together.
+used to verify eval receipts. Version 0.3.5 also retains the exact judge input
+and gives every per-check result, stream, and deterministic evidence directory
+a common collision-safe stem inside the caller-owned eval trace. Install all
+three companion changes together.
 For coordinated development across the repositories, install the corresponding
 team-harness and eval-banana checkouts as editable dependencies:
 

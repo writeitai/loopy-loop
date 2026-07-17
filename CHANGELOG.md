@@ -6,7 +6,9 @@
   check-definition digest instead of a raw YAML file hash. Receipts now bind
   exactly the digest emitted in `report.json`, while loopy-loop independently
   recomputes it through eval-banana's public API before accepting a result.
-  Requires eval-banana 0.3.3.
+  Requires eval-banana 0.3.5, which also preserves every check's exact judge
+  prompt and collision-safe result, stream, and deterministic-evidence
+  artifacts under the caller-owned attempt trace.
 - Updated stock eval-runner guidance to copy `check_definition_sha256` from
   eval-banana's report rather than manually hashing YAML with a different
   protocol.

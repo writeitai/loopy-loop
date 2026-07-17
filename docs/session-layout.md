@@ -268,7 +268,11 @@ never edited; a rework or reroute request receives a new request id and file.
 Raw eval-banana output belongs under the attempt trace's `eval/` directory.
 The attempt assignment exposes that exact absolute path as `raw_eval_output`.
 Packaged eval workflows use hermetic `--no-project-config`, an explicit judge,
-and pass threshold 1.0.
+and pass threshold 1.0. Eval-banana persists each harness judge's exact input
+as `checks/<safe-check-stem>.prompt.txt`; the matching result, stdout, stderr,
+and deterministic evidence directory use the same bounded stem. The stem
+includes the full digest of the exact check ID, so case-only, normalized-label,
+and long IDs remain distinct on the local filesystem.
 
 An eval receipt's own schema is v1 inside the v2 session protocol. It records:
 
