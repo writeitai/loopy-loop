@@ -73,16 +73,16 @@ wheels = [
 
 [[package]]
 name = "eval-banana"
-version = "0.3.1"
+version = "0.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "pydantic" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/16/ba/21def25d0a8e141c278dd84cd78ae8b165f83c9d3d772f7808e0a32a6e3a/eval_banana-0.3.1.tar.gz", hash = "sha256:ee4933b9ece6c74b700943b3d6310f87a00d03caf333f2d9c87bea1fad6e9f61", size = 2225175 }
+sdist = { url = "https://files.pythonhosted.org/packages/d5/8f/a323536fa9eb12322c556f8c7170d6e75caecd2b60f775c105c90c9856e0/eval_banana-0.3.2.tar.gz", hash = "sha256:6c694713189b2e5f904642c380dd3ce7ccb985fbd4432472bc0cd6af2b8a989b", size = 2765571 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/22/3d/7d7c0468c05e4de1ed3aca3670821841380d6749b643013d5dad75f1416b/eval_banana-0.3.1-py3-none-any.whl", hash = "sha256:5f4ff33185fd29657beedadd9e7d0e4be70b324162a3568bedc4291cc02b9532", size = 31885 },
+    { url = "https://files.pythonhosted.org/packages/be/8c/d416ecc414058a781abc1063965fcadbdc85727b1dc7ee5c464370961c9f/eval_banana-0.3.2-py3-none-any.whl", hash = "sha256:d4fd7a320ea2a86bfbb6cff6056b1144b48e9355c38fc18ac896b555ecc5df36", size = 36811 },
 ]
 
 [[package]]
@@ -272,7 +272,7 @@ wheels = [
 
 [[package]]
 name = "loopy-loop"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -298,7 +298,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
-    { name = "eval-banana", specifier = ">=0.3.1" },
+    { name = "eval-banana", specifier = ">=0.3.2" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "filelock", specifier = ">=3.16" },
     { name = "httpx", specifier = ">=0.28" },
@@ -309,7 +309,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "rich", specifier = ">=14.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
-    { name = "team-harness", specifier = ">=0.4.0" },
+    { name = "team-harness", specifier = ">=0.5.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]
 
@@ -654,7 +654,7 @@ wheels = [
 
 [[package]]
 name = "team-harness"
-version = "0.4.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -665,9 +665,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/42/89/c8785a6bf86c1ef7c76b722457f7425e810240ffeed3c223f500a4c22025/team_harness-0.4.0.tar.gz", hash = "sha256:24a93ae5d499638e8df9e81e274c356a5f2b04444aabb546edb11ac96d2d3cde", size = 2070632 }
+sdist = { url = "https://files.pythonhosted.org/packages/9d/7f/a52289017c8574e2477eac92e7e900c1ee82f37c5663dbf337d8104dd293/team_harness-0.5.0.tar.gz", hash = "sha256:770e8c252a63156c92eddfa72cdc3064077fbb9c094534c2bf536fc8e8751455", size = 2096068 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/36/ee/ea50e520cefbbdeaf006dd093d31e6c43018f555592b51e0c6e297b412f9/team_harness-0.4.0-py3-none-any.whl", hash = "sha256:f9062440306517e37987b8add6f5f7a20de45800cdf22ad8c6ce5597bea75568", size = 121710 },
+    { url = "https://files.pythonhosted.org/packages/a4/63/c79396ee40e3196252fdef1c31774a0e10513862701feafeeedd13895f06/team_harness-0.5.0-py3-none-any.whl", hash = "sha256:b7f8b3936dd17b62506b783e70064ba19531e499c25f66993b382060053600d3", size = 133424 },
 ]
 
 [[package]]
