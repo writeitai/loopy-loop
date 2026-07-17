@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.2
+
+- Corrected the installable `loopy-loop` Agent Skill to teach the released v2
+  contract instead of the retired one-level session model. Agents are now
+  directed to their frozen absolute attempt and direct-spawn assignments,
+  append-only user-input journal, recursive `child_requests/pending/`
+  protocol, layer-scoped eval receipts and identity-bound terminal control,
+  tree-wide stop behavior, and the separate gitignored state/evidence and raw
+  trace planes.
+- Added a regression test that requires the current recursive v2 concepts and
+  rejects the obsolete one-level-child, markdown-inbox, and top-level-only-stop
+  guidance. Runtime behavior and dependency floors are unchanged from 0.7.1.
+
 ## 0.7.1
 
 - Fixed v2 eval-receipt validation to use eval-banana's canonical
