@@ -1,206 +1,227 @@
-# Design: Success Semantics and Evaluation Strategy
+# Design: Mechanical Success, Orchestrator Completion, and Evaluation Evidence
 
-**Status:** Accepted (documenting decisions already in the codebase)
+**Status:** Accepted and implemented. D3's mechanical-success behavior is
+released; the protocol-v3 orchestrator-owned completion amendment is
+implemented in loopy-loop 0.8.0 and team-harness 0.5.4. V2 sessions retain
+their frozen historical contract.
+
 **Date recorded:** 2026-07-12
-**Applies to:** `loopy-loop` coordinator/worker loop and the packaged
-`inner_outer_eval` workflow set.
 
-This document records two design decisions that are **deliberate and load-bearing**,
-but were until now implicit in the code rather than written down. A reader skimming
-the code can easily mistake each for a defect. They are not defects. This document
-exists so the next reader — human or agent — does not "fix" them by accident.
+**Date amended:** 2026-07-17
 
-Both decisions share one principle:
+**Applies to:** the loopy-loop coordinator/worker boundary, terminal control,
+and optional evaluation in packaged workflow sets.
 
-> **Do not infer semantic success from noisy mechanical signals. Push the
-> success/acceptance decision to an explicit, purpose-built evaluation layer.**
+This document is the binding companion for D3 and D4 in
+[`design/decisions.md`](../decisions.md). The complete recursive role, state,
+handoff, schedule, and cross-harness contract lives in
+[`orchestrator-owned-completion-and-cross-harness-review.md`](./orchestrator-owned-completion-and-cross-harness-review.md).
 
-D11 and its companion
-[`recursive loop-layer contract`](./recursive-loop-layer-contract.md) refine
-how that evaluation layer composes across session depths: each session evaluates
-its own goal and names one terminal goal-control owner. This document remains
-authoritative for D3/D4's mechanical-success and LLM-as-judge boundaries; the
-new design adds subject provenance and ownership without changing either.
+The shared principle is:
 
----
+> Do not infer semantic success from noisy mechanical signals. Give one named
+> durable orchestrator the relevant evidence and responsibility to decide.
 
-## Decision 1 — Iteration success means "the assignment ran," not "the work is good"
+Evaluation can be excellent evidence. It is not the universal owner of that
+decision.
+
+## Decision 1 — Iteration success means “the assignment ran,” not “the work is good”
 
 ### Decision
 
-`IterationResult.success` is `True` whenever a `team-harness` run returns normally,
-and `False` only when the harness itself raises (`ConfigError`, `TeamHarnessError`,
-or an unexpected exception). It is **not** a judgment about whether the requested
-work was actually accomplished. `TeamHarnessResult.agents` (per-worker statuses and
-exit codes) is intentionally **not** consulted to decide iteration success.
+`IterationResult.success` is `True` whenever a `team-harness` invocation
+returns normally and `False` only when the harness itself raises. It is not a
+judgment about whether the requested work was accomplished. Per-worker status
+and exit codes in `TeamHarnessResult.agents` are intentionally not converted
+into that boolean.
 
-Reference: `src/loopy_loop/harness_runner.py` — `_normalize_harness_result()`
-returns `success=True`; the `success=False` paths live only in `run_harness_iteration()`'s
-exception handlers.
+Reference: `src/loopy_loop/harness_runner.py` —
+`_normalize_harness_result()` returns `success=True`; the `success=False` paths
+are exception handlers in `run_harness_iteration()`.
 
-**Semantic success is decided elsewhere**, by artifacts the workflow writes:
+Semantic completion is a separate, explicit act. Each workflow contract names
+one persistent orchestration role. That role writes identity-bound
+`control.json` when it judges its session goal complete:
 
-- `control.json` — the session stop switch (`running` → `stopped` with a
-  `stop_reason`). In a fresh v2 session it must identify the exact current
-  session/workflow/attempt; successful control comes from the declared
-  goal-control role and cites the same-session eval receipt. This, and only
-  this, stops the loop.
-- `goal_check.json` — a per-iteration projection of the canonical eval receipt.
-  Evidence only; a valid `goal_check.json` does **not** by itself stop the loop.
+- `outer` for `inner_outer_eval`; and
+- `planner` for `pm_planner_dispatcher`.
 
-### Context / why
+The orchestrator may consider its plan and accepted-work ledger, implementation
+evidence, repo-owned tests, direct reviews, child outcomes, decisions, git and
+delivery receipts, and optional eval observations. No one evidence type is a
+generic protocol prerequisite.
+
+### Why mechanical success stays narrow
 
 `team-harness`'s coordinator is an orchestrator, not a build system. It can
-legitimately return a normal result after a worker has failed — it may synthesize a
-final answer, decide it has enough information, or route around a dead worker. Worker
-exit codes are therefore a **noisy** proxy for "did the assignment succeed": a
-non-zero worker can accompany a perfectly good outcome, and an all-green set of
-workers can accompany a useless one. Mapping those signals to a boolean would
-manufacture false precision.
+legitimately return a useful synthesis after one delegate fails, route around a
+dead worker, or decide that another delegate supplied enough evidence.
+Conversely, every delegate can exit zero while producing useless work. Mapping
+worker exits to “the task is good” would manufacture false precision.
 
-So `loopy-loop` draws the line at the only thing it can observe reliably — *did the
-assignment run to completion without the harness itself erroring* — and delegates the
-"was it any good" question to an explicit evaluation step that produces
-an eval receipt and matching `goal_check.json`, with workflow-owned
-`control.json` as the actual gate. D11 defines the exact role and provenance
-contract; D5 keeps human involvement out of normal operation.
-
-This has been the behavior since the first commit of `harness_runner.py`
-(`a4cca5e`, 2026-04-19); it is original design intent, not drift.
+Loopy can reliably observe whether the harness invocation itself completed.
+It records that mechanical fact and leaves the semantic decision to the role
+that has durable knowledge of the goal and plan. This behavior dates to the
+first `harness_runner.py` implementation (`a4cca5e`, 2026-04-19); the amendment
+changes who owns semantic completion, not mechanical success.
 
 ### Consequences
 
-- **The evaluation layer is the real arbiter of completion**, not the harness return
-  value. Everything downstream depends on that layer being run and being honest
-  (see Decision 2, and the "known limitation" below).
-- **The scheduler keys cadence off mechanical success.** `run_every`, `must_follow`,
-  and `run_after_successes` all read `HistoryEntry.success`. A run where a worker
-  actually failed but the harness returned normally still advances these counters.
-  This is an **accepted, bounded inaccuracy**: `control.json`/`goal_check.json` remain
-  the true gates, so the worst case is a slightly-off cadence, not a false "goal met."
-- **Crash recovery treats a locally-written result as authoritative.** The
-  `pending_finished_request.json` / `result.json` recovery path trusts the recorded
-  iteration result; it does not re-derive success from worker artifacts.
+- Scheduler cadence (`run_every`, `must_follow`, and
+  `run_after_successes`) continues to use mechanical history.
+- A delegate's non-zero exit can coexist with a mechanically successful
+  attempt, because the coordinator may still have integrated useful work.
+- A missing, non-passing, stale, or malformed advisory eval is recorded as
+  evidence/diagnostics. It does not retroactively flip `HistoryEntry.success`,
+  consume the generic harness-failure budget, or starve the orchestrator.
+- Crash recovery continues to trust a matching locally persisted result; it
+  does not reconstruct success from raw worker streams.
+- `control.json`, written by the exact current completion owner, is the sole
+  semantic stop request. Evidence artifacts do not stop the loop by
+  themselves.
 
-### Known limitation (documented, not a call to revert)
+### Protocol integrity is different from semantic judgment
 
-Because acceptance for an entire iteration ultimately rests on the evaluation layer,
-and that layer is LLM-as-judge by design (Decision 2), a whole iteration's
-"success" can rest on a single model judgment with no deterministic backstop. For
-low-stakes goals this is an acceptable, conscious trade. For high-stakes work it
-should be **backstopped**, not reverted — see the note in Decision 2 about
-repo-owned deterministic checks and the active
-[`P1.2` proposal](../proposals/improvement-proposals.md#p12--target-owned-deterministic-evaluation-backstop).
+The engine still rejects a stale or sibling control record, a producer that is
+not the frozen completion owner, malformed paths, invalid topology, or false
+evidence provenance. Those are claims about the durable protocol, not opinions
+about work quality.
 
-### Alternatives considered and rejected
+For protocol v3, successful control contains exact current
+session/workflow/attempt identity and a non-empty rationale. Evidence references
+are optional and may be empty; asserted references are validated. Eval receipt
+references are optional and may come from an earlier
+attempt in the same session. If cited, their subject identity and hashes must
+validate and their producer must be a runner role declared by the frozen
+contract. The engine does not require a passing verdict or reinterpret the
+orchestrator's weighting of conflicting evidence.
 
-- *Derive iteration success from worker exit codes / `result.agents`.* Rejected:
-  unreliable for the reasons above; produces false negatives (good outcome, failed
-  worker) and false positives (all-green, useless outcome).
-- *Make `goal_check.json` directly stop the loop.* Rejected: conflates evidence with
-  control. Keeping `control.json` as the sole stop switch means the accountable
-  current workflow must make an explicit, auditable stop decision. A human gate
-  is not part of this path (D5).
+Protocol-v2 sessions retain their frozen same-attempt eval requirements,
+including a session explicitly created later from a custom v2 contract. Their
+authority is never silently reinterpreted as v3.
 
-### When to revisit
+### Alternatives rejected
 
-If cadence inaccuracy causes a concrete problem, tune the workflow set's
-mechanical eval frequency and the evidence rendered into eval prompts. Do not
-make semantic readiness or an accepted eval determine workflow eligibility:
-D8 forbids semantic scheduling gates, and D11 keeps readiness as prompt context.
-Accepted eval affects terminal control, not which assignment may run next.
+**Derive success from delegate exit codes.** This creates both false negatives
+(one delegate failed but the coordinator recovered) and false positives (all
+delegates exited cleanly but the outcome is wrong).
 
----
+**Make an evidence artifact stop the loop automatically.** Evidence and
+decision are different responsibilities. The persistent orchestrator must
+integrate the evidence and leave a reasoned terminal disposition.
 
-## Decision 2 — Evaluation is LLM-as-judge; agents do not author deterministic checks
+**Let both orchestrator and evaluator write success.** Dual authority creates
+races and ambiguity. Evaluation informs one owner; it does not become another
+owner.
+
+## Decision 2 — When evaluation is used, stock checks are outcome-oriented LLM judgments
 
 ### Decision
 
-In the packaged `inner_outer_eval` workflow set, the eval workflows create **only**
-`harness_judge` (LLM-as-judge) checks that describe *desired outcomes*. Authoring
-deterministic checks is explicitly forbidden in the stock template.
+The generic packaged eval workflow authors only outcome-oriented
+`harness_judge` checks. It does not invent deterministic checks. This boundary
+applies when an orchestrator chooses to use evaluation; it does not require an
+eval run and does not grant an evaluator terminal authority.
 
-Reference:
-`src/loopy_loop/templates/inner_outer_eval/.loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_reviewer/prompt.txt`
-— "Only create harness_judge checks"; "Do not create deterministic checks.
-Deterministic checks are forbidden."
+Reference: the `eval_reviewer` prompt under
+`src/loopy_loop/templates/inner_outer_eval/.loopy_loop/workflow_sets/inner_outer_eval/workflows/`.
 
-### Context / why
+### Why agents do not invent deterministic checks
 
-This rule comes from direct experience, not theory. When agents were allowed to
-**author** deterministic checks, they produced bad ones: brittle string-matching,
-checks that tested the wrong thing, checks that passed for the wrong reason, and
-checks an agent could trivially satisfy without doing the real work. In practice,
-letting the implementer invent its own pass/fail criteria let it game itself.
+This rule comes from observed failure. Agent-authored deterministic checks
+became brittle string matches, targeted the wrong behavior, passed for the
+wrong reason, or were easy for the implementer to game. Allowing the current
+implementer to invent its own machine-enforced pass criteria let it redefine
+“done” around what it had already produced.
 
-`harness_judge` on a described *outcome* removes that failure mode: the check states
-what good looks like in natural language, and a judge evaluates against it. The
-implementer cannot quietly redefine "done" into something it already produced.
+An outcome-oriented judge instead states what good behavior looks like in
+natural language and evaluates the evidence against that description. It has
+non-determinism and model-trust costs, but avoids pretending that a weak
+agent-invented script is an objective contract.
 
-### Scope and boundary (important — read before applying to other repos)
+### Important boundary: repository-owned checks are legitimate evidence
 
-The thing that failed was **agent-authored** checks, not deterministic checks as a
-category. Two very different things get conflated under "deterministic check":
+The rejected category is **agent-invented pass/fail logic**, not deterministic
+testing in general. Running an existing repository-owned command such as
+`pytest`, `import-linter`, `alembic upgrade`, or a prepared implementation-eval
+suite does not have the same self-grading failure mode. The project established
+those criteria independently of the current implementation attempt.
 
-- **Agent invents a check** → the failure mode above. Correctly forbidden.
-- **Run a check the repo already owns** → e.g. `uv run pytest`, `import-linter`,
-  `alembic upgrade`, `make test`, evaluated on exit code. The agent did not invent
-  these; they are the project's own contract. Running them is deterministic but is
-  **not** the failure mode this rule targets.
+A target-specific workflow may therefore combine:
 
-Therefore the "deterministic forbidden" rule is correct **for generic target repos
-where the only deterministic checks would be agent-invented**. For a target repo that
-already owns a trustworthy contract-test suite, the right configuration is *both*:
-LLM-as-judge for the qualitative "did this achieve the outcome," **and** a
-deterministic gate that shells out to the repo's own suite as a backstop under the
-judge. That backstop does not reintroduce the agent-authoring problem, and it removes
-the single-judgment point of failure noted in Decision 1. A workflow set targeting
-such a repo should override the stock rule accordingly, in a dedicated child workflow
-set rather than by loosening the stock template.
+- qualitative `harness_judge` observations;
+- repository-owned deterministic tests; and
+- prepared project-level evals.
 
-### Consequences
+All are evidence for the orchestrator. None becomes a universal Loopy engine
+gate merely because it is deterministic or expensive.
 
-- **Evaluation is outcome-focused and resistant to self-gaming**, at the cost of the
-  usual LLM-as-judge properties: non-determinism, per-check inference cost, and the
-  judge as a point of trust.
-- **The judge should not share failure modes with the implementer.** Prefer judging
-  with a different model family than the one that implemented the change.
-- **A single judge pass is evidence, not a hard gate for high-stakes stops.** Keep
-  `control.json` as the stop switch (Decision 1); for high-stakes goals, require
-  repeated/independent judgments or a deterministic backstop before a terminal
-  `goal_met`.
+### Eval-check authoring needs stronger independent review
 
-### Alternatives considered and rejected
+Eval definitions are high-leverage artifacts: missing, overlapping, ambiguous,
+or gameable checks distort every later observation. For a non-trivial check set,
+the eval-reviewer coordinator should normally:
 
-- *Let agents author deterministic checks (the prior state).* Rejected on evidence:
-  produced nonsensical, gameable checks.
-- *Deterministic-first everywhere, judge as residual (the "obvious" best practice).*
-  Rejected **as a blanket rule** because in generic repos the only deterministic
-  checks available are the agent-authored ones that failed. It is the *right* rule
-  only where the deterministic checks are repo-owned (see boundary above).
+1. run independent goal-coverage and failure-mode analyses in parallel across
+   different enabled harness families when available;
+2. assign one accountable author/integrator to draft the canonical checks;
+3. ask a different family to review the stable draft, with parallel reviewers
+   where useful;
+4. explicitly test coverage gaps, false positives/negatives, implementation
+   coupling, gameability, wording ambiguity, and evidence discoverability; and
+5. synthesize disagreements into one coherent outcome-oriented check set.
 
-### When to revisit
+Use the session's `frontier` tier for subtle or high-stakes eval-policy/check
+work when the capability roster offers it and the confidence gain justifies the
+cost. Concrete model IDs and enabled families come from the frozen roster, not
+from hard-coded stock prompt text.
 
-Revisit per target repo, not globally: when a target owns a trustworthy contract-test
-suite, add the deterministic backstop (do not remove the judge). When judge cost or
-flakiness becomes material, add repetition/consensus and cross-family judging rather
-than abandoning the approach.
+This is strong prompt guidance, not a required number of agents, a fixed vendor
+graph, an all-family quorum, or a completion receipt. If only one family is
+usable or the check is trivial, the coordinator proceeds autonomously with an
+appropriate smaller review shape.
 
----
+### Running and interpreting evals
 
-## Summary
+- Prefer a judge whose harness/model family differs from the primary
+  implementer and check author where practical.
+- The eval runner publishes a provenance-rich observation. It never writes the
+  session's successful terminal control in the amended contract.
+- A scheduled eval may run before, during, or near the end of work. The
+  orchestrator can also invoke one directly or avoid duplicate work when the
+  scheduler view shows an eval role is about to run.
+- A passing judge result is evidence, not proof. A failing result is also
+  evidence, not an unconditional veto. The orchestrator repairs, reruns,
+  supersedes, explains, or weighs it against other facts.
+- When an eval receipt is produced or cited, exact subject and provenance
+  validation remains mandatory even though semantic deference is not.
 
-| | Decision 1 | Decision 2 |
-|---|---|---|
-| **What** | Iteration success = harness completed, not work-is-good | Eval = LLM-as-judge on outcomes; agents don't author deterministic checks |
-| **Why** | Worker exit codes are a noisy proxy for real success | Agent-authored deterministic checks were gameable nonsense |
-| **True gate** | identity-bound `control.json` (stop) + eval receipt/`goal_check.json` (evidence) | The judge's verdict, recorded as evidence |
-| **Shared principle** | Delegate the success decision to an explicit eval layer | Same |
-| **Backstop for high-stakes** | Run eval on a suitably frequent mechanical cadence; keep semantic acceptance in control | Add repo-owned deterministic check under the judge |
+### Alternatives rejected
 
-Both decisions are sound. Neither should be reverted. The one thing worth adding —
-for high-stakes targets only — is a deterministic backstop built from the target
-repo's **own** contract tests, which strengthens both decisions without undoing
-either. That conditional follow-up is tracked as
-[`P1.2`](../proposals/improvement-proposals.md#p12--target-owned-deterministic-evaluation-backstop),
-not as part of this implemented design.
+**Let agents invent deterministic checks.** Rejected from experience: the
+checks were brittle, wrong-target, and gameable.
+
+**Run deterministic-first everywhere.** This is appropriate when the target
+already owns a trustworthy suite, but not as a blanket rule for generic repos
+where the current agent would have to invent the gate.
+
+**Require an eval before every completion.** The persistent orchestrator can
+have stronger direct evidence, a target may already own better checks, and a
+scheduled evaluator can fail for reasons unrelated to work quality.
+
+**Restore a hard-coded author/reviewer model chain.** Cross-family review is
+valuable, but concrete providers and models change. The enabled harness/tier
+roster supplies current choices and the coordinator adapts.
+
+## Compact summary
+
+| Question | Binding answer |
+| --- | --- |
+| What does `IterationResult.success` mean? | The harness invocation returned normally |
+| Who decides the session goal is complete? | The workflow contract's persistent orchestrator (`outer` or `planner` in stock sets) |
+| Is evaluation required? | No; it is optional evidence unless a target's own goal asks for a particular eval |
+| What stops the session? | Exact-current-attempt, identity-bound `control.json` from the completion owner |
+| What happens to bad eval output? | It becomes visible diagnostic evidence, not mechanical failure or a universal gate |
+| What kind of stock checks may agents author? | Outcome-oriented `harness_judge` checks, not invented deterministic gates |
+| How should non-trivial eval checks be designed? | Prefer parallel independent cross-family analysis, one integrator, and different-family review |
+| Are review diversity and model tiers enforced? | No; the roster informs prompt-guided, audited coordinator judgment |

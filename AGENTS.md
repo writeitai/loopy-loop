@@ -18,17 +18,27 @@ relevant decision (and its companion design doc):
 
 - **D3 — iteration success ≠ "work is good."** `IterationResult.success` means only that
   the harness ran without erroring. Do not make it consult worker exit codes / infer
-  semantic success. The eval layer (`control.json` + `goal_check.json`) decides quality.
-- **D4 — evaluation is LLM-as-judge; agents don't author deterministic checks.** Do not
-  "add deterministic checks" to the stock `inner_outer_eval` eval workflows. (A target
-  repo that owns its own test suite is a different case — see D4.)
+  semantic success. The session's declared orchestrator (`outer` or `planner` in the
+  stock sets) decides completion through `control.json`, using optional eval and other
+  evidence.
+- **D4 — when evaluation is used, it is LLM-as-judge; agents don't author deterministic
+  checks.** Do not "add deterministic checks" to the stock `inner_outer_eval` eval
+  workflows. A target repo that owns its own test suite is a different case. For
+  non-trivial eval-check creation, prefer parallel cross-harness criteria analysis and
+  different-family review, without making them a quota or gate.
 - **D2 — single worker is deliberate.** Do not add parallel loopy workers as a scaling
   feature.
 - **D5 — full autonomy with a last-resort escape hatch.** See Rule 2.
 - **D8 — constraints are detection, not prevention.** Do not add preventive fences
   (path-level write enforcement, semantic scheduling vetoes, approval flows, arbitrary
-  mid-run hard-fails). Express constraints as evaluation-layer checks whose failure
-  blocks *acceptance* of the work, with repair as the path forward.
+  mid-run hard-fails, mandatory eval gates). Surface findings to the accountable
+  orchestrator for repair, rerouting, or a reasoned disposition. Hard enforcement is for
+  protocol truth—identity, topology, schemas, hashes, and reference containment—not
+  semantic sufficiency.
+- **D11 — the durable orchestrator owns completion; eval roles only produce optional
+  evidence.** Do not give `goal_met` authority to `eval_runner` in fresh amended
+  contracts or require a same-attempt passing eval. Preserve already-live sessions'
+  frozen historical contract.
 
 If you believe a decision is genuinely wrong, propose amending `design/decisions.md`
 (state what changes and why) — do not silently contradict it in code.
@@ -41,12 +51,14 @@ involvement is a last resort, never a normal step.
 - **The one sanctioned escape hatch already exists.** When a workflow hits a *genuinely
   terminal* blocker — a decision only a human can make, a missing credential, a
   billable/destructive action it isn't permitted to take — it writes the session
-  `control.json`. Fresh v2 sessions use the identity-bound form below; the
-  assignment envelope supplies the exact session, workflow, attempt, control path,
-  and timestamp context:
+  `control.json`. Use the protocol version frozen in the assignment envelope; it
+  supplies the exact session, workflow, attempt, control path, and timestamp context.
+  The protocol-v3 identity-bound blocker form used by the stock workflow sets is
+  shown below. Frozen v2 sessions use the same blocker fields with
+  `schema_version: 2`:
   ```json
   {
-    "schema_version": 2,
+    "schema_version": 3,
     "control_id": "<stable unique id>",
     "state": "stopped",
     "reason": "<specific terminal blocker>",
@@ -61,8 +73,9 @@ involvement is a last resort, never a normal step.
     "created_at": "<UTC timestamp>"
   }
   ```
-  Only an already-running legacy v1 session uses the historical compact
-  `schema_version: 1` form. Do not emit that form for a v2 assignment: it is
+  Only an assignment whose frozen contract is v1 (including a conservative
+  custom set with no explicit contract) uses the historical compact
+  `schema_version: 1` form. Do not emit that form for a v2/v3 assignment: it is
   archived as a repairable protocol failure rather than stopping the session.
   This stops the loop as terminal, with a recorded reason. That is the entire
   human-in-the-loop mechanism, and it is enough.

@@ -22,12 +22,18 @@ limit, flat child requests, the global team-harness run-record mismatch, or
 missing grandchildren describe the shipped 0.3–0.6 baseline and legacy v1
 resume behavior, not fresh 0.7 sessions.
 
+The later accepted protocol-v3 completion/state/roster amendment is implemented
+in loopy-loop 0.8.0 and team-harness 0.5.4. It remains binding in
+[`orchestrator-owned-completion-and-cross-harness-review.md`](./orchestrator-owned-completion-and-cross-harness-review.md).
+It does not reinterpret v1/v2 sessions.
+
 The design is driven by three existing decisions:
 
 - files and git are the durable source of truth (D1);
 - exactly one loopy worker owns an assignment at a time (D2); and
-- evaluation artifacts decide work quality; transport and recovery code must
-  not manufacture semantic success (D3/D4).
+- the declared durable orchestrator decides semantic completion from available
+  evidence, while transport/recovery code must not manufacture it and optional
+  eval evidence follows D4's trust boundary (D3/D4/D11).
 
 Together, the mechanisms below let the planner/dispatcher double loop run for a
 long time without losing its place, duplicating verifiably live local work after
@@ -378,26 +384,38 @@ API surface: confidently generating a removed layout is worse than omitting a
 feature. The clean-init tests validate the templates themselves, although the
 prose Skill is not mechanically compared with them.
 
-### Named model tiers centralize project-local worker choice
+### A frozen harness/tier roster centralizes project-local worker choice
 
 D9 keeps every harness coordinator in a session tree on the same strong
 `team_harness_model`. Cost control happens per spawned worker. A root config may
-declare `model_tiers` as tier name → agent → `{model, effort}` and an optional
-`default_tier`.
+declare `model_tiers` as tier name → harness family → `{model, effort}` and an
+optional `default_tier`. The canonical stock vocabulary is `frontier` for the
+maximum-capability configured bundle, `strong` for complex high-capability
+work, `standard` for balanced ordinary work, and `economy` for bounded
+lower-cost work. In an Anthropic-family roster these correspond, for example,
+to Fable, Opus, Sonnet, and Haiku. Missing family/tier cells are allowed in
+config and rendered explicitly as unavailable in the frozen roster; prompts
+must not assume availability.
 
 `load_root_config()` in `src/loopy_loop/config.py` rejects a `default_tier`
 combined with duplicate explicit mappings. `resolve_model_tiers()` then derives
 the concrete per-agent defaults from the named default, and
-`render_model_tier_guidance()` appends the tier table to every harness
-coordinator's system prompt. Workflow prompts can request `economy` or `strong`
-without embedding model ids. Children inherit the parent's frozen resolved
-config snapshot; editing root YAML mid-session does not silently change their
-model policy.
+`render_model_tier_guidance()` currently appends tier prose to every harness
+coordinator's system prompt. The accepted protocol-v3 amendment additionally
+freezes a structured, session-tree-wide capability roster, gives every
+coordinator its absolute path plus a summary, and preserves the full matrix
+rather than only resolved defaults. Workflow prompts request semantic tiers
+without embedding model IDs. Children inherit the frozen roster; editing root
+YAML mid-session does not silently change their available delegate catalog.
 
-Tier selection is guidance plus audit evidence, never an engine veto (D8). The
-harness records requested and effective model/effort per spawn; review or eval
-can detect a poor choice and repair it. The engine does not enforce a tier
-allowlist or weaken child coordinators by depth.
+Harness-family diversity and tier strength are separate choices. Prompts should
+prefer parallel independent analyses and different-family review for
+consequential work, especially eval-check creation, while one coordinator
+integrates the result. Tier/family selection is guidance plus audit evidence,
+never an engine veto (D8). The harness records requested and effective
+model/effort per spawn; later review can use those facts. The engine does not
+enforce a tier allowlist, vendor graph, review quota, or weaker child
+coordinator by depth.
 
 ---
 

@@ -22,8 +22,12 @@ def test_inner_outer_eval_template_preflight() -> None:
         "outer",
     ]
     assert preflight.root_config.team_harness_provider == "codex"
-    assert preflight.workflow_contract.eval.goal_control_role == "eval_runner"
-    assert preflight.workflow_contract.task_acceptance_role == "outer"
+    assert preflight.workflow_contract.completion_role == "outer"
+    assert preflight.workflow_contract.check_author_roles == ["eval_reviewer", "outer"]
+    assert preflight.workflow_contract.check_runner_roles == ["eval_runner", "outer"]
+    orchestration = preflight.workflow_contract.orchestration
+    assert orchestration is not None
+    assert orchestration.task_acceptance_owner == "outer"
 
 
 def test_pm_planner_dispatcher_template_preflight() -> None:
@@ -38,11 +42,13 @@ def test_pm_planner_dispatcher_template_preflight() -> None:
 
     assert [workflow.id for workflow in preflight.workflows] == [
         "dispatcher",
-        "eval_reviewer",
-        "eval_runner",
         "planner",
     ]
     assert preflight.workflow_set == "pm_planner_dispatcher"
     assert preflight.root_config.team_harness_provider == "codex"
-    assert preflight.workflow_contract.eval.goal_control_role == "eval_runner"
-    assert preflight.workflow_contract.task_acceptance_role == "planner"
+    assert preflight.workflow_contract.completion_role == "planner"
+    assert preflight.workflow_contract.check_author_roles == ["planner"]
+    assert preflight.workflow_contract.check_runner_roles == ["planner"]
+    orchestration = preflight.workflow_contract.orchestration
+    assert orchestration is not None
+    assert orchestration.task_acceptance_owner is None

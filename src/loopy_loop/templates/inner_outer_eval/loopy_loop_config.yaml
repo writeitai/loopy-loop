@@ -14,21 +14,28 @@ team_harness_agent_models:
   gemini: "gemini-3.5-flash"
 team_harness_agent_reasoning_efforts:
   codex: "high"
-# Optional named model tiers: declare model ids once, let harness
-# coordinators pick a tier per spawned agent (rendered into the system
-# prompt as guidance). With default_tier set, REMOVE the two explicit
-# mappings above — the tier becomes their single source of truth.
-# The default tier must define a bundle for every team_harness_agents entry.
+# Optional semantic strength tiers. Configure concrete ids here; stock role
+# prompts select by tier and enabled family without naming vendors or models.
+# With default_tier set, REMOVE the two explicit mappings above. Every enabled
+# family must have a bundle in the default tier.
 # model_tiers:
+#   frontier:
+#     codex: {model: "<frontier model id>", effort: "<frontier effort>"}
+#     claude: {model: "<frontier model id>", effort: "<frontier effort>"}
+#     gemini: {model: "<frontier model id>", effort: "<frontier effort>"}
 #   strong:
-#     codex: {model: "gpt-5.6-sol", effort: "xhigh"}
-#     claude: {model: "claude-fable-5", effort: "max"}
-#     gemini: {model: "gemini-3.5-pro"}
+#     codex: {model: "<strong model id>", effort: "<strong effort>"}
+#     claude: {model: "<strong model id>", effort: "<strong effort>"}
+#     gemini: {model: "<strong model id>", effort: "<strong effort>"}
+#   standard:
+#     codex: {model: "<standard model id>", effort: "<standard effort>"}
+#     claude: {model: "<standard model id>", effort: "<standard effort>"}
+#     gemini: {model: "<standard model id>", effort: "<standard effort>"}
 #   economy:
-#     codex: {model: "gpt-5.6-terra", effort: "low"}
-#     claude: {model: "claude-haiku-4-5"}
-#     gemini: {model: "gemini-3.5-flash"}
-# default_tier: "economy"
+#     codex: {model: "<economy model id>", effort: "<economy effort>"}
+#     claude: {model: "<economy model id>", effort: "<economy effort>"}
+#     gemini: {model: "<economy model id>", effort: "<economy effort>"}
+# default_tier: "standard"
 # Optional coordinator retry controls. Omit to use team-harness defaults.
 # team_harness_max_retries: 8
 # team_harness_retry_base_delay_s: 2.0
@@ -41,11 +48,18 @@ team_harness_system_prompt_extension: |
     goal, ownership, and absolute paths are authoritative.
   - Engine state and session topology are coordinator-owned. Workflow roles
     own only the semantic artifacts named by their assignment and contract.
+  - Read the frozen workflow roster, conditional scheduler view, and harness
+    capability roster before planning delegation or duplicating scheduled work.
   - Directly spawned agents are temporary delegates inside the current
     attempt. Give each a focused role/task/evidence contract; the harness
     coordinator remains accountable for integration and loop-layer decisions.
+  - For consequential independent work, prefer parallel analyses from
+    different enabled harness families and review a stable artifact with a
+    different family when useful. Keep one integration owner. The four
+    semantic tiers are frontier, strong, standard, and economy. These are
+    judgment defaults, not quotas or completion gates.
   - A genuinely terminal blocker is the only human escape hatch. After all
-    autonomous routes are exhausted, atomically publish control v2 with state
+    autonomous routes are exhausted, atomically publish control v3 with state
     stopped, stop_reason unresolvable_error, a unique control_id, the exact
     session/workflow/attempt producer, non-empty attempted_routes, evidence_refs,
     a specific reason, and an RFC3339 created_at. Ordinary uncertainty or

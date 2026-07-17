@@ -1,29 +1,28 @@
 # Session Layout
 
-loopy-loop separates compact durable state from detailed execution traces:
+loopy-loop keeps two deliberately different runtime trees:
 
-- `.loopy_loop/sessions/` is the state machine and compact evidence needed to
-  schedule, recover, evaluate, and understand a recursive run.
-- `.loopy_loop/traces/` is detailed, attempt-scoped observability: model
-  envelopes, team-harness records, direct-agent assignments and logs, raw eval
-  output, and verbose git evidence. Traces are independently sealable and
-  gitignored.
+- `.loopy_loop/sessions/` is compact durable state. It contains the facts
+  needed to schedule, resume, explain, and hand off a run.
+- `.loopy_loop/traces/` is detailed attempt observability: prompts, harness
+  records, spawned-agent assignments and streams, raw eval output, and verbose
+  Git evidence.
 
-Both trees are runtime output and are ignored by the generated `.gitignore`.
-Ignoring session state does not make it disposable while a run is active:
-continuity lives in these files. Trace retention is independent because the
-compact receipts needed for correctness remain in the session.
+Both trees are gitignored by the generated `.gitignore`. Session state is still
+required while a run is active; gitignored does not mean disposable. Traces may
+be retained, deleted, or exported independently because any evidence used by
+the state machine is represented by compact, hash-bound session receipts.
 
-Path construction is centralized in `src/loopy_loop/sessions.py`. Fresh 0.7
-runs use the v2 layout below. Existing v1 sessions remain readable and are
-described at the end.
+Path construction is centralized in `src/loopy_loop/sessions.py`. The stock
+`inner_outer_eval` and `pm_planner_dispatcher` workflow sets declare semantic
+protocol v3. The persisted coordinator-state schema remains v2: state schema
+and agent-facing session protocol are separate version axes.
 
-## Recursive tree
+## Recursive session tree
 
-A root session is a direct child of `.loopy_loop/sessions/`. Every requested
-child is physically nested under its parent. The same shape can recurse to any
-depth; there is no separate hard-coded state machine for a planner/dispatcher
-or a three-loop deployment.
+A root session is a direct child of `.loopy_loop/sessions/`. A requested child
+is physically nested under its parent, and the same shape can recurse again.
+There is no separate hard-coded tree format for one-, two-, or three-loop use.
 
 ```text
 .loopy_loop/
@@ -34,18 +33,27 @@ or a three-loop deployment.
 │       ├── goal_contract.json
 │       ├── session.json
 │       ├── workflow_contract.json
+│       ├── workflow_roster.json
+│       ├── harness_capability_roster.json       # root only; shared by the tree
 │       ├── state.json
 │       ├── events.jsonl
 │       ├── control.json
+│       ├── session_outcome.json                 # after any v3 terminal transition
 │       ├── inputs/
 │       │   ├── user_updates.jsonl
-│       │   ├── accepted_request.json       # child sessions only
-│       │   └── artifacts/                  # frozen parent inputs
+│       │   ├── accepted_request.json            # child only
+│       │   └── artifacts/                       # frozen child inputs
 │       ├── project_state/
-│       │   └── finished.md
+│       │   ├── plan.md
+│       │   ├── tasks/
+│       │   ├── current_state.md
+│       │   ├── decisions/
+│       │   ├── finished.md
+│       │   ├── eval_state.md
+│       │   └── handoff.json
 │       ├── eval_checks/
-│       ├── eval_readiness/
 │       ├── eval_receipts/
+│       │   └── accepted/                        # engine acceptance seals
 │       ├── child_requests/
 │       │   ├── pending/
 │       │   ├── accepted/
@@ -59,399 +67,353 @@ or a three-loop deployment.
 │       ├── control_rejected/
 │       ├── protocol_failures/
 │       ├── iterations/
-│       │   └── 0001_<workflow_id>/
-│       ├── harness_outputs/
+│       ├── harness_outputs/                     # legacy-compatible projection
 │       └── children/
 │           └── <child_session_id>/
 │               ├── parent.json
-│               ├── goal.md
-│               ├── goal_contract.json
-│               ├── session.json
-│               ├── workflow_contract.json
-│               ├── state.json
-│               ├── ...same session directories...
-│               └── children/
-│                   └── <grandchild_session_id>/...
+│               ├── workflow_roster.json
+│               ├── ...same per-session files...
+│               └── children/<grandchild_session_id>/...
 ├── traces/
 │   └── <root_session_id>/sessions/<session_id>/attempts/<attempt_id>/
 └── trace_finalization_outbox/
 ```
 
-Only the deepest live session receives work. While a child runs, its parent has
-`active_child_session_id` set and is suspended. When a child becomes terminal,
-the coordinator writes a factual outcome, clears the pointer, and resumes the
-parent; multiple terminal ancestors can be unwound in one iterative transition.
-The durable pointer and recovery logic are in
-`CoordinatorService._suspended_parent_response()` and
-`_resume_parent_if_active_child_completed()`.
+Only the deepest live session receives work. A parent with
+`active_child_session_id` is suspended until that child becomes terminal. The
+coordinator then records the child result, clears the pointer, and resumes the
+parent. `CoordinatorService._suspended_parent_response()` and
+`_resume_parent_if_active_child_completed()` implement this depth-first stack.
 
-`.loopy_loop/repository.json` is not session state. It contains the stable
-checkout identity created by `assignments.ensure_repository_identity()` and is
-used to bind coordinator and worker to the same checkout.
+`.loopy_loop/repository.json` is checkout identity, not session state.
+`assignments.ensure_repository_identity()` creates it so coordinator and
+worker can prove that they are operating in the same checkout.
 
-## Immutable identity and contracts
+## Frozen identity, scope, and role contracts
 
-These files explain what one loop layer is and what it owns. They are written
-when the session is created and are not a substitute for mutable progress
-state.
+### `goal.md` and `goal_contract.json`
 
-### `goal.md`
+`goal.md` is the exact resolved goal for this layer. A child receives its
+child-scoped goal, never the parent's broader goal. `goal_contract.json` binds
+that text and full hash to completion criteria, stop criteria, constraints,
+deliverables, required evidence, and origin metadata.
 
-The exact resolved goal text for this layer. A child receives its
-child-assignment goal, not the parent's broader goal. The configured root goal
-file may later change; active work continues to use this session-local copy.
+A child's contract also binds the accepted request and every declared parent
+input by logical reference and SHA-256. The exact bytes are copied into the
+child's own `inputs/` tree. Later parent edits therefore cannot silently change
+an already accepted child assignment.
 
-### `goal_contract.json`
+### `session.json` and `parent.json`
 
-The typed scope for this layer: goal and full hash, completion/stop criteria,
-constraints, deliverables, required evidence, and terminal-blocker policy. A
-child contract additionally freezes:
-
-- the originating `request_id`;
-- a child-local logical reference and hash of the accepted request body; and
-- child-local logical references and hashes for exact copies of every declared
-  parent input.
-
-`assignments.build_attempt_assignment()` verifies these hashes again before
-the harness runs and exposes worker-local absolute paths for accepted inputs.
-`session.json.origin` keeps the original parent references/hashes and their
-mapping to these frozen copies, so provenance does not depend on mutable parent
-state.
-
-### `session.json`
-
-The immutable session manifest. V2 records include `session_id`,
-`root_session_id`, `parent_session_id`, `depth`, `workflow_set`, `layer_kind`,
-goal and goal-contract hashes, origin provenance, and creation time. A child
-also has `parent.json`, which records the parent identity and physical relative
-path. `references.LogicalReferenceResolver` validates physical nesting against
-these declarations before resolving cross-layer references.
-
-Session IDs use `<UTC date>_<UTC time>_<short goal hash>_<random>`. The short
-fragment makes names readable; the contracts use full SHA-256 where provenance
-requires it.
+`session.json` is the immutable manifest: session/root/parent identity, depth,
+workflow set, layer kind, goal and contract hashes, origin provenance, and
+creation time. A child also has `parent.json`. Logical-reference resolution
+checks these declarations and physical nesting before allowing a cross-layer
+reference.
 
 ### `workflow_contract.json`
 
-The selected workflow set's agent-visible role-contract projection: session protocol version,
-layer kind, named role responsibilities, state declarations, eval author/
-runner/control roles, task-acceptance role, terminal-blocker reporting roles,
-and child interface. The complete v2 contract is also stored in coordinator-owned
-`state.json`; before a later attempt, the coordinator restores this file and
-its `session.json` hash from that trust root if both projections were rewritten.
-The attempt snapshot then freezes and hashes the restored bytes.
+This is the session-frozen role and authority contract. In protocol v3 it
+separates orchestration from evaluation:
 
-## Coordinator state and observations
+- `orchestration` names one role that owns the layer plan, rolling handoff, and
+  successful completion decision;
+- `evaluation` names optional check authors and runners; their results are
+  advisory evidence; and
+- `terminal_blocker_reporting_roles` names roles allowed to report the D5
+  last-resort `unresolvable_error`.
+
+The stock `inner_outer_eval` contract has four scheduled roles. `outer` owns
+the plan, handoff, leaf acceptance, and `goal_met`; `inner` executes one
+outer-selected leaf; `eval_reviewer` optionally authors checks; and
+`eval_runner` optionally publishes observations. The same workflow set works
+as either a root or a child.
+
+The stock `pm_planner_dispatcher` contract has only `planner` and `dispatcher`.
+`planner` owns the high-level milestone plan, child acceptance/rerouting,
+handoff, and `goal_met`. `dispatcher` transports one planner-selected outcome
+into a typed child request. PM-level scheduled eval roles are intentionally not
+duplicated; the planner may obtain or run optional final evidence itself.
+
+The complete parsed contract is also held in engine-owned `state.json`. Before
+dispatch, the coordinator restores rewritten on-disk contract projections from
+that trust root and freezes the exact bytes into the attempt snapshot.
+
+### `workflow_roster.json`
+
+Protocol v3 creates this once per session from the frozen workflow definitions
+and contract. It lists every scheduled role with its responsibility, cadence
+(`priority`, `run_every`, `run_on_start`, `must_follow`,
+`run_after_successes`, and related fields), expected outputs, and authorities.
+It is the inspectable answer to “which durable roles exist in this layer and
+what are they responsible for?” It is not a catalog of agents dynamically
+spawned inside one team-harness run.
+
+### `harness_capability_roster.json`
+
+Protocol v3 creates one roster at the root and every descendant references the
+same absolute file. It freezes:
+
+- the configured harness-coordinator provider/model;
+- every enabled delegate harness family; and
+- the `frontier`, `strong`, `standard`, and `economy` model/effort bundle for
+  each family, with missing cells explicitly marked unavailable.
+
+The roster contains no credentials. It is guidance and audit context, not a
+model-policy gate. Prompts use tier names, while concrete model IDs remain in
+configuration and this generated roster. The worker also forwards the path,
+hash, and compact roster object through team-harness caller context so nested
+harness coordinators see the same tree-wide catalog.
+
+## Coordinator state and event projection
 
 ### `state.json`
 
-The coordinator-owned source of truth. V2 state is revisioned on mutations and
-contains:
-
-- this layer's status, goal/workflow identity, root/parent/depth, turn limits,
-  and frozen execution snapshot;
-- `current_task`, including attempt, worker owner, repository identity, and
-  frozen workflow-snapshot descriptor;
-- iteration history and per-workflow failure counters;
-- the active-child pointer and child-request/work-item provenance;
-- token/duration totals and stop/control-failure state.
+`state.json` is the engine-owned scheduling source of truth. Its v2 persisted
+schema contains the current task, iteration history, failure and usage ledgers,
+active-child pointer, frozen execution and workflow contracts, and terminal
+state. For protocol v3 it additionally keeps the root capability roster trust
+root, the latest observed handoff revision/hash, and accepted eval-receipt
+seals.
 
 The convenient phase (`ready`, `executing`, `suspended`, or `terminal`) is
-derived from status, current task, and active child; it is not a second durable
-state machine. `StateStore` owns state writes. Agents receive `state.json` as
-read-only engine state through `assignment.json`; they communicate desired
-transitions through typed workflow-owned files.
+derived from status, current task, and child pointer. Agents receive the
+absolute `state.json` path as read-only engine state and request transitions by
+publishing typed workflow-owned files.
 
 ### `events.jsonl`
 
-A best-effort observability projection appended after state mutations commit.
-Each line is a schema-v1 envelope with `event_id`, UTC timestamp, session ID,
-type, and payload. Current event types include `session_started`,
-`task_dispatched`, `task_finished`, `iteration_abandoned`, `goal_check`,
-`child_started`, `child_finished`, and `session_stopped`.
+This is a best-effort post-commit observability stream. Consumers must tolerate
+duplicates, gaps, and a truncated last line and deduplicate by `event_id`.
+Scheduling and recovery use `state.json`, not this projection. Protocol-v3
+observations include `eval_observation` and `handoff_observed`; neither is a
+semantic acceptance gate.
 
-Consumers must tolerate gaps, duplicates, and a truncated final line and
-deduplicate by `event_id`. Scheduling and recovery use `state.json`, not the
-event stream. `loopy events --follow` tails it.
+## Protocol-v3 semantic state spine
 
-### `control.json`
+`sessions._create_v3_semantic_spine()` scaffolds the same compact state in
+every root and child:
 
-The workflow-owned stop request. A fresh v2 session begins with a neutral,
-v1-compatible running record:
+| Path | Accountable owner | Purpose |
+| --- | --- | --- |
+| `project_state/plan.md` | layer orchestrator | Current outcomes, dependencies, revision, active selection, and replanning triggers for this layer |
+| `project_state/tasks/` | orchestrator; leaf/dispatcher may contribute evidence | Stable per-task objective, status, dependencies, and accepted evidence |
+| `project_state/current_state.md` | orchestrator | Short resumption view: active outcome, blockers, risks, and next decision |
+| `project_state/decisions/` | orchestrator | Durable choices and rationale later attempts should not rediscover |
+| `project_state/finished.md` | orchestrator | Append-only accepted-work ledger with commit, PR, test, review, and delivery references |
+| `project_state/eval_state.md` | orchestrator; eval roles contribute observations | Optional evaluation intent, observations, disagreement, provenance, and possible next action |
+| `project_state/handoff.json` | orchestrator | Rolling semantic summary for a parent or operator |
 
-```json
-{
-  "state": "running",
-  "reason": "session active",
-  "stop_reason": null,
-  "schema_version": 1
-}
-```
+The coordinator scaffolds headings and a revision-zero handoff but does not
+parse plan prose, choose tasks from it, or judge semantic sufficiency. `outer`
+or `planner` keeps the spine coherent. `inner` executes the selected task and
+reports evidence; it does not create the layer plan when selection is absent.
 
-For a workflow contract with `session_protocol_version: 2`, terminal control
-must use the identity-bound v2 form. Successful `goal_met` must be authored by
-the declared goal-control role and cite a valid passing receipt in this
-session. Last-resort `unresolvable_error` must come from an allowed role and
-record autonomous routes already exhausted. See
-`CoordinatorService._apply_session_control()` and `_validate_v2_control()`.
+`handoff.json` binds the session and goal, a monotonically increasing revision,
+the producing workflow/attempt, a summary, and flexible accepted/open/risk/
+decision/evidence/delivery/eval lists. The engine validates its structure and
+records continuity diagnostics. A missing, malformed, or non-monotonic handoff
+does not override an authentic orchestrator completion decision.
 
-Both terminal forms must match the session, workflow, and attempt of the exact
-current task whose `/finished` transition is being processed. Control from a
-prior attempt or another layer is rejected even when its role name is allowed.
-A spawned agent reports a conclusion to its harness coordinator; that current
-workflow role publishes the session-owned control record.
+Protocol v3 retires `eval_readiness/`; readiness and evaluation headlines live
+in `project_state/eval_state.md`, and scheduled-role timing is visible in the
+attempt's scheduler view. Frozen v2 sessions retain `eval_readiness/`.
 
-Invalid terminal v2 control is moved unchanged to `control_rejected/`. A
-`protocol_failures/` record preserves its hash, producer, and rejection reasons,
-and `control.json` is restored to running so autonomous repair can continue.
-Consecutive invalid controls use `goal_check_consecutive_failures_cap`, shared
-with invalid goal-check projections. This is detection and repair, not
-preventive write fencing or a human gate.
+## Append-only user input
 
-### `protocol_failures/`
+`inputs/user_updates.jsonl` is the channel used by `loopy update`. An update
+records its ID, target, routed session, timestamp, exact text, and pending
+acknowledgement state. Before an attempt, `worker._semantic_prompt_context()`
+records delivery and renders pending inputs. After acting, the workflow appends
+an acknowledgement rather than editing earlier lines.
 
-Compact, durable protocol diagnoses. In addition to invalid terminal control,
-the coordinator uses this directory to preserve an unreadable v2
-`children.json` and record bounded reconstruction. Reconstruction derives only
-from accepted requests, child manifests, and child state; it does not silently
-treat a damaged ledger as empty.
+## Attempt snapshot and absolute assignment paths
 
-## Append-only inputs
-
-### `inputs/user_updates.jsonl`
-
-The v2 input channel used by `loopy update`. Each operator update appends a
-`user_input` record with a unique ID, target scope/session, routed destination,
-timestamp, exact text, and pending acknowledgement state. Without
-`--session`, the CLI routes it to the deepest active layer; an explicit session
-targets that layer.
-
-Before an attempt is rendered, `worker._semantic_prompt_context()` reads the
-journal, appends one `input_delivery` record per pending input/attempt, and
-includes pending records in the prompt. The workflow is instructed to append a
-`user_input_acknowledgement` with disposition after acting. Earlier lines are
-never edited. This distinguishes input creation, delivery, and semantic
-acknowledgement without pretending the coordinator understood the text.
-
-`updates_from_user.md` is still scaffolded/readable for legacy compatibility,
-but new operator updates use the JSONL journal.
-
-## Workflow-owned durable state and evidence
-
-### `project_state/`
-
-Markdown/JSON state maintained by workflow roles. The coordinator does not
-interpret arbitrary files here. Typical packaged workflows keep current
-planning context, decisions, accepted work, and handoff summaries. `goal.md`
-and `goal_contract.json` remain authoritative for the layer's target; agents
-should not create a competing goal in project state.
-
-`project_state/finished.md` is the outer/task-acceptance role's accepted-work
-ledger. Mechanical harness completion does not append acceptance by itself.
-Implementation entries should link compact eval, git, and delivery evidence.
-
-The packaged PM set also uses
-`project_state/dispatch_inputs/<request_id>.json` for immutable, per-request
-selection snapshots. The dispatcher hashes this snapshot into a child request
-before updating its mutable `work_items.md` ledger. A published snapshot is
-never edited; a rework or reroute request receives a new request id and file.
-
-### Evaluation directories
-
-- `eval_checks/` contains session-scoped eval-banana YAML definitions.
-- `eval_readiness/` contains task-acceptance/readiness context for later eval
-  work. The worker includes the latest receipt in semantic prompt context; it
-  does not force scheduler eligibility.
-- `eval_receipts/` contains compact, identity-bound verdict receipts and
-  canonical report copies retained independently from detailed traces.
-
-Raw eval-banana output belongs under the attempt trace's `eval/` directory.
-The attempt assignment exposes that exact absolute path as `raw_eval_output`.
-Packaged eval workflows use hermetic `--no-project-config`, an explicit judge,
-and pass threshold 1.0. Eval-banana persists each harness judge's exact input
-as `checks/<safe-check-stem>.prompt.txt`; the matching result, stdout, stderr,
-and deterministic evidence directory use the same bounded stem. The stem
-includes the full digest of the exact check ID, so case-only, normalized-label,
-and long IDs remain distinct on the local filesystem.
-
-An eval receipt's own schema is v1 inside the v2 session protocol. It records:
-
-- root/session/goal and optional git subject identity;
-- producer workflow, iteration, attempt, and harness run;
-- a unique inventory of harness-judge check IDs and eval-banana canonical
-  definition SHA-256 values copied from the raw report;
-- effective judge provider/model/reasoning effort;
-- per-check results and the all-pass verdict;
-- a canonical report reference/hash and the producing attempt's exact
-  `eval/report.json` reference,
-  with `raw_report_sha256s` keyed exactly by `raw_report_refs`;
-- creation time.
-
-`CoordinatorService._validate_eval_receipt_artifacts()` resolves and verifies
-the definition and report hashes. A definition digest is not the raw YAML file
-hash: eval-banana frames the exact definition bytes with its versioned digest
-protocol, emits that value in `report.json`, and exposes the same computation
-for loopy-loop to verify independently. Every receipt, passing or failing, must have
-exactly one `raw_report_refs` entry: the producing attempt's canonical
-`eval/report.json`; the trace and harness identities must match the producer.
-Every regular `*.yaml`/`*.yml` check found recursively beneath `eval_checks/`
-must be valid, uniquely identified, included, and bound to the exact bytes
-eval-banana ran; symlinks and non-files are rejected. JSON/schema failures
-preserve up to eight field-qualified diagnostics in failed history and
-terminal-control rejection evidence. For a passing receipt it additionally
-requires the report's absolute `project_root` to match the target repository,
-its absolute `output_dir` to match the producing attempt's canonical `eval/`
-directory, `run_passed: true`, `pass_threshold: 1.0`, the exact receipt check
-inventory with every status `passed` and exit code zero, and each check's
-effective agent/model/reasoning effort to match the receipt judge. It also
-recaptures live Git state and requires it to match the evaluated HEAD and
-dirty-tree digest.
-These are transport, provenance, and all-pass mechanics. The coordinator does
-not reinterpret the LLM judge's semantic reasons (D3/D4/D8).
-
-An eval-emitting iteration also writes `goal_check.json` beside its result. V2
-contains `goal_met`, the exact receipt verdict reason, and an
-`eval_receipt_ref`. It is an iteration-local projection, not a stop switch.
-
-### Parent/child handoff directories
-
-- `child_requests/pending/` is the v2 inbox. A request supplies a unique
-  `request_id`, origin attempt/work-item context, child-scoped assignment, and
-  optional hashed input references.
-- `child_requests/accepted/` preserves the exact request body selected for
-  dispatch. Its hash is frozen into the child contract and ledger.
-- `child_requests/rejected/` preserves invalid/undispatchable pending requests
-  and separate receipts with reasons and original hashes.
-- `children.json` is the revisioned parent index of dispatch intent and child
-  lifecycle. It records request/child identity, accepted request evidence,
-  status, outcome, usage, and any failed dispatch projections.
-- `child_outcomes/<request_id>.json` is written by the coordinator when the
-  child becomes terminal. It reports lifecycle, usage, compact handoff/eval/
-  git/delivery references when present, latest trace reference, and
-  completeness flags. It is factual evidence, not parent acceptance.
-- `parent_acceptance/` is separately owned by the accountable parent workflow.
-  A child's `goal_met` result never automatically closes its parent.
-
-The reader observes both v2 `pending/*.json` and the legacy flat
-`child_requests/*.json` inbox. Request identity prevents v2 redispatch;
-recorded dispatch state also closes the crash window between creating a child
-and removing the pending file.
-
-### `git_receipts/` and `delivery_receipts/`
-
-The worker writes compact git boundary receipts before and after each v2
-attempt. Verbose status/diff material goes into the trace, while hashes and
-summary facts remain under `git_receipts/`. Workflow roles may write delivery
-receipts for branches, PRs, merges, or other declared deliverables. These
-compact records do not depend on detailed trace retention.
-
-Schema-v2 receipts use `loopy-git-status-diff-v1-sha256`. The digest binds
-byte-stable, non-runtime porcelain status records plus Git's staged and
-unstaged binary diffs. Engine runtime session/trace/outbox/state paths are
-excluded, but versioned `.loopy_loop/workflow_sets/` definitions are product
-input and remain part of the subject. Untracked and nested repositories remain
-visible through porcelain paths; the compact digest is not a second archive of
-their complete contents, which belong in the verbose trace when observable.
-
-## Iteration directory
-
-Each loopy task has a recovery-critical directory:
+Every modern task has a recovery-critical iteration directory:
 
 ```text
-.loopy_loop/sessions/<nested session path>/iterations/<NNNN>_<workflow_id>/
-├── workflow_snapshot/
-│   └── <attempt_id>/
-│       ├── assignment.json
-│       ├── config.yaml
-│       ├── prompt.txt
-│       ├── workflow_contract.yaml
-│       ├── root_config_snapshot.json
-│       └── manifest.json
+iterations/<NNNN>_<workflow_id>/
+├── workflow_snapshot/<attempt_id>/
+│   ├── assignment.json
+│   ├── scheduler_view.json              # protocol v3
+│   ├── config.yaml
+│   ├── prompt.txt
+│   ├── workflow_contract.yaml
+│   ├── root_config_snapshot.json
+│   └── manifest.json
 ├── prompt.txt
 ├── result.json
 ├── result_text.txt
 ├── harness_run_id.txt
 ├── pending_finished_request.json
 ├── trace_ref.json
-├── goal_check.json                 # only when the workflow emits it
-└── salvage.json                    # only after applicable crash recovery
+├── goal_check.json                      # optional/legacy projection
+└── salvage.json                         # only after applicable recovery
 ```
 
-### `workflow_snapshot/<attempt_id>/`
+`materialize_workflow_snapshot()` freezes the scheduler-selected workflow
+configuration, prompt, contract, root execution snapshot, repository identity,
+and hashes. `assignment.json` then binds one actor, objective, checkout,
+session, workflow, iteration, and attempt. The worker verifies the snapshot,
+reconstructs the assignment independently, and checks the coordinator's frozen
+assignment SHA-256 before calling the harness.
 
-Created by `assignments.materialize_workflow_snapshot()` before dispatch. It
-freezes the exact selected workflow config, prompt, workflow-set contract, root
-execution snapshot, identity, repository identity, and hashes for one attempt.
-The worker verifies all members before executing. This prevents a mid-run
-workflow edit from silently changing an already-dispatched task.
+Protocol-v3 `assignment.json` has schema version 2 and carries absolute paths
+under stable keys. The semantic and orchestration keys are:
 
-### `workflow_snapshot/<attempt_id>/assignment.json`
+```text
+layer_goal                 layer_goal_contract
+layer_inputs               layer_plan
+layer_tasks                layer_current_state
+layer_decisions            layer_finished_ledger
+layer_eval_state           layer_handoff
+session_state              session_outcome
+workflow_contract          workflow_roster
+scheduler_view             harness_capability_roster
+user_inputs                child_requests
+children_index             child_outcomes
+parent_acceptance          git_receipts
+delivery_receipts          session_control
+attempt_root               trace_root
+```
 
-Created by the coordinator before dispatch, hashed into `CurrentTask`, and
-verified independently by the v2 worker before the model call. It contains:
+The full map also retains operational aliases such as `repo_root`,
+`session_root`, `eval_checks`, and `eval_receipts`. Stable origin keys
+`parent_goal`, `parent_goal_contract`, `parent_handoff`, and
+`accepted_child_request` are absolute paths for a child and explicit nulls when
+inapplicable. `layer_inputs` always means this layer's own immutable input
+directory.
 
-- root/current/parent session, depth, request/work-item, workflow, iteration,
-  and attempt identity;
-- actor kind `harness_coordinator`, workflow role, layer kind, and role
-  responsibility;
-- the scoped objective, expected outputs/evidence, and frozen child inputs;
-- absolute paths to this checkout's relevant state, evidence, iteration, and
-  trace locations;
-- plain-language ownership: integrate within this session, use typed receipts
-  across parent boundaries, and treat engine state as read-only;
-- repository/config/workflow/goal/git provenance hashes.
+The assignment's `context` embeds compact copies of the workflow roster,
+scheduler view, capability roster, and current layer identity; `provenance`
+hashes their canonical files. The rendered prompt prints the authoritative
+assignment path and every named absolute path. Agents must use those values
+rather than infer `.loopy_loop/sessions/...` from cwd or directory names.
 
-Absolute paths are execution-time capabilities for agents in this checkout.
-Durable records use logical references so the session tree can be inspected
-after relocation. The coordinator does not enforce assignment ownership as a
-filesystem ACL; violations are detected through eval/evidence (D8).
+Absolute paths are execution-time coordinates for this checkout. Durable
+cross-file evidence uses logical references so a completed tree remains
+inspectable after relocation. Ownership guidance is not implemented as a
+filesystem ACL (D8).
 
-### `prompt.txt`
+### `scheduler_view.json`
 
-The exact rendered task passed to `TeamHarness.run(task=...)`, persisted before
-the first provider call by `harness_runner.write_iteration_inputs()`. It
-includes assignment/role context, absolute paths, pending user inputs, latest
-eval-readiness context, and the frozen workflow prompt.
+This attempt-frozen artifact shows recent mechanical history and a conditional
+next-role forecast. The coordinator simulates the current attempt returning as
+a mechanical success and runs the unchanged scheduler against that projected
+history. The view records the possible next workflow, reasons, and assumptions
+that no terminal control, child request, failure, update, stop, or recovery
+changes state.
 
-### `result.json`, `result_text.txt`, and `harness_run_id.txt`
+It is not a reservation. Its purpose is to let an orchestrator reason about an
+imminent scheduled evaluator or reviewer without falsely promising what will
+happen after the current attempt.
 
-`result.json` is the worker-normalized `IterationResult`: mechanical success,
-text/error/failure detail, optional usage and duration, harness run ID, explicit
-harness output/run-record paths, trace manifest path, and attempt ID.
-`result_text.txt` and `harness_run_id.txt` are convenient projections.
+## Optional evaluation evidence
 
-`success: true` means the harness call returned normally. It is not semantic
-acceptance and is not inferred from a spawned agent's exit status (D3).
+`eval_checks/` contains session-scoped check definitions. The stock
+`inner_outer_eval` check authors use outcome-oriented `harness_judge` checks;
+repo-owned test suites and prepared evaluations may provide additional
+evidence. `eval_receipts/` contains compact identity- and hash-bound verdicts.
+Raw reports remain under the producing attempt's trace `eval/` directory.
 
-### `pending_finished_request.json`
+In protocol v3 evaluation is advisory:
 
-The exact HTTP completion body, written atomically after result artifacts and
-before `/finished`. It is removed only after acknowledgement. If the worker
-exits in that window, the next `/register` validates it against the active
-attempt and records completion exactly once. With no pending body, a matching
-`result.json` can be used to reconstruct the handoff.
+- a missing, malformed, or non-passing observation does not turn a normally
+  returned harness result into failure, consume the workflow failure budget,
+  or prevent the orchestrator from receiving another turn;
+- any declared `evaluation.check_runner_roles` workflow may produce a receipt;
+  this is not hard-coded to a role named `eval_runner`; and
+- `goal_check.json`, when present, is an optional/legacy iteration projection,
+  not a session stop switch.
 
-### `trace_ref.json`
+When an authorized runner finishes, `_accept_current_eval_receipts()` validates
+the current-attempt receipt and its raw/canonical bytes, check definitions,
+subject, producer, harness run, judge settings, and evaluated Git identity.
+Each valid receipt gets an engine-owned sidecar in
+`eval_receipts/accepted/<eval_id>.json`, and the same acceptance seal is stored
+in `state.json`. The sidecar binds receipt reference/hash, subject, producer,
+evaluated Git identity, and acceptance time.
 
-A compact link from the durable iteration to `trace:<manifest_id>:/...` for the
-attempt. v2 session history records the same relocatable logical reference;
-only legacy history retains the absolute manifest path supplied by an older
-worker. Accepted v2 history also records the frozen assignment hash and hashes
-of the exact `/finished` request and returned response.
-Crash-abandonment history records the assignment hash without a finished
-exchange.
+Later `control.json` may cite accepted receipts from earlier attempts. Control
+validation checks the compact receipt against its seal and current
+session/root/goal/authorized-runner identity; it does not need to reopen raw
+trace bytes. Citing a stale, foreign, modified, or unaccepted receipt is a
+false provenance claim and invalidates that control record. Merely having a
+bad advisory receipt does not.
 
-### `salvage.json`
+## Terminal control and topology-neutral outcome
 
-Written only when crash recovery processes at least one tracked harness run.
-It records policy and per-process drain/reap/skip reports. It does not fabricate
-a result. If any process remains potentially live, the coordinator refuses
-replacement work until the ambiguity is resolved.
+`control.json` begins as a neutral running record. In protocol v3 a terminal
+record must identify the exact current session/workflow/attempt. `goal_met`
+must come from the contract's `orchestration.completion_role`; it may cite
+logical evidence, zero or more accepted eval receipts, and the canonical
+handoff. No eval receipt, passing verdict, or same-attempt eval is required.
+
+`unresolvable_error` is the D5 last resort. It must come from an authorized
+role and list autonomous routes already tried. There is no paused or
+waiting-for-human state. The exact schemas and rejection behavior are in
+[`http-contract.md`](./http-contract.md#protocol-v3-terminal-control).
+
+After any v3 terminal transition, `_ensure_session_outcome()` writes
+`session_outcome.json`. This includes orchestrator control (`goal_met` or
+`unresolvable_error`) and engine lifecycle stops such as `max_turns`,
+`workflow_failure_cap`, or `stop_requested`. The projection has the same shape
+for a root or child and binds:
+
+- session/root/goal identity, terminal status, and the frozen transition
+  revision/timestamp;
+- stop reason and, for control-owned stops, the exact accepted control hash;
+- handoff status (`valid`, `missing`, `invalid`, or `non_monotonic`) plus its
+  reference/hash/revision when available;
+- the exact control reason or factual engine stop reason as fallback when no
+  valid handoff exists; and
+- evidence, session-wide delivery, accepted eval, and trace-seal references.
+
+The coordinator stores accepted terminal-control and valid-handoff bytes in
+`state.json`. Outcome regeneration restores those exact bytes if mutable files
+were later changed, so restart or trace-finalization refreshes cannot rewrite
+the terminal basis. Trace-seal references may grow as asynchronous trace
+finalization completes; terminal identity, control, and handoff do not.
+
+A v3 parent's `child_outcomes/<request_id>.json` does not synthesize a second
+story. It contains the request/child identity and a logical reference plus hash
+of that child's `session_outcome.json`. The parent orchestrator separately
+records `accepted`, `rework`, or `reroute` in `parent_acceptance/`; a child's
+`goal_met` never completes its parent.
+
+Invalid terminal control is moved unchanged into `control_rejected/`, with a
+reasoned compact record in `protocol_failures/`. The engine restores a running
+placeholder so a later attempt can repair the protocol. This enforces identity,
+schema, containment, and truthful provenance, not semantic sufficiency.
+
+## Child request and acceptance records
+
+A recursive workflow atomically publishes a schema-v2 request under
+`child_requests/pending/`. It supplies a unique request ID, exact origin
+attempt, child workflow set, scoped outcome goal and criteria, and optional
+hashed input references. A valid request is copied unchanged into
+`accepted/`, indexed in revisioned `children.json`, and frozen into the child.
+An invalid request is archived in `rejected/` with its original hash and
+diagnosis. This is autonomous disposition, not a human approval gate.
+
+The stock PM planner selects a phase- or milestone-sized outcome; the
+dispatcher faithfully transports it. The child `outer` owns decomposition into
+leaves. `parent_acceptance/` remains a distinct parent-owned semantic decision
+after the child result arrives.
+
+## Git, delivery, and trace receipts
+
+The worker writes compact Git boundary receipts before and after every modern
+attempt. Verbose status and diff bytes stay in traces. Workflow roles may add
+delivery receipts for branches, PRs, merges, or other declared deliverables.
+`project_state/finished.md` should link accepted work to these receipts.
+
+Trace-seal receipts under `trace_seals/` bind the final attempt manifest and
+inventory without copying raw traces into durable state. Trace finalization is
+best effort with a durable outbox; failure to capture a trace does not roll back
+an accepted semantic transition.
 
 ## Caller-owned attempt traces
-
-For a v2 task, the coordinator creates the active trace during dispatch and
-the worker reopens it:
 
 ```text
 .loopy_loop/traces/<root_session_id>/sessions/<session_id>/attempts/<attempt_id>/
@@ -462,109 +424,33 @@ the worker reopens it:
 │   ├── rendered_prompt.txt
 │   ├── iteration_result.json
 │   ├── finished_request.json
-│   └── finished_response.json          # only when observed
-├── harness/
-│   └── <team_harness_run_id>/
-│       ├── run.json
-│       ├── coordinator_input.json
-│       ├── worker_sessions.json
-│       ├── agents/<agent_id>/agent_assignment.json
-│       └── workers/<label>/
-│           ├── stdout.jsonl
-│           └── stderr.log
-├── agents/
+│   └── finished_response.json
+├── harness/<team_harness_run_id>/
+│   ├── run.json
+│   ├── coordinator_input.json
+│   ├── worker_sessions.json
+│   ├── agents/<agent_id>/agent_assignment.json
+│   └── workers/<label>/{stdout.jsonl,stderr.log}
 ├── eval/
 ├── git/
-│   ├── before-receipt.json
-│   ├── after-receipt.json
-│   └── ...verbose status/diff evidence...
-└── service/
-    ├── finished_exchange.json          # request + response status
-    └── recovery.json                   # abandoned attempts only
+└── service/{finished_exchange.json,recovery.json}
 ```
 
-The coordinator creates `trace_manifest.json` and compact iteration
-`trace_ref.json` before returning the task. The worker identity-checks that
-same active manifest and writes the exact `TaskResponse` to
-`protocol/task_response.json`; it does not create a competing trace.
+Loopy supplies the absolute attempt `harness/` root to team-harness. Direct
+spawns receive their own assignment/output paths plus relevant layer-state
+paths. A built-in `type=harness` spawn receives nested caller context,
+including the root/current layer identity and root capability roster, and
+writes beneath that direct agent's `harness_runs/`. It is a dynamic delegate
+inside the current attempt, not a durable child session.
 
-Loopy passes the absolute `<attempt>/harness/` directory to team-harness as
-`CallerContext.trace_root`. Team-harness owns one fresh run-ID child beneath
-that caller-selected root and returns its exact run, output, and coordinator
-input paths on structured success or failure. Loopy carries those paths in the
-iteration result rather than guessing or copying a global run location.
+Raw traces may contain prompts, commands, provider output, environment-derived
+values, and arbitrary files. A seal proves the observed local bytes and their
+inventory; it is not a disclosure-safety claim or universal filesystem
+interception.
 
-`coordinator_input.json` is the generated system/user envelope persisted before
-client/model preflight. `run.json` is the canonical run and direct-agent
-catalog. Each direct spawn receives `agent_assignment.json` with its parent
-attempt, delegated task, relevant absolute state and output paths, and the
-harness coordinator's integration ownership. Its streams and process/provider
-identity remain under the same run.
+## Logical references and atomicity
 
-For a built-in direct spawn with `type=harness`, team-harness derives a nested
-caller context automatically. It retains the same root/current session, depth,
-workflow role, parent loopy attempt, and relevant state paths; changes the
-parent assignment to that direct agent's absolute assignment; writes nested
-runs beneath the agent output's `harness_runs/`; and records the current run as
-`parent_harness_run_id`. This is nested orchestration inside the same loop
-layer, not a child session. Loopy validates that lineage and recursively checks
-the nested input, finalized run, and canonical stream files before calling the
-direct-agent channel complete. Generic subprocesses do not receive or imply
-this contract automatically.
-
-The outer manifest records identity, per-channel status, usage, failure, a
-hashed file inventory, and lifecycle. `sealed` means capture completed;
-`incomplete` means a channel or capture step did not. An unexposed provider
-channel is marked unavailable/not-produced rather than invented.
-
-### Raw local traces
-
-The trace tree is gitignored and must be treated as private local runtime data:
-it contains raw observable JSON, text, binary artifacts, prompts, commands,
-streams, and environment-derived values. Sealing inventories and hashes local
-bytes; it is an integrity/completeness boundary, not a disclosure-safety claim.
-
-This is not universal filesystem interception. A model/tool can write directly
-to the working tree or active trace because D8 deliberately avoids a write
-sandbox. Provider-native nested agents that do not pass through team-harness's
-direct spawn tool cannot be observed and remain marked unavailable.
-
-For a matching `/finished`, the coordinator writes a finalization-outbox intent
-containing the exact request and an unavailable response before it commits the
-state transition. Once the next response is determined, it updates the intent,
-writes `service/finished_exchange.json` and (when observed)
-`protocol/finished_response.json`, and seals the still-active trace. A compact
-`trace_seals/<attempt_id>.json` receipt in session state binds the final
-manifest and inventory hashes. Root/session/workflow/iteration/attempt identity
-and the canonical trace come from the immutable, hash-bound frozen assignment.
-An assignment mismatch or invalid session topology leaves the outbox for repair
-rather than redirecting the seal; an omitted or different worker-supplied path
-only marks capture incomplete.
-
-Startup processes an outbox record only after durable history proves that exact
-completion or crash abandonment committed. A completion interrupted after
-state acceptance but before its response became durable records the response as
-unavailable and seals incomplete. An abandoned attempt also seals incomplete.
-An unanchored workflow-authored `sealed`/`incomplete` claim is reopened,
-recorded as a protocol error, and coordinator-sealed incomplete. If an exact
-attempt with an uncommitted finished intent instead commits crash abandonment,
-successful abandonment finalization removes that conflicting intent.
-The outbox record remains until sealing and any terminal child-outcome
-`trace_sealed` refresh succeed. These failures do not alter D3 result semantics
-or block future scheduling. If even the intent cannot be written, the
-coordinator logs the trace I/O failure and still preserves the semantic state
-transition; write-ahead retry is guaranteed only after durable intent
-publication because trace storage is not an acceptance gate.
-
-### Trace operations
-
-- `loopy traces list` lists manifests.
-- `loopy traces inspect <path-or-manifest-id>` reads one manifest and reports
-  its currently observed integrity.
-
-## Logical references
-
-Durable evidence uses references instead of machine-specific paths:
+Durable references use these forms:
 
 ```text
 repo:/path
@@ -575,43 +461,31 @@ session:<session_id>:/path
 trace:<manifest_id>:/path
 ```
 
-`LogicalReferenceResolver` first validates unique IDs, declared root/parent/
-depth, physical nesting, absence of topology symlinks, and trace ownership.
-It then returns a confined absolute path. This makes a durable receipt portable
-without letting an untrusted `../` or symlink escape its declared scope.
+`LogicalReferenceResolver` validates declared topology, physical nesting,
+symlinks, and scope before returning a confined absolute path.
 
-## Atomicity and crash model
+Engine-owned recovery-critical JSON uses same-directory temporary files plus
+atomic replace. JSONL inputs are append/flushed/fsynced per record. A recursive
+transition still spans several files, so startup reconciliation closes known
+dispatch and finalization windows. Workflow-authored control, child, eval, and
+semantic files should also use temp-file-plus-rename; invalid or torn output is
+diagnosed rather than trusted.
 
-Recovery-relevant transitions such as state, child-ledger updates, iteration
-results, pending handoffs, and salvage records use unique same-directory
-temporary files plus replace. JSONL inputs are appended, flushed, and fsynced
-per record. Each such published file is all-or-nothing, but a parent/child
-transition is not one multi-file transaction. Startup reconciliation handles
-the documented dispatch/finalization windows using accepted requests,
-manifests, state, and the child ledger. Initial scaffolding still includes
-direct writes/touches, so atomic replacement is not a blanket guarantee for
-every engine-created file.
+## Frozen v1/v2 sessions
 
-Workflow-authored child, eval, and control files cannot be made atomic by the
-engine. Packaged prompts require temp-file-plus-rename; the coordinator treats
-torn/invalid output as a protocol failure rather than evidence. There is no
-blanket fsync guarantee for all session files or for arbitrary agent writes.
+The implementation still reads historical sessions under their frozen
+contract. It does not reinterpret them as v3:
 
-## Legacy v1 compatibility
+- v1 may lack immutable goal/workflow contracts, assignment snapshots, and
+  revisioned child ledgers and may use flat child requests, control v1,
+  `updates_from_user.md`, and `harness_outputs/`;
+- v2 uses identity-bound control and requires its declared goal-control role,
+  same-attempt passing eval receipt, and matching `goal_check.json` for
+  successful completion; and
+- v2 retains `eval_readiness/` and the historical singular
+  `eval_receipt_ref`.
 
-An existing state file without `schema_version` is interpreted as v1. On
-resume, loopy-loop retains that session's historical interfaces:
-
-- compact `session.json`, unrevisioned/v1 `children.json`, and no immutable
-  goal/workflow contract or workflow snapshot requirement;
-- flat `child_requests/*.json` with `workflow_set` and `goal`;
-- terminal control v1 and goal-check v1;
-- harness output under
-  `sessions/<session>/harness_outputs/<iteration>/<run_id>/`;
-- `updates_from_user.md` and iteration files without assignment/trace links.
-
-The current reader observes these artifacts and the new directories together.
-It does not reinterpret old provenance as v2. In particular, a packaged
-workflow set declaring `session_protocol_version: 2` requires v2 child,
-goal-check, and terminal-control artifacts; a v1-shaped output cannot satisfy
-that fresh contract.
+Fresh stock templates explicitly declare protocol v3. An explicit custom
+contract that omits `session_protocol_version` is still interpreted as v2;
+sets with no contract derive conservative v1 behavior. Compatibility is tied
+to the frozen session contract, not negotiated down by a worker.

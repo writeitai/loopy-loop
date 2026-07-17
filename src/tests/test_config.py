@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime
+from datetime import UTC
 from typing import Any
 
 import pytest
 
+from loopy_loop.config import build_harness_capability_roster
 from loopy_loop.config import ConfigError
 from loopy_loop.config import derive_goal_hash
 from loopy_loop.config import load_root_config
@@ -139,7 +142,8 @@ def test_load_root_config_uses_goal_file_and_optional_defaults(
     assert root_config.workflow_set == "main"
     assert root_config.completion_criteria == []
     assert root_config.stop_criteria == []
-    assert root_config.team_harness_system_prompt_extension == ""
+    assert "Model tier policy:" in root_config.team_harness_system_prompt_extension
+    assert "codex unavailable" in root_config.team_harness_system_prompt_extension
 
 
 def test_load_root_config_accepts_team_harness_retry_controls(
@@ -422,8 +426,96 @@ def test_model_tiers_render_guidance_into_prompt_extension(repo_builder: Any) ->
     assert "claude model=claude-fable-5" in extension
     assert "Default tier: economy" in extension
     assert "structured `effort` arguments" in extension
+    assert "pass the selected family, `model`" in extension
+    assert "frontier: codex unavailable; claude unavailable" in extension
+    assert "standard: codex unavailable; claude unavailable" in extension
     assert "`flags`" not in extension
     assert "model_reasoning_effort" not in extension
+
+
+def test_capability_roster_materializes_all_canonical_cells(repo_builder: Any) -> None:
+    repo_root = repo_builder(root_config={**_TIER_CONFIG, "default_tier": "economy"})
+    config = load_root_config(repo_root=repo_root)
+    created_at = datetime(2026, 7, 17, 8, 30, tzinfo=UTC)
+
+    roster = build_harness_capability_roster(
+        config=config,
+        root_session_id="root-session",
+        root_execution_config_sha256="sha256:root-config",
+        created_at=created_at,
+    )
+
+    assert list(roster.tiers) == ["frontier", "strong", "standard", "economy"]
+    assert list(roster.harnesses) == ["codex", "claude"]
+    assert list(roster.harnesses["codex"]) == [
+        "frontier",
+        "strong",
+        "standard",
+        "economy",
+    ]
+    assert roster.harnesses["codex"]["strong"].model == "gpt-5.6-sol"
+    assert roster.harnesses["codex"]["strong"].effort == "high"
+    assert roster.harnesses["codex"]["standard"].available is False
+    assert roster.harnesses["codex"]["standard"].model is None
+    assert roster.harnesses["claude"]["economy"].available is True
+    assert roster.coordinator == {
+        "provider": config.team_harness_provider,
+        "model": config.team_harness_model,
+    }
+    assert roster.default_tier == "economy"
+    assert roster.created_at == created_at
+
+
+def test_capability_roster_maps_flat_configured_defaults_only_to_standard(
+    repo_builder: Any,
+) -> None:
+    repo_root = repo_builder(
+        root_config={
+            "team_harness_agents": ["codex", "claude"],
+            "team_harness_agent_models": {"codex": "gpt-flat"},
+            "team_harness_agent_reasoning_efforts": {"codex": "medium"},
+        }
+    )
+    config = load_root_config(repo_root=repo_root)
+
+    roster = build_harness_capability_roster(
+        config=config,
+        root_session_id="root-session",
+        root_execution_config_sha256="sha256:root-config",
+        created_at=datetime(2026, 7, 17, tzinfo=UTC),
+    )
+
+    codex_standard = roster.harnesses["codex"]["standard"]
+    assert codex_standard.available is True
+    assert codex_standard.model == "gpt-flat"
+    assert codex_standard.effort == "medium"
+    assert codex_standard.source == "configured_default"
+    assert roster.harnesses["codex"]["frontier"].available is False
+    assert roster.harnesses["claude"]["standard"].available is False
+
+
+def test_capability_roster_preserves_custom_tier_after_canonical_tiers(
+    repo_builder: Any,
+) -> None:
+    repo_root = repo_builder(
+        root_config={
+            "model_tiers": {
+                "project_specialist": {"codex": {"model": "gpt-specialist"}}
+            }
+        }
+    )
+    config = load_root_config(repo_root=repo_root)
+
+    roster = build_harness_capability_roster(
+        config=config,
+        root_session_id="root-session",
+        root_execution_config_sha256="sha256:root-config",
+        created_at=datetime(2026, 7, 17, tzinfo=UTC),
+    )
+
+    assert list(roster.tiers)[-1] == "project_specialist"
+    assert roster.tiers["project_specialist"] == "project-local configured bundle"
+    assert roster.harnesses["codex"]["project_specialist"].model == "gpt-specialist"
 
 
 def test_model_tiers_guidance_appends_after_existing_extension(

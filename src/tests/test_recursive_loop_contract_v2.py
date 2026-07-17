@@ -234,6 +234,33 @@ def _write_terminal_blocker_control(*, repo_root: Path, task: dict[str, Any]) ->
     )
 
 
+def _write_v2_blocker_contract(
+    *, repo_root: Path, workflow_set: str, workflow_ids: list[str]
+) -> None:
+    """Declare explicit v2 blocker authority for a control-protocol fixture."""
+
+    contract = {
+        "schema_version": 1,
+        "session_protocol_version": 2,
+        "layer_kind": "work",
+        "roles": {
+            workflow_id: {"responsibility": f"Execute {workflow_id}."}
+            for workflow_id in workflow_ids
+        },
+        "state": [],
+        "eval": {},
+        "task_acceptance_role": None,
+        "terminal_blocker_reporting_roles": workflow_ids,
+        "child_interface": "recursive",
+    }
+    contract_path = (
+        repo_root / ".loopy_loop" / "workflow_sets" / workflow_set / "contract.yaml"
+    )
+    contract_path.write_text(
+        yaml.safe_dump(contract, sort_keys=False), encoding="utf-8"
+    )
+
+
 def _dispatch_three_levels(
     *, repo_root: Path, client: TestClient
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -1085,6 +1112,9 @@ def test_terminal_child_outcome_refreshes_after_incomplete_trace_is_anchored(
     _write_workflow_set(
         repo_root=repo_root, workflow_set="child_set", workflow_id="child_work"
     )
+    _write_v2_blocker_contract(
+        repo_root=repo_root, workflow_set="child_set", workflow_ids=["child_work"]
+    )
     _init_git_repo(repo_root)
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     root_task = client.post("/register", json=_register_v2(repo_root)).json()
@@ -1420,6 +1450,14 @@ def test_three_depth_dispatch_unwinds_two_terminal_descendants(
         workflow_set="grandchild_set",
         workflow_id="grandchild_work",
     )
+    _write_v2_blocker_contract(
+        repo_root=repo_root, workflow_set="child_set", workflow_ids=["child_work"]
+    )
+    _write_v2_blocker_contract(
+        repo_root=repo_root,
+        workflow_set="grandchild_set",
+        workflow_ids=["grandchild_work"],
+    )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     root_task, child_task, grandchild_task = _dispatch_three_levels(
         repo_root=repo_root, client=client
@@ -1469,6 +1507,9 @@ def test_terminal_child_repairs_ledger_while_ignoring_non_session_directory(
     repo_root = repo_builder()
     _write_workflow_set(
         repo_root=repo_root, workflow_set="child_set", workflow_id="child_work"
+    )
+    _write_v2_blocker_contract(
+        repo_root=repo_root, workflow_set="child_set", workflow_ids=["child_work"]
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     root_task = client.post("/register", json=_register_v2(repo_root)).json()
@@ -2270,6 +2311,9 @@ def test_control_rejects_mismatched_producer_and_archives_protocol_failure(
             }
         }
     )
+    _write_v2_blocker_contract(
+        repo_root=repo_root, workflow_set="main", workflow_ids=["implement"]
+    )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     task = client.post("/register", json=_register_v2(repo_root)).json()
     control_path(repo_root=repo_root, session_id=task["session_id"]).write_text(
@@ -2348,6 +2392,9 @@ def test_invalid_control_failures_accumulate_through_engine_repair_placeholder(
             }
         },
     )
+    _write_v2_blocker_contract(
+        repo_root=repo_root, workflow_set="main", workflow_ids=["implement"]
+    )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     task = client.post("/register", json=_register_v2(repo_root)).json()
 
@@ -2423,6 +2470,9 @@ def test_terminal_control_rejects_an_owned_but_historical_attempt(
                 },
             },
         }
+    )
+    _write_v2_blocker_contract(
+        repo_root=repo_root, workflow_set="main", workflow_ids=["implement", "review"]
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     historical_task = client.post("/register", json=_register_v2(repo_root)).json()
@@ -2622,6 +2672,9 @@ def test_legacy_state_validates_v2_terminal_control_with_contract_fallback(
                 },
             }
         }
+    )
+    _write_v2_blocker_contract(
+        repo_root=repo_root, workflow_set="main", workflow_ids=["implement"]
     )
     app = create_coordinator_app(repo_root=repo_root, resume=False)
     client = TestClient(app)

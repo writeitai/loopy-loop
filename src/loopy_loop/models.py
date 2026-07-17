@@ -11,15 +11,26 @@ from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import field_validator
+from pydantic import JsonValue
 from pydantic import model_validator
 
 DEFAULT_LOCK_TIMEOUT_SECONDS = 30.0
-CONTROL_SCHEMA_VERSION = 2
+CONTROL_SCHEMA_VERSION = 3
 GOAL_CHECK_SCHEMA_VERSION = 2
-WORKER_PROTOCOL_VERSION = 2
-LOOPY_WORKER_CAPABILITIES = frozenset(
+WORKER_PROTOCOL_VERSION = 3
+LOOPY_V2_WORKER_CAPABILITIES = frozenset(
     {"assignment_v1", "frozen_workflow_v1", "trace_manifest_v1"}
 )
+LOOPY_V3_WORKER_CAPABILITIES = frozenset(
+    {
+        "assignment_v2",
+        "harness_capability_roster_v1",
+        "orchestrator_control_v3",
+        "scheduler_view_v1",
+        "semantic_handoff_v1",
+    }
+)
+LOOPY_WORKER_CAPABILITIES = LOOPY_V2_WORKER_CAPABILITIES | LOOPY_V3_WORKER_CAPABILITIES
 REQUIRED_HARNESS_CAPABILITIES = frozenset(
     {
         "caller_run_record_v1",
@@ -29,7 +40,13 @@ REQUIRED_HARNESS_CAPABILITIES = frozenset(
     }
 )
 REQUIRED_V2_WORKER_CAPABILITIES = (
-    LOOPY_WORKER_CAPABILITIES | REQUIRED_HARNESS_CAPABILITIES
+    LOOPY_V2_WORKER_CAPABILITIES | REQUIRED_HARNESS_CAPABILITIES
+)
+REQUIRED_V3_HARNESS_CAPABILITIES = frozenset({"capability_roster_context_v1"})
+REQUIRED_V3_WORKER_CAPABILITIES = (
+    REQUIRED_V2_WORKER_CAPABILITIES
+    | LOOPY_V3_WORKER_CAPABILITIES
+    | REQUIRED_V3_HARNESS_CAPABILITIES
 )
 RUN_ACTION = "run"
 STOP_ACTION = "stop"
@@ -194,21 +211,305 @@ class WorkflowRoleContract(BaseModel):
 
 
 class WorkflowEvalContract(BaseModel):
+    """Legacy v1/v2 evaluation ownership retained for frozen sessions."""
+
     author_role: str | None = None
     runner_role: str | None = None
     goal_control_role: str | None = None
 
 
+class WorkflowOrchestrationContract(BaseModel):
+    """Durable semantic owners for a protocol-v3 session layer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    completion_role: str
+    plan_owner: str
+    handoff_owner: str
+    task_acceptance_owner: str | None = None
+    child_acceptance_owner: str | None = None
+
+
+class WorkflowEvaluationContract(BaseModel):
+    """Optional evaluation producers authorized by a v3 workflow set."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    advisory: bool = True
+    check_author_roles: list[str] = Field(default_factory=list)
+    check_runner_roles: list[str] = Field(default_factory=list)
+
+
 class WorkflowSetContract(BaseModel):
+    """Frozen role and protocol contract for one durable session layer."""
+
     schema_version: int = Field(default=1)
-    session_protocol_version: Literal[1, 2] = 1
+    session_protocol_version: Literal[1, 2, 3] = 1
     layer_kind: str = "work"
     roles: dict[str, WorkflowRoleContract]
     state: list[dict[str, Any]] = Field(default_factory=list)
     eval: WorkflowEvalContract = Field(default_factory=WorkflowEvalContract)
+    orchestration: WorkflowOrchestrationContract | None = None
+    evaluation: WorkflowEvaluationContract = Field(
+        default_factory=WorkflowEvaluationContract
+    )
     task_acceptance_role: str | None = None
     terminal_blocker_reporting_roles: list[str] = Field(default_factory=list)
     child_interface: Literal["none", "recursive"] = "recursive"
+
+    @model_validator(mode="after")
+    def validate_role_references(self) -> Self:
+        """Require v3 semantic authorities to name declared workflow roles."""
+
+        if self.session_protocol_version < 3:
+            return self
+        if self.orchestration is None:
+            raise ValueError("protocol v3 requires an orchestration contract")
+        if not self.evaluation.advisory:
+            raise ValueError("protocol v3 evaluation must remain advisory")
+        orchestrator = self.orchestration.completion_role
+        if (
+            self.orchestration.plan_owner != orchestrator
+            or self.orchestration.handoff_owner != orchestrator
+        ):
+            raise ValueError(
+                "protocol v3 requires one role to own completion, plan, and handoff"
+            )
+        referenced = {
+            orchestrator,
+            self.orchestration.plan_owner,
+            self.orchestration.handoff_owner,
+            *self.evaluation.check_author_roles,
+            *self.evaluation.check_runner_roles,
+            *self.terminal_blocker_reporting_roles,
+        }
+        if self.orchestration.task_acceptance_owner is not None:
+            referenced.add(self.orchestration.task_acceptance_owner)
+        if self.orchestration.child_acceptance_owner is not None:
+            referenced.add(self.orchestration.child_acceptance_owner)
+        missing = sorted(referenced - set(self.roles))
+        if missing:
+            raise ValueError(f"workflow contract references unknown roles: {missing}")
+        if any(
+            value is not None
+            for value in (
+                self.eval.author_role,
+                self.eval.runner_role,
+                self.eval.goal_control_role,
+            )
+        ):
+            raise ValueError("protocol v3 must use evaluation, not legacy eval owners")
+        return self
+
+    @property
+    def completion_role(self) -> str | None:
+        """Return the version-appropriate successful-control owner."""
+
+        if self.session_protocol_version >= 3 and self.orchestration is not None:
+            return self.orchestration.completion_role
+        return self.eval.goal_control_role
+
+    @property
+    def check_runner_roles(self) -> list[str]:
+        """Return roles allowed to produce evaluation receipts."""
+
+        if self.session_protocol_version >= 3:
+            return self.evaluation.check_runner_roles
+        return [self.eval.runner_role] if self.eval.runner_role is not None else []
+
+    @property
+    def check_author_roles(self) -> list[str]:
+        """Return roles allowed to author evaluation checks."""
+
+        if self.session_protocol_version >= 3:
+            return self.evaluation.check_author_roles
+        return [self.eval.author_role] if self.eval.author_role is not None else []
+
+
+class HarnessCapabilityBundle(BaseModel):
+    """One configured family/tier worker bundle in the frozen roster."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    available: bool
+    model: str | None = None
+    effort: str | None = None
+    source: Literal[
+        "configured_tier", "configured_default", "harness_default", "unavailable"
+    ]
+
+
+class HarnessCapabilityRoster(BaseModel):
+    """Tree-wide enabled harness families and semantic strength mappings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    root_session_id: str
+    root_execution_config_sha256: str
+    created_at: datetime
+    coordinator: dict[str, str]
+    tiers: dict[str, str]
+    harnesses: dict[str, dict[str, HarnessCapabilityBundle]]
+    default_tier: str | None = None
+
+
+class WorkflowRosterRole(BaseModel):
+    """One scheduled durable role in a session-frozen workflow roster."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    responsibility: str
+    cadence: dict[str, Any]
+    expected_outputs: list[str] = Field(default_factory=list)
+    authorities: list[str] = Field(default_factory=list)
+
+
+class WorkflowRoster(BaseModel):
+    """Inspectable session-wide roster derived from frozen workflows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    session_id: str
+    workflow_contract_sha256: str
+    created_at: datetime
+    completion_role: str | None = None
+    roles: list[WorkflowRosterRole]
+
+
+class SchedulerForecast(BaseModel):
+    """Conditional next-role projection and its explicit assumptions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    next_workflow_id: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+
+
+class SchedulerView(BaseModel):
+    """Attempt-frozen mechanical history and conditional scheduler context."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    session_id: str
+    state_revision: int = Field(ge=0)
+    attempt_id: str
+    workflow_roster_sha256: str
+    history_watermark: int = Field(ge=0)
+    captured_at: datetime
+    recent_history: list[dict[str, Any]] = Field(default_factory=list)
+    conditional_forecast: SchedulerForecast
+
+
+class HandoffProducer(BaseModel):
+    """Workflow attempt that authored a semantic layer handoff."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    attempt_id: str
+
+
+class LayerHandoff(BaseModel):
+    """Compact rolling semantic summary owned by a layer orchestrator."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    session_id: str
+    goal_sha256: str
+    revision: int = Field(ge=0)
+    producer: HandoffProducer | None = None
+    summary: str = ""
+    accepted_outcomes: list[Any] = Field(default_factory=list)
+    open_work: list[Any] = Field(default_factory=list)
+    risks: list[Any] = Field(default_factory=list)
+    decision_refs: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    delivery_refs: list[str] = Field(default_factory=list)
+    eval_refs: list[str] = Field(default_factory=list)
+    updated_at: datetime
+
+
+class EvalSubject(BaseModel):
+    """Session and repository subject evaluated by one receipt."""
+
+    root_session_id: str
+    session_id: str
+    goal_hash: str
+    git_commit: str | None = None
+    dirty_tree_digest: str | None = None
+
+
+class EvalProducer(BaseModel):
+    """Exact workflow attempt and harness run that produced an evaluation."""
+
+    workflow_id: str
+    iteration: int
+    attempt_id: str
+    harness_run_id: str
+
+    @field_validator("harness_run_id")
+    @classmethod
+    def require_harness_run_id(cls, value: str) -> str:
+        """Reject eval producers that lack a concrete harness run."""
+
+        if not value.strip():
+            raise ValueError("eval producer harness_run_id must not be blank")
+        return value
+
+
+class AcceptedEvalReceiptSeal(BaseModel):
+    """Engine acceptance of a receipt after raw provenance validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    receipt_ref: str
+    receipt_sha256: str
+    subject: EvalSubject
+    producer: EvalProducer
+    evaluated_git: dict[str, str | None]
+    accepted_at: datetime
+
+
+class AcceptedTerminalControlSnapshot(BaseModel):
+    """Engine-owned bytes and parsed payload of one accepted v3 control."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    payload: dict[str, JsonValue]
+    raw_json: str
+    sha256: str
+    accepted_at: datetime
+
+
+class AcceptedHandoffSnapshot(BaseModel):
+    """Last provenance-valid handoff bytes observed by the coordinator."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    handoff: LayerHandoff
+    raw_json: str
+    sha256: str
+    accepted_at: datetime
+
+
+class OutcomeHandoff(BaseModel):
+    """Observed state of the semantic handoff at terminal transition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["valid", "missing", "invalid", "non_monotonic"]
+    ref: str | None = None
+    sha256: str | None = None
+    revision: int | None = Field(default=None, ge=0)
 
 
 class HistoryEntry(BaseModel):
@@ -275,6 +576,29 @@ class LoopState(BaseModel):
     # Agent-visible session.json and workflow_contract.json are projections;
     # they cannot replace this durable value between attempts.
     workflow_contract: WorkflowSetContract | None = Field(default=None)
+    # Protocol-v3 session-frozen role/cadence context. The on-disk roster is
+    # an agent-visible projection restored from this engine-owned value.
+    workflow_roster: WorkflowRoster | None = Field(default=None)
+    # Protocol-v3 tree-wide delegate catalog. The root freezes it from config;
+    # descendants inherit the same exact payload rather than re-reading YAML.
+    harness_capability_roster: HarnessCapabilityRoster | None = Field(default=None)
+    # Last structurally valid handoff observed after a completed v3 attempt.
+    # This is diagnostic continuity only; it never gates scheduling/control.
+    handoff_revision: int = Field(default=0, ge=0)
+    handoff_sha256: str | None = Field(default=None)
+    accepted_eval_receipt_seals: dict[str, AcceptedEvalReceiptSeal] = Field(
+        default_factory=dict
+    )
+    # Protocol-v3 terminal projections are rebuilt only from these
+    # engine-owned acceptance snapshots, never by trusting mutable files after
+    # the terminal transition.
+    accepted_terminal_control: AcceptedTerminalControlSnapshot | None = Field(
+        default=None
+    )
+    accepted_handoff_snapshot: AcceptedHandoffSnapshot | None = Field(default=None)
+    latest_handoff_observation: OutcomeHandoff | None = Field(default=None)
+    terminal_state_revision: int | None = Field(default=None, ge=0)
+    terminal_at: datetime | None = Field(default=None)
 
     @field_validator("schema_version")
     @classmethod
@@ -353,6 +677,8 @@ class ControlSignal(BaseModel):
     control_id: str | None = Field(default=None)
     producer: SignalProducer | None = Field(default=None)
     eval_receipt_ref: str | None = Field(default=None)
+    eval_receipt_refs: list[str] = Field(default_factory=list)
+    handoff_ref: str | None = Field(default=None)
     attempted_routes: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
     created_at: datetime | None = Field(default=None)
@@ -360,10 +686,12 @@ class ControlSignal(BaseModel):
     @field_validator("schema_version")
     @classmethod
     def validate_schema_version(cls, value: int) -> int:
-        """Accept the legacy or identity-bound control schema."""
+        """Accept every explicitly supported control schema."""
 
-        if value not in {1, CONTROL_SCHEMA_VERSION}:
-            raise ValueError(f"schema_version must be 1 or {CONTROL_SCHEMA_VERSION}")
+        if value not in {1, 2, CONTROL_SCHEMA_VERSION}:
+            raise ValueError(
+                f"schema_version must be 1, 2, or {CONTROL_SCHEMA_VERSION}"
+            )
         return value
 
     @model_validator(mode="after")
@@ -374,21 +702,27 @@ class ControlSignal(BaseModel):
             raise ValueError("running control state must not set stop_reason")
         if self.state == "stopped" and self.stop_reason is None:
             raise ValueError("stopped control state must set stop_reason")
-        if self.schema_version == 2 and self.state == "stopped":
+        if self.schema_version in {2, 3} and self.state == "stopped":
             if (
                 self.control_id is None
                 or self.producer is None
                 or self.created_at is None
             ):
                 raise ValueError(
-                    "v2 stopped control requires control_id, producer, and created_at"
+                    "identity-bound stopped control requires control_id, producer, "
+                    "and created_at"
                 )
             if not SAFE_DURABLE_ID_PATTERN.fullmatch(self.control_id):
-                raise ValueError("v2 control_id must be a filesystem-safe identifier")
+                raise ValueError(
+                    "identity-bound control_id must be a filesystem-safe identifier"
+                )
             if not self.reason.strip():
-                raise ValueError("v2 terminal control reason must be nonblank")
+                raise ValueError("terminal control reason must be nonblank")
+        if self.schema_version == 2 and self.state == "stopped":
             if self.stop_reason == "goal_met" and self.eval_receipt_ref is None:
                 raise ValueError("v2 goal_met control requires eval_receipt_ref")
+            if self.eval_receipt_refs or self.handoff_ref is not None:
+                raise ValueError("v2 control must not set v3 reference fields")
             if self.stop_reason == "unresolvable_error":
                 if not self.attempted_routes:
                     raise ValueError("v2 unresolvable_error requires attempted_routes")
@@ -399,6 +733,24 @@ class ControlSignal(BaseModel):
                 if self.eval_receipt_ref is not None:
                     raise ValueError(
                         "v2 unresolvable_error must not set eval_receipt_ref"
+                    )
+        if self.schema_version == 3 and self.state == "stopped":
+            if self.eval_receipt_ref is not None:
+                raise ValueError("v3 control must use plural eval_receipt_refs")
+            if any(not reference.strip() for reference in self.eval_receipt_refs):
+                raise ValueError("v3 eval receipt references must be nonblank")
+            if self.handoff_ref is not None and not self.handoff_ref.strip():
+                raise ValueError("v3 handoff_ref must be nonblank when set")
+            if self.stop_reason == "unresolvable_error":
+                if not self.attempted_routes:
+                    raise ValueError("v3 unresolvable_error requires attempted_routes")
+                if any(not route.strip() for route in self.attempted_routes):
+                    raise ValueError(
+                        "v3 unresolvable_error attempted_routes must be nonblank"
+                    )
+                if self.eval_receipt_refs or self.handoff_ref is not None:
+                    raise ValueError(
+                        "v3 unresolvable_error must not cite eval or handoff refs"
                     )
         return self
 
@@ -573,30 +925,6 @@ class GoalContract(BaseModel):
     created_at: datetime
 
 
-class EvalSubject(BaseModel):
-    root_session_id: str
-    session_id: str
-    goal_hash: str
-    git_commit: str | None = None
-    dirty_tree_digest: str | None = None
-
-
-class EvalProducer(BaseModel):
-    workflow_id: str
-    iteration: int
-    attempt_id: str
-    harness_run_id: str
-
-    @field_validator("harness_run_id")
-    @classmethod
-    def require_harness_run_id(cls, value: str) -> str:
-        """Reject eval producers that lack a concrete harness run."""
-
-        if not value.strip():
-            raise ValueError("eval producer harness_run_id must not be blank")
-        return value
-
-
 class EvalCheckDefinitionRef(BaseModel):
     check_id: str
     definition_sha256: str
@@ -685,7 +1013,58 @@ class EvalReceipt(BaseModel):
         return self
 
 
-def _is_full_sha256(value: str) -> bool:
+class OutcomeArtifactRef(BaseModel):
+    """Logical reference and digest captured in a terminal outcome."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str
+    sha256: str
+
+
+class OutcomeFallbackSummary(BaseModel):
+    """Factual control or engine reason used when no valid handoff exists."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["control_reason", "engine_stop_reason"]
+    text: str
+
+
+class SessionOutcome(BaseModel):
+    """Topology-neutral engine projection of one terminal session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    session_id: str
+    root_session_id: str
+    goal_sha256: str
+    lifecycle: Literal["terminal"] = "terminal"
+    terminal_status: Literal["stopped", "goal_met", "failed", "max_turns"]
+    stop_reason: str
+    terminal_state_revision: int = Field(ge=0)
+    control: OutcomeArtifactRef | None = None
+    handoff: OutcomeHandoff
+    fallback_summary: OutcomeFallbackSummary | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+    delivery_refs: list[str] = Field(default_factory=list)
+    eval_refs: list[str] = Field(default_factory=list)
+    trace_seal_refs: list[str] = Field(default_factory=list)
+    created_at: datetime
+
+    @field_validator("stop_reason")
+    @classmethod
+    def require_stop_reason(cls, value: str) -> str:
+        """Require a specific terminal lifecycle reason."""
+
+        reason = value.strip()
+        if not reason:
+            raise ValueError("session outcome stop_reason must not be blank")
+        return reason
+
+
+def _is_full_sha256(*, value: str) -> bool:
     """Return whether a value is a complete prefixed SHA-256 digest."""
 
     if not value.startswith("sha256:") or len(value) != len("sha256:") + 64:
@@ -698,6 +1077,7 @@ class AttemptAssignment(BaseModel):
     identity: dict[str, Any]
     actor: dict[str, Any]
     objective: dict[str, Any]
-    absolute_paths: dict[str, str]
+    absolute_paths: dict[str, str | None]
     ownership: dict[str, str]
     provenance: dict[str, str]
+    context: dict[str, Any] = Field(default_factory=dict)

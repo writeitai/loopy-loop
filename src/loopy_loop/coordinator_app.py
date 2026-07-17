@@ -9,6 +9,7 @@ from pathlib import Path
 import socket
 import threading
 from typing import Any
+from typing import Literal
 from typing import TypeVar
 import uuid
 
@@ -26,6 +27,7 @@ from loopy_loop.assignments import ensure_repository_identity
 from loopy_loop.assignments import materialize_workflow_snapshot
 from loopy_loop.assignments import verify_workflow_snapshot
 from loopy_loop.assignments import write_attempt_assignment
+from loopy_loop.config import build_harness_capability_roster
 from loopy_loop.config import ConfigError
 from loopy_loop.config import derive_full_goal_hash
 from loopy_loop.config import derive_goal_hash
@@ -36,6 +38,9 @@ from loopy_loop.config import WorkflowDefinition
 from loopy_loop.events import append_events
 from loopy_loop.git_evidence import capture_git_evidence
 from loopy_loop.git_evidence import GitEvidenceError
+from loopy_loop.models import AcceptedEvalReceiptSeal
+from loopy_loop.models import AcceptedHandoffSnapshot
+from loopy_loop.models import AcceptedTerminalControlSnapshot
 from loopy_loop.models import ArtifactInputRef
 from loopy_loop.models import ChildSessionRecord
 from loopy_loop.models import ChildSessionRequest
@@ -46,16 +51,26 @@ from loopy_loop.models import FinishedRequest
 from loopy_loop.models import GoalCheckSignal
 from loopy_loop.models import HistoryEntry
 from loopy_loop.models import IterationResult
+from loopy_loop.models import LayerHandoff
 from loopy_loop.models import LoopState
+from loopy_loop.models import OutcomeArtifactRef
+from loopy_loop.models import OutcomeFallbackSummary
+from loopy_loop.models import OutcomeHandoff
 from loopy_loop.models import RegisterRequest
 from loopy_loop.models import REQUIRED_V2_WORKER_CAPABILITIES
+from loopy_loop.models import REQUIRED_V3_WORKER_CAPABILITIES
 from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.models import SAFE_DURABLE_ID_PATTERN
+from loopy_loop.models import SchedulerForecast
+from loopy_loop.models import SchedulerView
+from loopy_loop.models import SessionOutcome
 from loopy_loop.models import SessionUsageTotals
 from loopy_loop.models import STOP_ACTION
 from loopy_loop.models import TaskResponse
 from loopy_loop.models import utc_now
 from loopy_loop.models import WorkerIdentity
+from loopy_loop.models import WorkflowRoster
+from loopy_loop.models import WorkflowRosterRole
 from loopy_loop.models import WorkflowSetContract
 from loopy_loop.recovery import recover_interrupted_iteration
 from loopy_loop.recovery import RecoveryIncompleteError
@@ -81,14 +96,18 @@ from loopy_loop.sessions import file_sha256
 from loopy_loop.sessions import git_receipts_dir_path
 from loopy_loop.sessions import goal_check_path
 from loopy_loop.sessions import goal_contract_path
+from loopy_loop.sessions import handoff_path
 from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.sessions import protocol_failures_dir_path
 from loopy_loop.sessions import result_path
+from loopy_loop.sessions import scheduler_view_path
 from loopy_loop.sessions import session_dir_path
+from loopy_loop.sessions import session_outcome_path
 from loopy_loop.sessions import state_path
 from loopy_loop.sessions import trace_finalization_outbox_dir_path
 from loopy_loop.sessions import trace_seal_receipt_path
 from loopy_loop.sessions import workflow_contract_path
+from loopy_loop.sessions import workflow_roster_path
 from loopy_loop.sessions import write_json_atomic
 from loopy_loop.sessions import write_text_atomic
 from loopy_loop.state_store import AttemptArtifactInvariantError
@@ -285,6 +304,88 @@ class WorkerUpgradeRequired(RuntimeError):
     """The active session contract cannot be served to this worker version."""
 
 
+def _serialized_json_sha256(*, payload: object) -> str:
+    """Hash bytes produced by the durable indented-JSON writer."""
+
+    encoded = json.dumps(payload, indent=2).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _build_workflow_roster(
+    *, session_id: str, preflight: PreflightResult, created_at: datetime
+) -> WorkflowRoster:
+    """Derive one inspectable role roster from a frozen workflow set."""
+
+    contract = preflight.workflow_contract
+    orchestration = contract.orchestration
+    roles: list[WorkflowRosterRole] = []
+    for workflow in preflight.workflows:
+        authorities: list[str] = []
+        expected_outputs: list[str] = []
+        if orchestration is not None:
+            owner_fields = {
+                "completion": orchestration.completion_role,
+                "plan": orchestration.plan_owner,
+                "handoff": orchestration.handoff_owner,
+                "task_acceptance": orchestration.task_acceptance_owner,
+                "child_acceptance": orchestration.child_acceptance_owner,
+            }
+            authorities.extend(
+                label for label, owner in owner_fields.items() if owner == workflow.id
+            )
+            if workflow.id == orchestration.plan_owner:
+                expected_outputs.extend(
+                    [
+                        "project_state/plan.md",
+                        "project_state/current_state.md",
+                        "project_state/finished.md",
+                    ]
+                )
+            if workflow.id == orchestration.handoff_owner:
+                expected_outputs.append("project_state/handoff.json")
+        if workflow.id in contract.check_author_roles:
+            authorities.append("eval_check_author")
+            expected_outputs.extend(["eval_checks/", "project_state/eval_state.md"])
+        if workflow.id in contract.check_runner_roles:
+            authorities.append("eval_check_runner")
+            expected_outputs.extend(["eval_receipts/", "project_state/eval_state.md"])
+        if workflow.id in contract.terminal_blocker_reporting_roles:
+            authorities.append("terminal_blocker_reporting")
+        run_after = (
+            workflow.run_after_successes.model_dump(mode="json")
+            if workflow.run_after_successes is not None
+            else None
+        )
+        role = contract.roles.get(workflow.id)
+        roles.append(
+            WorkflowRosterRole(
+                workflow_id=workflow.id,
+                responsibility=(
+                    role.responsibility if role is not None else workflow.description
+                ),
+                cadence={
+                    "enabled": workflow.enabled,
+                    "priority": workflow.priority,
+                    "run_every": workflow.run_every,
+                    "run_on_start": workflow.run_on_start,
+                    "not_before_iteration": workflow.not_before_iteration,
+                    "must_follow": workflow.must_follow,
+                    "run_after_successes": run_after,
+                },
+                expected_outputs=list(dict.fromkeys(expected_outputs)),
+                authorities=list(dict.fromkeys(authorities)),
+            )
+        )
+    contract_payload = contract.model_dump(mode="json")
+    return WorkflowRoster(
+        session_id=session_id,
+        workflow_contract_sha256=_serialized_json_sha256(payload=contract_payload),
+        created_at=created_at,
+        completion_role=contract.completion_role,
+        roles=roles,
+    )
+
+
 def create_coordinator_app(
     *,
     repo_root: Path,
@@ -412,6 +513,13 @@ class CoordinatorService:
                     recovered_completion_traces=recovered_completion_traces,
                 )
                 if response is not None and response.action == STOP_ACTION:
+                    terminal_state = self.state_store.read_state()
+                    if (
+                        terminal_state is not None
+                        and self._protocol_version_for_state(state=terminal_state) >= 3
+                        and self.state_store.is_terminal_state(state=terminal_state)
+                    ):
+                        self._ensure_session_outcome(state=terminal_state)
                     # Recovery can make the ACTIVE CHILD terminal (an
                     # abandoned iteration tripping the failure cap or
                     # max_turns). Without this, the parent's pointer and
@@ -468,22 +576,36 @@ class CoordinatorService:
         """Validate worker protocol, capability, and repository identity binding."""
 
         top_state = StateStore(repo_root=self.repo_root).read_state()
-        requires_v2 = top_state is not None and top_state.schema_version >= 2
-        version = request.worker_protocol_version or 1
-        if requires_v2 and version < 2:
-            raise WorkerUpgradeRequired(
-                "this session tree requires worker protocol v2; upgrade the worker CLI"
+        required_version = (
+            max(
+                2 if top_state.schema_version >= 2 else 1,
+                self._protocol_version_for_state(state=top_state),
             )
-        required = REQUIRED_V2_WORKER_CAPABILITIES
+            if top_state is not None
+            else 1
+        )
+        version = request.worker_protocol_version or 1
+        if version < required_version:
+            raise WorkerUpgradeRequired(
+                f"this session tree requires worker protocol v{required_version}; "
+                "upgrade the worker CLI"
+            )
+        required = (
+            REQUIRED_V3_WORKER_CAPABILITIES
+            if required_version >= 3
+            else REQUIRED_V2_WORKER_CAPABILITIES
+        )
         missing = required - set(request.capabilities)
-        if requires_v2 and missing:
+        if required_version >= 2 and missing:
             raise WorkerUpgradeRequired(
                 "worker is missing required protocol capabilities: "
                 + ", ".join(sorted(missing))
             )
-        if requires_v2 and (request.repo_root is None or request.repository_id is None):
+        if required_version >= 2 and (
+            request.repo_root is None or request.repository_id is None
+        ):
             raise WorkerUpgradeRequired(
-                "this session tree requires worker protocol v2 repository "
+                "this session tree requires repository "
                 "binding (repo_root and repository_id)"
             )
         if request.repo_root is not None:
@@ -513,13 +635,21 @@ class CoordinatorService:
                 request.worker.starttime,
             )
             self._worker_contracts[key] = (
-                2
-                if version >= 2
+                required_version
+                if version >= required_version
                 and not missing
                 and request.repo_root is not None
                 and request.repository_id is not None
                 else 1
             )
+
+    @staticmethod
+    def _protocol_version_for_state(*, state: LoopState) -> int:
+        """Return the semantic protocol frozen in engine-owned session state."""
+
+        if state.workflow_contract is None:
+            return 1
+        return state.workflow_contract.session_protocol_version
 
     @staticmethod
     def _worker_contract_key(worker: WorkerIdentity) -> tuple[str, int, str | None]:
@@ -541,7 +671,9 @@ class CoordinatorService:
             return
         caller = request.worker
         assert caller is not None  # checked by _validate_finished_binding
-        self._worker_contracts[self._worker_contract_key(worker=caller)] = 2
+        self._worker_contracts[self._worker_contract_key(worker=caller)] = (
+            active.completion_contract_version
+        )
 
     def _emit(self, *, session_id: str, event_type: str, payload: dict) -> None:
         """Buffer one session event until its producing mutation commits."""
@@ -567,6 +699,14 @@ class CoordinatorService:
         """Emit the session-stopped event only for a new terminal transition."""
 
         if not was_terminal and self.state_store.is_terminal_state(state=state):
+            if (
+                self._protocol_version_for_state(state=state) >= 3
+                and state.terminal_state_revision is None
+            ):
+                # StateStore increments the revision only after this mutator
+                # returns, so the committed terminal revision is one greater.
+                state.terminal_state_revision = state.state_revision + 1
+                state.terminal_at = utc_now()
             self._emit(
                 session_id=state.active_session_id,
                 event_type="session_stopped",
@@ -826,17 +966,20 @@ class CoordinatorService:
     ) -> CurrentTask:
         """Create and freeze the next task for a validated worker caller."""
 
-        completion_contract_version = 1
-        if state.schema_version >= 2:
+        completion_contract_version = max(
+            2 if state.schema_version >= 2 else 1,
+            self._protocol_version_for_state(state=state),
+        )
+        if completion_contract_version >= 2:
             if caller is None or (
-                self._worker_contracts.get(self._worker_contract_key(worker=caller))
-                != 2
+                self._worker_contracts.get(self._worker_contract_key(worker=caller), 1)
+                < completion_contract_version
             ):
                 raise WorkerUpgradeRequired(
-                    "v2 task dispatch requires a validated worker handshake; "
-                    "register this worker before requesting work"
+                    f"v{completion_contract_version} task dispatch requires a "
+                    "validated worker handshake; register this worker before "
+                    "requesting work"
                 )
-            completion_contract_version = 2
         task = CurrentTask(
             workflow_set=state.workflow_set,
             workflow_id=workflow.id,
@@ -854,6 +997,8 @@ class CoordinatorService:
             # this step, a consistent rewrite of workflow_contract.json plus
             # its manifest hash could become the next attempt's snapshot.
             self._workflow_contract_for_state(state=state)
+            if completion_contract_version >= 3:
+                self._restore_v3_context_projections(state=state)
             preflight = self._preflight_for(workflow_set=state.workflow_set)
             task.workflow_snapshot = materialize_workflow_snapshot(
                 repo_root=self.repo_root,
@@ -881,6 +1026,8 @@ class CoordinatorService:
                 workflow_id=task.workflow_id,
                 attempt_id=task.attempt_id or "legacy",
             ).resolve()
+            if completion_contract_version >= 3:
+                self._write_scheduler_view(state=state, task=task, captured_at=now)
             assignment = build_attempt_assignment(
                 repo_root=self.repo_root,
                 task=task,
@@ -893,6 +1040,109 @@ class CoordinatorService:
             write_attempt_assignment(path=assignment_file, assignment=assignment)
             task.assignment_sha256 = file_sha256(path=assignment_file)
         return task
+
+    def _restore_v3_context_projections(self, *, state: LoopState) -> None:
+        """Restore agent-visible frozen rosters from engine-owned state."""
+
+        if state.workflow_roster is None or state.harness_capability_roster is None:
+            raise ConfigError("protocol v3 state is missing its frozen context rosters")
+        projections = {
+            workflow_roster_path(
+                repo_root=self.repo_root, session_id=state.active_session_id
+            ): state.workflow_roster.model_dump(mode="json"),
+            (
+                session_dir_path(
+                    repo_root=self.repo_root,
+                    session_id=state.root_session_id or state.active_session_id,
+                )
+                / "harness_capability_roster.json"
+            ): state.harness_capability_roster.model_dump(mode="json"),
+        }
+        for path, payload in projections.items():
+            expected = _serialized_json_sha256(payload=payload)
+            if not path.is_file() or file_sha256(path=path) != expected:
+                self._emit(
+                    session_id=state.active_session_id,
+                    event_type="context_projection_restored",
+                    payload={"path": str(path), "expected_sha256": expected},
+                )
+                write_json_atomic(path=path, payload=payload)
+
+    def _write_scheduler_view(
+        self, *, state: LoopState, task: CurrentTask, captured_at: datetime
+    ) -> None:
+        """Freeze a conditional next-role forecast without changing scheduling."""
+
+        roster_path = workflow_roster_path(
+            repo_root=self.repo_root, session_id=state.active_session_id
+        )
+        if not roster_path.is_file():
+            raise ConfigError(
+                f"protocol v3 session has no workflow roster at {roster_path}"
+            )
+        assumed_success = HistoryEntry(
+            iteration=task.iteration,
+            workflow_set=task.workflow_set,
+            workflow_id=task.workflow_id,
+            session_id=task.session_id,
+            success=True,
+            started_at=task.started_at,
+            finished_at=captured_at,
+            attempt_id=task.attempt_id,
+        )
+        projected_history = [*state.history, assumed_success]
+        next_workflow = choose_next_workflow(
+            workflows=self._workflows_for(workflow_set=state.workflow_set),
+            history=projected_history,
+            iteration_count=task.iteration,
+        )
+        reasons = (
+            [
+                "selected by the unchanged mechanical scheduler after the "
+                "simulated successful current attempt"
+            ]
+            if next_workflow is not None
+            else ["no workflow is mechanically eligible under these assumptions"]
+        )
+        view = SchedulerView(
+            session_id=state.active_session_id,
+            state_revision=(
+                state.state_revision + 1
+                if state_path(
+                    repo_root=self.repo_root, session_id=state.active_session_id
+                ).is_file()
+                else 0
+            ),
+            attempt_id=task.attempt_id or "legacy",
+            workflow_roster_sha256=file_sha256(path=roster_path),
+            history_watermark=state.iteration_count,
+            captured_at=captured_at,
+            recent_history=[
+                entry.model_dump(mode="json") for entry in state.history[-12:]
+            ],
+            conditional_forecast=SchedulerForecast(
+                next_workflow_id=(
+                    next_workflow.id if next_workflow is not None else None
+                ),
+                reasons=reasons,
+                assumptions=[
+                    "current attempt returns normally",
+                    "current attempt is recorded as a mechanical success",
+                    "no terminal control or child request is accepted",
+                    "no stop, failure, user update, or recovery changes state",
+                ],
+            ),
+        )
+        write_json_atomic(
+            path=scheduler_view_path(
+                repo_root=self.repo_root,
+                session_id=task.session_id,
+                iteration=task.iteration,
+                workflow_id=task.workflow_id,
+                attempt_id=task.attempt_id or "legacy",
+            ),
+            payload=view.model_dump(mode="json"),
+        )
 
     def _emit_task_dispatched(self, *, session_id: str, task: CurrentTask) -> None:
         """Emit the compact ownership record for a newly dispatched task."""
@@ -1001,14 +1251,18 @@ class CoordinatorService:
                         if stop_response is not None:
                             return finish(response=stop_response)
                     if caller is None or (
-                        self._worker_contracts.get(
-                            self._worker_contract_key(worker=caller)
+                        (
+                            self._worker_contracts.get(
+                                self._worker_contract_key(worker=caller)
+                            )
+                            or 0
                         )
-                        != 2
+                        < 2
                     ):
                         raise WorkerUpgradeRequired(
-                            "v2 /finished cannot dispatch work without a validated "
-                            "worker handshake; call /register with protocol v2"
+                            "a durable /finished retry cannot dispatch work without "
+                            "a validated protocol-v2-or-newer worker handshake; "
+                            "call /register with protocol v2 or newer first"
                         )
                 return finish(
                     response=self._advance(state=current, caller=caller, now=now)
@@ -1113,6 +1367,14 @@ class CoordinatorService:
                 self._clear_trace_finalization(request=request)
             raise
         self._flush_pending_events()
+        if completion_accepted and response.action == STOP_ACTION:
+            committed_state = self.state_store.read_state()
+            if (
+                committed_state is not None
+                and self._protocol_version_for_state(state=committed_state) >= 3
+                and self.state_store.is_terminal_state(state=committed_state)
+            ):
+                self._ensure_session_outcome(state=committed_state)
         if response.action == STOP_ACTION:
             parent_response = self._resume_parent_if_active_child_completed(
                 caller=caller
@@ -1174,6 +1436,10 @@ class CoordinatorService:
     ) -> None:
         """Record one finished attempt and evaluate its protocol-owned signals."""
 
+        effective_workflow_contract = (
+            workflow_contract or self._workflow_contract_for_state(state=state)
+        )
+        protocol_version = effective_workflow_contract.session_protocol_version
         success = request.success
         error = request.error
         # The taxonomy must describe the FINAL recorded failure: when the
@@ -1181,7 +1447,18 @@ class CoordinatorService:
         # an incoming harness kind (or None) would misattribute the cause.
         failure_kind = request.failure_kind if not success else None
 
-        if self._workflow_expects_goal_check_signal(current_task=active):
+        if protocol_version >= 3:
+            self._accept_current_eval_receipts(
+                state=state,
+                active=active,
+                workflow_contract=effective_workflow_contract,
+            )
+            self._observe_layer_handoff(
+                state=state,
+                active=active,
+                workflow_contract=effective_workflow_contract,
+            )
+        elif self._workflow_expects_goal_check_signal(current_task=active):
             goal_signal_errors: list[str] = []
             goal_signal = self._read_goal_check_signal(
                 current_task=active,
@@ -1222,9 +1499,9 @@ class CoordinatorService:
 
         if state.stop_reason != "goal_check_broken":
             control_result = self._apply_session_control(
-                state=state, workflow_contract=workflow_contract
+                state=state, workflow_contract=effective_workflow_contract
             )
-            if control_result in {"invalid_v1", "invalid_v2"}:
+            if control_result in {"invalid_v1", "invalid_v2", "invalid_v3"}:
                 success = False
                 error = "invalid_control_output"
                 failure_kind = "unknown"
@@ -1858,7 +2135,7 @@ class CoordinatorService:
     def _refresh_terminal_child_trace_projection(
         self, *, request: FinishedRequest
     ) -> bool:
-        """Re-project a child outcome after its terminal trace has sealed."""
+        """Refresh terminal outcome projections after an attempt trace seals."""
         try:
             child_store = StateStore(
                 repo_root=self.repo_root,
@@ -1867,11 +2144,13 @@ class CoordinatorService:
                 ),
             )
             child_state = child_store.read_state()
-            if (
-                child_state is None
-                or child_state.parent_session_id is None
-                or not child_store.is_terminal_state(state=child_state)
+            if child_state is None or not child_store.is_terminal_state(
+                state=child_state
             ):
+                return True
+            if self._protocol_version_for_state(state=child_state) >= 3:
+                self._ensure_session_outcome(state=child_state)
+            if child_state.parent_session_id is None:
                 return True
             self._mark_child_record_complete(child_state=child_state)
             return True
@@ -1884,6 +2163,155 @@ class CoordinatorService:
                 exc_info=True,
             )
             return False
+
+    def _ensure_session_outcome(self, *, state: LoopState) -> SessionOutcome | None:
+        """Write the topology-neutral result for any terminal v3 lifecycle."""
+
+        if state.status == "running" or state.stop_reason is None:
+            return None
+        if state.terminal_state_revision is None or state.terminal_at is None:
+            raise StateInvariantError(
+                "terminal v3 state has no frozen transition revision or timestamp"
+            )
+        session_id = state.active_session_id
+        terminal_control_path = control_path(
+            repo_root=self.repo_root, session_id=session_id
+        )
+        terminal_signal: ControlSignal | None = None
+        control_ref: OutcomeArtifactRef | None = None
+        control_snapshot = state.accepted_terminal_control
+        if control_snapshot is not None:
+            try:
+                terminal_signal = ControlSignal.model_validate(control_snapshot.payload)
+                raw_payload = json.loads(control_snapshot.raw_json)
+            except (ValidationError, ValueError) as exc:
+                raise StateInvariantError(
+                    f"accepted terminal control snapshot is invalid: {exc}"
+                ) from exc
+            expected_digest = (
+                "sha256:"
+                + hashlib.sha256(control_snapshot.raw_json.encode("utf-8")).hexdigest()
+            )
+            if (
+                raw_payload != control_snapshot.payload
+                or expected_digest != control_snapshot.sha256
+                or terminal_signal.schema_version != 3
+                or terminal_signal.state != "stopped"
+                or terminal_signal.stop_reason != state.stop_reason
+            ):
+                raise StateInvariantError(
+                    "accepted terminal control snapshot contradicts terminal state"
+                )
+            if (
+                not terminal_control_path.is_file()
+                or file_sha256(path=terminal_control_path) != control_snapshot.sha256
+            ):
+                write_text_atomic(
+                    path=terminal_control_path, content=control_snapshot.raw_json
+                )
+            if file_sha256(path=terminal_control_path) != control_snapshot.sha256:
+                raise StateInvariantError(
+                    "restored terminal control bytes do not match snapshot"
+                )
+            control_ref = OutcomeArtifactRef(
+                ref="session:/control.json", sha256=control_snapshot.sha256
+            )
+        elif state.stop_reason in {"goal_met", "unresolvable_error"}:
+            raise StateInvariantError(
+                "control-owned terminal state has no accepted v3 control snapshot"
+            )
+        evidence_refs = terminal_signal.evidence_refs if terminal_signal else []
+        observed_handoff = self._terminal_handoff_projection(state=state)
+        fallback = (
+            None
+            if observed_handoff.status == "valid"
+            else OutcomeFallbackSummary(
+                source=(
+                    "control_reason"
+                    if terminal_signal is not None
+                    else "engine_stop_reason"
+                ),
+                text=(
+                    terminal_signal.reason
+                    if terminal_signal is not None
+                    else state.stop_reason
+                ),
+            )
+        )
+        session_root = session_dir_path(repo_root=self.repo_root, session_id=session_id)
+        delivery_refs = list(
+            dict.fromkeys(
+                reference
+                for entry in state.history
+                if entry.attempt_id is not None
+                for reference in [
+                    self._delivery_ref_for_attempt(
+                        session_id=session_id,
+                        attempt_id=entry.attempt_id,
+                        evidence_refs=evidence_refs,
+                    )
+                ]
+                if reference is not None
+            )
+        )
+        trace_seal_refs = [
+            f"session:/trace_seals/{path.name}"
+            for path in sorted((session_root / "trace_seals").glob("*.json"))
+            if path.is_file()
+        ]
+        cited_eval_refs: list[str] = (
+            list(terminal_signal.eval_receipt_refs)
+            if terminal_signal is not None
+            else []
+        )
+        eval_refs: list[str] = list(
+            dict.fromkeys([*cited_eval_refs, *state.accepted_eval_receipt_seals])
+        )
+        outcome_file = session_outcome_path(
+            repo_root=self.repo_root, session_id=session_id
+        )
+        outcome = SessionOutcome(
+            session_id=session_id,
+            root_session_id=state.root_session_id or session_id,
+            goal_sha256=state.goal_hash,
+            terminal_status=state.status,
+            stop_reason=state.stop_reason,
+            terminal_state_revision=state.terminal_state_revision,
+            control=control_ref,
+            handoff=observed_handoff,
+            fallback_summary=fallback,
+            evidence_refs=evidence_refs,
+            delivery_refs=delivery_refs,
+            eval_refs=eval_refs,
+            trace_seal_refs=trace_seal_refs,
+            created_at=state.terminal_at,
+        )
+        write_json_atomic(path=outcome_file, payload=outcome.model_dump(mode="json"))
+        return outcome
+
+    def _terminal_handoff_projection(self, *, state: LoopState) -> OutcomeHandoff:
+        """Project the last engine observation without trusting later file edits."""
+
+        observation = state.latest_handoff_observation
+        if observation is None:
+            return OutcomeHandoff(status="missing")
+        if observation.status != "valid":
+            return observation.model_copy(deep=True)
+        snapshot = state.accepted_handoff_snapshot
+        if (
+            snapshot is None
+            or snapshot.sha256 != observation.sha256
+            or snapshot.handoff.revision != observation.revision
+        ):
+            return OutcomeHandoff(status="invalid")
+        path = handoff_path(
+            repo_root=self.repo_root, session_id=state.active_session_id
+        )
+        if not path.is_file() or file_sha256(path=path) != snapshot.sha256:
+            write_text_atomic(path=path, content=snapshot.raw_json)
+        if file_sha256(path=path) != snapshot.sha256:
+            raise StateInvariantError("restored handoff bytes do not match snapshot")
+        return observation.model_copy(deep=True)
 
     def _abandonment_is_committed(self, *, task: CurrentTask) -> bool:
         """Return whether durable state records this exact task as abandoned."""
@@ -2207,6 +2635,8 @@ class CoordinatorService:
             self.state_store.is_terminal_state(state=existing_state)
             and not terminal_with_inflight_projection
         ):
+            if self._protocol_version_for_state(state=existing_state) >= 3:
+                self._ensure_session_outcome(state=existing_state)
             self.state_store.archive_state()
             self._write_fresh_state()
             return
@@ -2841,6 +3271,27 @@ class CoordinatorService:
 
         session_id = create_session_id(goal_hash=self.preflight.root_config.goal_hash)
         goal_hash = derive_full_goal_hash(goal=self.preflight.root_config.goal)
+        protocol_version = self.preflight.workflow_contract.session_protocol_version
+        created_at = utc_now()
+        workflow_roster = (
+            _build_workflow_roster(
+                session_id=session_id, preflight=self.preflight, created_at=created_at
+            )
+            if protocol_version >= 3
+            else None
+        )
+        capability_roster = (
+            build_harness_capability_roster(
+                config=self.preflight.root_config,
+                root_session_id=session_id,
+                root_execution_config_sha256=_model_sha256(
+                    model=self.preflight.root_config
+                ),
+                created_at=created_at,
+            )
+            if protocol_version >= 3
+            else None
+        )
         create_session_dir(
             repo_root=self.repo_root,
             session_id=session_id,
@@ -2853,6 +3304,17 @@ class CoordinatorService:
             completion_criteria=self.preflight.root_config.completion_criteria,
             stop_criteria=self.preflight.root_config.stop_criteria,
             workflow_contract=self.preflight.workflow_contract.model_dump(),
+            workflow_roster_payload=(
+                workflow_roster.model_dump(mode="json")
+                if workflow_roster is not None
+                else None
+            ),
+            harness_capability_roster_payload=(
+                capability_roster.model_dump(mode="json")
+                if capability_roster is not None
+                else None
+            ),
+            session_protocol_version=protocol_version,
             schema_version=2,
         )
         self.state_store = StateStore(
@@ -2873,6 +3335,8 @@ class CoordinatorService:
             depth=0,
             config_snapshot=snapshot,
             workflow_contract=self.preflight.workflow_contract,
+            workflow_roster=workflow_roster,
+            harness_capability_roster=capability_roster,
         )
         self.state_store.write_state(state=state)
         self._emit(
@@ -3104,6 +3568,23 @@ class CoordinatorService:
                     parent_work_item_id=parent_work_item_id,
                 ),
             )
+            child_protocol_version = (
+                preflight.workflow_contract.session_protocol_version
+            )
+            child_workflow_roster = (
+                _build_workflow_roster(
+                    session_id=child_session_id,
+                    preflight=preflight,
+                    created_at=utc_now(),
+                )
+                if child_protocol_version >= 3
+                else None
+            )
+            if child_protocol_version >= 3 and state.harness_capability_roster is None:
+                raise ConfigError(
+                    "protocol v3 child requires the root's frozen harness "
+                    "capability roster"
+                )
             create_session_dir(
                 repo_root=self.repo_root,
                 session_id=child_session_id,
@@ -3140,6 +3621,17 @@ class CoordinatorService:
                     "frozen_inputs": [item.model_dump() for item in child_inputs],
                 },
                 workflow_contract=preflight.workflow_contract.model_dump(),
+                workflow_roster_payload=(
+                    child_workflow_roster.model_dump(mode="json")
+                    if child_workflow_roster is not None
+                    else None
+                ),
+                harness_capability_roster_payload=(
+                    state.harness_capability_roster.model_dump(mode="json")
+                    if state.harness_capability_roster is not None
+                    else None
+                ),
+                session_protocol_version=child_protocol_version,
                 schema_version=state.schema_version,
             )
             # The child inherits the PARENT's frozen execution config — only
@@ -3178,6 +3670,8 @@ class CoordinatorService:
                 workflow_contract=(
                     preflight.workflow_contract if state.schema_version >= 2 else None
                 ),
+                workflow_roster=child_workflow_roster,
+                harness_capability_roster=state.harness_capability_roster,
             )
             child_state.current_task = self._create_current_task(
                 state=child_state,
@@ -3617,6 +4111,8 @@ class CoordinatorService:
             raise ChildLedgerError(
                 f"cannot finalize live child {child_state.active_session_id}"
             )
+        if self._protocol_version_for_state(state=child_state) >= 3:
+            self._ensure_session_outcome(state=child_state)
         first_finalization = record.get("status") in _LIVE_CHILD_STATUSES
         self._project_terminal_child_record(record=record, child_state=child_state)
         _bump_children_revision(payload=payload)
@@ -3671,6 +4167,30 @@ class CoordinatorService:
             )
             / f"{request_id}.json"
         )
+        if self._protocol_version_for_state(state=child_state) >= 3:
+            session_outcome = self._ensure_session_outcome(state=child_state)
+            if session_outcome is None:
+                raise ChildLedgerError(
+                    f"terminal v3 child {child_state.active_session_id} has no "
+                    "session outcome"
+                )
+            child_outcome_file = session_outcome_path(
+                repo_root=self.repo_root, session_id=child_state.active_session_id
+            )
+            write_json_atomic(
+                path=outcome_path,
+                payload={
+                    "schema_version": 2,
+                    "request_id": request_id,
+                    "child_session_id": child_state.active_session_id,
+                    "session_outcome_ref": (
+                        f"session:{child_state.active_session_id}:/session_outcome.json"
+                    ),
+                    "session_outcome_sha256": file_sha256(path=child_outcome_file),
+                },
+            )
+            record["outcome_ref"] = f"session:/child_outcomes/{outcome_path.name}"
+            return
         evidence_refs, trace_ref, trace_sealed = self._terminal_evidence_projection(
             child_state=child_state
         )
@@ -4086,6 +4606,42 @@ class CoordinatorService:
             raise ChildLedgerError(
                 f"terminal child {validated.session_id} outcome file is missing"
             )
+        if self._protocol_version_for_state(state=child_state) >= 3:
+            child_outcome_file = session_outcome_path(
+                repo_root=self.repo_root, session_id=child_state.active_session_id
+            )
+            expected_session_outcome = self._ensure_session_outcome(state=child_state)
+            if expected_session_outcome is None:
+                raise ChildLedgerError(
+                    f"terminal child {validated.session_id} has no v3 outcome basis"
+                )
+            try:
+                persisted_session_outcome = SessionOutcome.model_validate_json(
+                    child_outcome_file.read_text(encoding="utf-8")
+                )
+            except (OSError, ValidationError, ValueError) as exc:
+                raise ChildLedgerError(
+                    f"terminal child {validated.session_id} outcome is invalid: {exc}"
+                ) from exc
+            if persisted_session_outcome != expected_session_outcome:
+                raise ChildLedgerError(
+                    f"terminal child {validated.session_id} outcome contradicts state"
+                )
+            expected_link = {
+                "schema_version": 2,
+                "request_id": request_id,
+                "child_session_id": child_state.active_session_id,
+                "session_outcome_ref": (
+                    f"session:{child_state.active_session_id}:/session_outcome.json"
+                ),
+                "session_outcome_sha256": file_sha256(path=child_outcome_file),
+            }
+            if outcome != expected_link:
+                raise ChildLedgerError(
+                    f"terminal child {validated.session_id} outcome link "
+                    "contradicts its session outcome"
+                )
+            return
         expected_lifecycle = {
             "status": child_state.status,
             "stop_reason": child_state.stop_reason,
@@ -4569,31 +5125,26 @@ class CoordinatorService:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             raw = None
-        version = raw.get("schema_version") if isinstance(raw, dict) else None
         effective_workflow_contract = (
             workflow_contract or self._workflow_contract_for_state(state=state)
         )
+        protocol_version = effective_workflow_contract.session_protocol_version
         signal = _read_signal(path=path, model=ControlSignal)
         if signal is None:
-            if (
-                version == 2
-                or effective_workflow_contract.session_protocol_version >= 2
-            ):
+            if protocol_version >= 2:
                 self._reject_v2_control(
                     state=state,
                     path=path,
                     raw=raw,
-                    reasons=["invalid control v2 JSON or schema"],
+                    reasons=[f"invalid control v{protocol_version} JSON or schema"],
+                    schema_version=protocol_version,
                 )
-                return "invalid_v2"
+                return f"invalid_v{protocol_version}"
             state.status = "failed"
             state.stop_reason = "invalid_control_output"
             return "invalid_v1"
         if signal.state == "running":
-            if (
-                signal.schema_version == 2
-                or effective_workflow_contract.session_protocol_version >= 2
-            ):
+            if protocol_version >= 2:
                 is_engine_placeholder, rejected_attempt_id = (
                     _control_repair_placeholder_identity(raw=raw)
                 )
@@ -4614,18 +5165,19 @@ class CoordinatorService:
                 ):
                     state.control_protocol_consecutive_failures = 0
             return None
-        if (
-            signal.schema_version == 1
-            and effective_workflow_contract.session_protocol_version >= 2
-        ):
+        if signal.schema_version != protocol_version:
             self._reject_v2_control(
                 state=state,
                 path=path,
                 raw=raw,
-                reasons=["this session contract requires terminal control v2"],
+                reasons=[
+                    f"this session contract requires terminal control "
+                    f"v{protocol_version}, got v{signal.schema_version}"
+                ],
+                schema_version=protocol_version,
             )
-            return "invalid_v2"
-        if signal.schema_version == 2:
+            return f"invalid_v{protocol_version}"
+        if protocol_version == 2:
             reasons = self._validate_v2_control(
                 state=state,
                 signal=signal,
@@ -4633,9 +5185,24 @@ class CoordinatorService:
             )
             if reasons:
                 self._reject_v2_control(
-                    state=state, path=path, raw=raw, reasons=reasons
+                    state=state, path=path, raw=raw, reasons=reasons, schema_version=2
                 )
                 return "invalid_v2"
+            state.control_protocol_consecutive_failures = 0
+        elif protocol_version == 3:
+            reasons = self._validate_v3_control(
+                state=state,
+                signal=signal,
+                workflow_contract=effective_workflow_contract,
+            )
+            if reasons:
+                self._reject_v2_control(
+                    state=state, path=path, raw=raw, reasons=reasons, schema_version=3
+                )
+                return "invalid_v3"
+            self._snapshot_accepted_terminal_control(
+                state=state, path=path, signal=signal
+            )
             state.control_protocol_consecutive_failures = 0
         if signal.stop_reason == "goal_met":
             state.goal_met = True
@@ -4644,6 +5211,378 @@ class CoordinatorService:
             state.unresolvable_error = True
             return None
         raise RuntimeError("unreachable")
+
+    def _snapshot_accepted_terminal_control(
+        self, *, state: LoopState, path: Path, signal: ControlSignal
+    ) -> None:
+        """Freeze canonical accepted v3 control bytes in engine-owned state."""
+
+        payload = signal.model_dump(mode="json")
+        raw_json = json.dumps(payload, indent=2)
+        write_text_atomic(path=path, content=raw_json)
+        state.accepted_terminal_control = AcceptedTerminalControlSnapshot(
+            payload=payload,
+            raw_json=raw_json,
+            sha256=file_sha256(path=path),
+            accepted_at=utc_now(),
+        )
+
+    def _validate_v3_control(
+        self,
+        *,
+        state: LoopState,
+        signal: ControlSignal,
+        workflow_contract: WorkflowSetContract,
+    ) -> list[str]:
+        """Return every false identity or provenance claim in v3 control."""
+
+        reasons: list[str] = []
+        producer = signal.producer
+        if producer is None:
+            return ["producer is required"]
+        current_task = state.current_task
+        owns_current_attempt = (
+            current_task is not None
+            and producer.session_id == state.active_session_id
+            and current_task.session_id == producer.session_id
+            and current_task.workflow_id == producer.workflow_id
+            and current_task.attempt_id == producer.attempt_id
+        )
+        if not owns_current_attempt:
+            reasons.append(
+                "producer attempt is not owned by this session's exact current task"
+            )
+        if signal.stop_reason == "goal_met":
+            if workflow_contract.completion_role != producer.workflow_id:
+                reasons.append("producer is not the declared completion role")
+            for reference in signal.evidence_refs:
+                reasons.extend(
+                    self._validate_asserted_artifact_reference(
+                        session_id=state.active_session_id,
+                        reference=reference,
+                        label="evidence",
+                    )
+                )
+            for reference in signal.eval_receipt_refs:
+                reasons.extend(
+                    self._validate_accepted_eval_reference(
+                        state=state,
+                        workflow_contract=workflow_contract,
+                        reference=reference,
+                    )
+                )
+            if signal.handoff_ref is not None:
+                reasons.extend(
+                    self._validate_control_handoff_reference(
+                        state=state, reference=signal.handoff_ref
+                    )
+                )
+        elif signal.stop_reason == "unresolvable_error":
+            if producer.workflow_id not in (
+                workflow_contract.terminal_blocker_reporting_roles
+            ):
+                reasons.append("producer role may not report terminal blockers")
+            for reference in signal.evidence_refs:
+                reasons.extend(
+                    self._validate_asserted_artifact_reference(
+                        session_id=state.active_session_id,
+                        reference=reference,
+                        label="evidence",
+                    )
+                )
+        return reasons
+
+    def _validate_asserted_artifact_reference(
+        self, *, session_id: str, reference: str, label: str
+    ) -> list[str]:
+        """Validate one asserted logical reference without interpreting content."""
+
+        try:
+            path = resolve_logical_reference(
+                reference=reference, repo_root=self.repo_root, session_id=session_id
+            )
+        except LogicalReferenceError as exc:
+            return [f"{label} reference is invalid: {exc}"]
+        if not path.is_file():
+            return [f"{label} reference does not resolve to a file: {reference}"]
+        return []
+
+    def _validate_accepted_eval_reference(
+        self,
+        *,
+        state: LoopState,
+        workflow_contract: WorkflowSetContract,
+        reference: str,
+    ) -> list[str]:
+        """Validate a cited receipt against its engine-owned acceptance seal."""
+
+        reasons: list[str] = []
+        validation_errors: list[str] = []
+        receipt = self._load_eval_receipt(
+            state_session_id=state.active_session_id,
+            reference=reference,
+            validation_errors=validation_errors,
+        )
+        if receipt is None:
+            return validation_errors or ["eval receipt is missing or invalid"]
+        seal = state.accepted_eval_receipt_seals.get(reference)
+        if seal is None:
+            return ["eval receipt was not accepted by the engine"]
+        try:
+            receipt_path = resolve_logical_reference(
+                reference=reference,
+                repo_root=self.repo_root,
+                session_id=state.active_session_id,
+            )
+        except LogicalReferenceError as exc:  # pragma: no cover - loaded above
+            return [f"eval receipt reference is invalid: {exc}"]
+        if file_sha256(path=receipt_path) != seal.receipt_sha256:
+            reasons.append("eval receipt bytes no longer match their acceptance seal")
+        if receipt.subject != seal.subject or receipt.producer != seal.producer:
+            reasons.append("eval receipt identity contradicts its acceptance seal")
+        if receipt.subject.session_id != state.active_session_id:
+            reasons.append("eval receipt session does not match")
+        if receipt.subject.root_session_id != (
+            state.root_session_id or state.active_session_id
+        ):
+            reasons.append("eval receipt root session does not match")
+        if receipt.subject.goal_hash != state.goal_hash:
+            reasons.append("eval receipt goal hash does not match")
+        if receipt.producer.workflow_id not in workflow_contract.check_runner_roles:
+            reasons.append("eval receipt producer is not a declared check runner")
+        evaluated_git = {
+            "git_commit": receipt.subject.git_commit,
+            "dirty_tree_digest": receipt.subject.dirty_tree_digest,
+        }
+        if evaluated_git != seal.evaluated_git:
+            reasons.append("eval receipt git identity contradicts its acceptance seal")
+        return reasons
+
+    def _validate_control_handoff_reference(
+        self, *, state: LoopState, reference: str
+    ) -> list[str]:
+        """Validate the canonical handoff identity cited by v3 control."""
+
+        if reference != "session:/project_state/handoff.json":
+            return ["handoff reference must name the canonical layer handoff"]
+        observation = state.latest_handoff_observation
+        snapshot = state.accepted_handoff_snapshot
+        if observation is None or observation.status == "missing":
+            return ["cited handoff has not been published by the layer orchestrator"]
+        if observation.status != "valid":
+            return [f"cited handoff observation is {observation.status}"]
+        if (
+            snapshot is None
+            or observation.sha256 != snapshot.sha256
+            or observation.revision != snapshot.handoff.revision
+        ):
+            return ["cited handoff lacks a matching engine acceptance snapshot"]
+        return []
+
+    def _accept_current_eval_receipts(
+        self,
+        *,
+        state: LoopState,
+        active: CurrentTask,
+        workflow_contract: WorkflowSetContract,
+    ) -> None:
+        """Seal provenance-valid receipts from an authorized current attempt.
+
+        Evaluation remains optional and advisory. Missing or malformed output
+        is reported as a diagnostic event and never changes harness success.
+        """
+
+        if active.workflow_id not in workflow_contract.check_runner_roles:
+            return
+        receipts_dir = (
+            session_dir_path(
+                repo_root=self.repo_root, session_id=state.active_session_id
+            )
+            / "eval_receipts"
+        )
+        accepted_dir = receipts_dir / "accepted"
+        accepted_count = 0
+        diagnostics: list[str] = []
+        for path in sorted(receipts_dir.glob("*.json")):
+            try:
+                receipt = EvalReceipt.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValidationError, ValueError):
+                continue
+            if (
+                receipt.producer.workflow_id != active.workflow_id
+                or receipt.producer.attempt_id != active.attempt_id
+                or receipt.producer.iteration != active.iteration
+            ):
+                continue
+            reference = f"session:/eval_receipts/{path.name}"
+            receipt_errors: list[str] = []
+            if receipt.subject.session_id != state.active_session_id:
+                receipt_errors.append("subject session does not match")
+            if receipt.subject.root_session_id != (
+                state.root_session_id or state.active_session_id
+            ):
+                receipt_errors.append("subject root session does not match")
+            if receipt.subject.goal_hash != state.goal_hash:
+                receipt_errors.append("subject goal does not match")
+            receipt_errors.extend(
+                self._validate_eval_receipt_artifacts(
+                    session_id=state.active_session_id, receipt=receipt
+                )
+            )
+            if receipt_errors:
+                diagnostics.extend(
+                    f"{path.name}: {reason}" for reason in receipt_errors[:8]
+                )
+                continue
+            seal = AcceptedEvalReceiptSeal(
+                receipt_ref=reference,
+                receipt_sha256=file_sha256(path=path),
+                subject=receipt.subject,
+                producer=receipt.producer,
+                evaluated_git={
+                    "git_commit": receipt.subject.git_commit,
+                    "dirty_tree_digest": receipt.subject.dirty_tree_digest,
+                },
+                accepted_at=utc_now(),
+            )
+            state.accepted_eval_receipt_seals[reference] = seal
+            write_json_atomic(
+                path=accepted_dir / f"{receipt.eval_id}.json",
+                payload=seal.model_dump(mode="json"),
+            )
+            accepted_count += 1
+        self._emit(
+            session_id=state.active_session_id,
+            event_type="eval_observation",
+            payload={
+                "workflow_id": active.workflow_id,
+                "attempt_id": active.attempt_id,
+                "accepted_receipts": accepted_count,
+                "diagnostics": diagnostics[:8],
+            },
+        )
+
+    def _observe_layer_handoff(
+        self,
+        *,
+        state: LoopState,
+        active: CurrentTask,
+        workflow_contract: WorkflowSetContract,
+    ) -> None:
+        """Record structural handoff continuity without gating loop progress."""
+
+        path = handoff_path(
+            repo_root=self.repo_root, session_id=state.active_session_id
+        )
+        try:
+            raw_json = path.read_text(encoding="utf-8")
+            digest = file_sha256(path=path)
+        except OSError as exc:
+            observation = OutcomeHandoff(status="missing")
+            state.latest_handoff_observation = observation
+            self._emit(
+                session_id=state.active_session_id,
+                event_type="handoff_observed",
+                payload={"status": "missing", "reason": str(exc)},
+            )
+            return
+        try:
+            handoff = LayerHandoff.model_validate_json(raw_json)
+        except (ValidationError, ValueError) as exc:
+            observation = OutcomeHandoff(
+                status="invalid",
+                ref="session:/project_state/handoff.json",
+                sha256=digest,
+            )
+            state.latest_handoff_observation = observation
+            self._emit(
+                session_id=state.active_session_id,
+                event_type="handoff_observed",
+                payload={"status": "invalid", "sha256": digest, "reason": str(exc)},
+            )
+            return
+        status: Literal["valid", "missing", "invalid", "non_monotonic"] = "valid"
+        reason: str | None = None
+        if handoff.session_id != state.active_session_id:
+            status = "invalid"
+            reason = "session identity does not match"
+        elif handoff.goal_sha256 != state.goal_hash:
+            status = "invalid"
+            reason = "goal identity does not match"
+        elif handoff.producer is None:
+            status = "missing"
+            reason = "no orchestrator handoff has been published"
+        elif (
+            workflow_contract.orchestration is not None
+            and handoff.producer.workflow_id
+            != workflow_contract.orchestration.handoff_owner
+        ):
+            status = "invalid"
+            reason = "producer is not the declared handoff owner"
+        elif not self._handoff_producer_is_known(
+            state=state, active=active, handoff=handoff
+        ):
+            status = "invalid"
+            reason = "producer attempt is not current or present in session history"
+        if status == "valid" and (
+            handoff.revision < state.handoff_revision
+            or (
+                handoff.revision == state.handoff_revision
+                and state.handoff_sha256 is not None
+                and digest != state.handoff_sha256
+            )
+        ):
+            status = "non_monotonic"
+            reason = "revision moved backward or changed without advancing"
+        if status == "valid" and handoff.revision >= state.handoff_revision:
+            state.handoff_revision = handoff.revision
+            state.handoff_sha256 = digest
+            state.accepted_handoff_snapshot = AcceptedHandoffSnapshot(
+                handoff=handoff, raw_json=raw_json, sha256=digest, accepted_at=utc_now()
+            )
+        observation = OutcomeHandoff(
+            status=status,
+            ref=(
+                "session:/project_state/handoff.json" if status != "missing" else None
+            ),
+            sha256=(digest if status != "missing" else None),
+            revision=(handoff.revision if status != "missing" else None),
+        )
+        state.latest_handoff_observation = observation
+        self._emit(
+            session_id=state.active_session_id,
+            event_type="handoff_observed",
+            payload={
+                "status": status,
+                "revision": handoff.revision,
+                "sha256": digest,
+                "reason": reason,
+            },
+        )
+
+    @staticmethod
+    def _handoff_producer_is_known(
+        *, state: LoopState, active: CurrentTask, handoff: LayerHandoff
+    ) -> bool:
+        """Return whether handoff provenance names a real session attempt."""
+
+        producer = handoff.producer
+        if producer is None:
+            return False
+        if (
+            active.session_id == state.active_session_id
+            and producer.workflow_id == active.workflow_id
+            and producer.attempt_id == active.attempt_id
+        ):
+            return True
+        return any(
+            entry.session_id == state.active_session_id
+            and entry.workflow_id == producer.workflow_id
+            and entry.attempt_id == producer.attempt_id
+            for entry in state.history
+        )
 
     def _validate_v2_control(
         self,
@@ -5075,9 +6014,15 @@ class CoordinatorService:
         return reasons
 
     def _reject_v2_control(
-        self, *, state: LoopState, path: Path, raw: object, reasons: list[str]
+        self,
+        *,
+        state: LoopState,
+        path: Path,
+        raw: object,
+        reasons: list[str],
+        schema_version: int = 2,
     ) -> None:
-        """Archive invalid v2 control and publish a repairable protocol failure."""
+        """Archive invalid identity-bound control and publish repair context."""
 
         raw_control_id = raw.get("control_id") if isinstance(raw, dict) else None
         control_id = (
@@ -5126,7 +6071,7 @@ class CoordinatorService:
         write_json_atomic(
             path=path,
             payload={
-                "schema_version": 2,
+                "schema_version": schema_version,
                 "state": "running",
                 "reason": "invalid terminal request archived for autonomous repair",
                 "stop_reason": None,
@@ -5169,7 +6114,16 @@ def _build_run_response(
     """Build the worker-facing response for one frozen current task."""
 
     descriptor = current_task.workflow_snapshot
-    v2 = descriptor is not None
+    protocol_version = (
+        current_task.completion_contract_version if descriptor is not None else 1
+    )
+    required_capabilities = (
+        REQUIRED_V3_WORKER_CAPABILITIES
+        if protocol_version >= 3
+        else REQUIRED_V2_WORKER_CAPABILITIES
+        if protocol_version >= 2
+        else frozenset()
+    )
     return TaskResponse(
         action="run",
         workflow_set=current_task.workflow_set,
@@ -5178,8 +6132,8 @@ def _build_run_response(
         iteration=current_task.iteration,
         attempt_id=current_task.attempt_id,
         config_snapshot=config_snapshot,
-        coordinator_protocol_version=2 if v2 else 1,
-        required_capabilities=(sorted(REQUIRED_V2_WORKER_CAPABILITIES) if v2 else []),
+        coordinator_protocol_version=protocol_version,
+        required_capabilities=sorted(required_capabilities),
         repo_root=str(repo_root.resolve()),
         repository_id=current_task.repository_id,
         assignment_path=(

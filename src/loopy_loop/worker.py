@@ -36,10 +36,11 @@ from loopy_loop.models import IterationResult
 from loopy_loop.models import IterationUsage
 from loopy_loop.models import LOOPY_WORKER_CAPABILITIES
 from loopy_loop.models import RegisterRequest
-from loopy_loop.models import REQUIRED_V2_WORKER_CAPABILITIES
+from loopy_loop.models import REQUIRED_V3_WORKER_CAPABILITIES
 from loopy_loop.models import RootConfigSnapshot
 from loopy_loop.models import TaskResponse
 from loopy_loop.models import utc_now
+from loopy_loop.models import WORKER_PROTOCOL_VERSION
 from loopy_loop.models import WorkerIdentity
 from loopy_loop.sessions import append_jsonl_record
 from loopy_loop.sessions import assignment_path
@@ -184,7 +185,7 @@ def _post_register(
 
     request = RegisterRequest(
         worker=identity,
-        worker_protocol_version=2,
+        worker_protocol_version=WORKER_PROTOCOL_VERSION,
         capabilities=sorted(_worker_capabilities()),
         repo_root=str(repo_root.resolve()),
         repository_id=repository_id(repo_root=repo_root),
@@ -397,6 +398,31 @@ def _run_task(
                 payload=git_before,
             )
             harness_output_root = trace_root / "harness"
+            relevant_state_paths = [
+                assignment.absolute_paths.get(name)
+                for name in (
+                    "layer_plan",
+                    "layer_tasks",
+                    "layer_current_state",
+                    "layer_decisions",
+                    "layer_finished_ledger",
+                    "layer_eval_state",
+                    "layer_handoff",
+                    "workflow_roster",
+                    "scheduler_view",
+                    "harness_capability_roster",
+                    "eval_receipts",
+                )
+            ]
+            capability_roster_path = assignment.absolute_paths.get(
+                "harness_capability_roster"
+            )
+            capability_roster_summary = assignment.context.get(
+                "harness_capability_roster"
+            )
+            capability_roster_sha256 = assignment.provenance.get(
+                "harness_capability_roster_sha256"
+            )
             caller_context = {
                 "schema_version": 1,
                 "trace_root": str(harness_output_root.resolve()),
@@ -407,10 +433,21 @@ def _run_task(
                 "session_depth": assignment.identity["depth"],
                 "workflow_role": task.workflow_id,
                 "relevant_state_paths": [
-                    assignment.absolute_paths["project_state"],
-                    assignment.absolute_paths["eval_receipts"],
+                    path for path in relevant_state_paths if path is not None
                 ],
             }
+            if (
+                capability_roster_path is not None
+                and capability_roster_sha256 is not None
+                and isinstance(capability_roster_summary, dict)
+            ):
+                caller_context.update(
+                    {
+                        "capability_roster_path": capability_roster_path,
+                        "capability_roster_sha256": capability_roster_sha256,
+                        "capability_roster_summary": capability_roster_summary,
+                    }
+                )
         else:
             workflow_dir = (
                 workflow_set_workflows_dir_path(
@@ -808,6 +845,16 @@ def _render_prompt(
                 "paths; do not rediscover session state by searching the checkout.",
             ]
         )
+        if assignment.context:
+            lines.extend(
+                [
+                    "",
+                    "Frozen workflow, scheduler, and capability context:",
+                    json.dumps(
+                        assignment.context, indent=2, sort_keys=True, ensure_ascii=False
+                    ),
+                ]
+            )
     if session_dir.parent.name == "children":
         lines.append(f"Parent session directory: {session_dir.parent.parent}")
     if workflow_id == "goal_check" or emits_goal_check:
@@ -911,7 +958,7 @@ def _worker_capabilities() -> frozenset[str]:
     except (ImportError, AttributeError):
         pass
     return LOOPY_WORKER_CAPABILITIES | (
-        harness_capabilities & REQUIRED_V2_WORKER_CAPABILITIES
+        harness_capabilities & REQUIRED_V3_WORKER_CAPABILITIES
     )
 
 
