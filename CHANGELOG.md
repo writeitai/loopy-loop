@@ -9,6 +9,8 @@
   Requires eval-banana 0.3.5, which also preserves every check's exact judge
   prompt and collision-safe result, stream, and deterministic-evidence
   artifacts under the caller-owned attempt trace.
+  An in-flight 0.7.0 attempt that authored a legacy raw-YAML digest is rejected
+  once and must rerun its eval so the receipt carries the canonical digest.
 - Updated stock eval-runner guidance to copy `check_definition_sha256` from
   eval-banana's report rather than manually hashing YAML with a different
   protocol.
