@@ -10,11 +10,11 @@ iterations: plan, implement, evaluate, record evidence, and continue until the
 goal is met or the loop hits a terminal blocker.
 
 The value is control and durability. Instead of asking one agent to solve a
-large task in one fragile chat, loopy-loop gives the work a persistent session
-directory, repeatable workflow prompts, explicit stop conditions, and structured
-logs. You can pause, resume, audit what happened, adjust the goal, inspect every
-prompt/result pair, and keep the actual project changes in normal git branches
-and PRs.
+large task in one fragile chat, loopy-loop gives each durable goal layer a
+persistent session directory, immutable attempt assignments, explicit stop
+conditions, and structured evidence. You can stop and resume the service,
+append instructions while it runs, audit what happened, inspect attempt traces,
+and keep the actual project changes in normal git branches and PRs.
 
 Under the hood, loopy-loop runs a small FastAPI coordinator and a single
 worker. The coordinator owns the loop state and chooses the next workflow. The
@@ -48,6 +48,23 @@ For development inside this repository:
 uv sync --extra dev
 ```
 
+Version 0.7's recursive contract spans three owned projects. It requires
+`team-harness>=0.5.0` for caller-owned run records, pre-call coordinator input,
+spawn assignment envelopes, and canonical stdout/stderr capture; it requires
+`eval-banana>=0.3.2` for hermetic `--no-project-config` evaluation and explicit
+harness-agent validation. Install all three companion changes together. While
+developing before those releases are published, install the corresponding
+team-harness and eval-banana checkouts into this environment as editable
+dependencies:
+
+```bash
+uv pip install -e /path/to/team-harness -e /path/to/eval-banana
+```
+
+An older dependency is not a reduced-fidelity v2 mode: a fresh v2 session
+fails registration clearly if the worker cannot advertise the required
+capabilities.
+
 ## Install the Agent Skill
 
 This repo also ships an [Agent Skill](https://support.claude.com/en/articles/12512176-what-are-skills)
@@ -72,15 +89,17 @@ This is the recommended starting template. It creates:
 
 - `loopy_loop_config.yaml`
 - `loopy_loop_goal.txt`
+- `.loopy_loop/workflow_sets/inner_outer_eval/contract.yaml`
 - `.loopy_loop/workflow_sets/inner_outer_eval/workflows/outer/`
 - `.loopy_loop/workflow_sets/inner_outer_eval/workflows/inner/`
 - `.loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_reviewer/`
 - `.loopy_loop/workflow_sets/inner_outer_eval/workflows/eval_runner/`
-- a `.gitignore` entry for `.loopy_loop/sessions/`
+- additive `.gitignore` entries for session state, traces, the trace-finalization
+  outbox, repository identity, and root state/lock/archive files
 
 `loopy init` is idempotent. It creates missing files and leaves existing files
-alone — except `.gitignore`, which is updated in place to ensure the sessions
-ignore rule.
+alone — except `.gitignore`, which is updated additively with all runtime ignore
+rules.
 
 ## Write the Goal
 
@@ -122,7 +141,9 @@ Useful control commands:
 
 ```bash
 loopy status
+loopy update Prioritize the failing integration test
 loopy stop
+loopy traces list
 ```
 
 If the coordinator stops while a session is still running, restart it with:
@@ -142,28 +163,48 @@ At a high level:
 
 1. `loopy init` writes a root config, a goal file, and workflow files into the
    target repo.
-2. `loopy coordinator` loads `loopy_loop_config.yaml`, resolves the goal text,
-   creates a session under `.loopy_loop/sessions/`, and exposes two HTTP
-   endpoints: `/register` and `/finished`.
-3. A worker calls `/register`, receives the next workflow assignment, renders
-   the workflow prompt with session paths, and runs it through `team-harness`.
-4. `team-harness` runs a coordinator model and can spawn external worker CLIs
-   such as Codex, Claude Code, or Gemini.
-5. The worker writes the rendered prompt, normalized result, result text,
-   harness run id, and harness output path into the iteration directory.
-6. The coordinator records the result, checks session control/eval artifacts,
-   and either dispatches the next workflow or stops.
+2. `loopy coordinator` loads `loopy_loop_config.yaml`, freezes the goal and
+   workflow-set contract, creates a v2 root session under
+   `.loopy_loop/sessions/`, and exposes `/register` and `/finished`.
+3. A v2 worker advertises its protocol/capabilities and repository identity.
+   The coordinator assigns work only to a matching checkout, freezes the exact
+   workflow config/prompt/contract and assignment, creates the active attempt
+   trace, and returns one identity-bound attempt with its assignment hash.
+4. Before calling a model, the worker reopens and verifies that same trace,
+   records the exact task response, verifies the frozen `assignment.json`, and
+   writes the rendered prompt and git-before evidence. The assignment gives the
+   harness coordinator absolute paths for its own session layer while durable
+   receipts continue to use portable logical references.
+5. `team-harness` runs the coordinator model. It may dynamically spawn Codex,
+   Claude Code, Gemini, or other configured agents; each direct spawn receives
+   an automatic assignment envelope identifying its parent attempt, delegated
+   task, relevant state paths, and output directory.
+6. The worker records the normalized result and compact evidence with the
+   session and posts a completion bound to the exact worker, repository,
+   attempt, and assignment hash. The coordinator records the exact observed
+   completion response (or an explicit unavailable status after interruption)
+   and then seals detailed observable execution under
+   `.loopy_loop/traces/`.
+7. The coordinator checks structural protocol evidence, session-local eval and
+   control artifacts, child requests, and stop/budget conditions. Semantic
+   quality remains the responsibility of the workflow/eval agents (D3/D4).
 
 The `inner_outer_eval` template is organized around four workflows:
 
-- `outer`: plans, tracks durable project state, reviews evidence, and decides
-  what should happen next.
-- `inner`: implements the selected work in the target repo.
-- `eval_reviewer`: creates or refreshes session-scoped eval-banana checks.
-- `eval_runner`: runs the eval checks and writes `goal_check.json`.
+- `outer`: reviews implementation evidence, accepts or returns work, maintains
+  the accepted ledger, and publishes eval-readiness context without closing
+  the session.
+- `inner`: dynamically plans/delegates and implements one focused unit in the
+  target repo; its harness coordinator integrates all spawned-agent work.
+- `eval_reviewer`: creates or refreshes outcome-oriented, session-scoped
+  eval-banana checks.
+- `eval_runner`: runs those checks, publishes the canonical eval receipt and
+  matching `goal_check.json`, and alone may request successful terminal control
+  for this layer.
 
 The loop does not hide state inside a chat transcript. Continuity comes from
-git state plus files in `.loopy_loop/sessions/<session_id>/`.
+git plus compact files in `.loopy_loop/sessions/<session_id>/`; detailed
+execution records live separately in `.loopy_loop/traces/`.
 
 ## Repo Layout
 
@@ -174,28 +215,43 @@ target repo/
 ├── loopy_loop_config.yaml
 ├── loopy_loop_goal.txt
 └── .loopy_loop/
+    ├── repository.json                 # ignored checkout identity
     ├── workflow_sets/
-    │   └── <workflow_set>/workflows/<workflow_id>/
-    │       ├── config.yaml
-    │       └── prompt.txt
-    └── sessions/
-        └── <session_id>/
-            ├── goal.md
-            ├── session.json
-            ├── state.json
-            ├── control.json
-            ├── updates_from_user.md
-            ├── project_state/
-            ├── eval_checks/
-            ├── eval_results/
-            ├── harness_outputs/
-            ├── child_requests/
-            ├── children/
-            └── iterations/
+    │   └── <workflow_set>/
+    │       ├── contract.yaml
+    │       └── workflows/<workflow_id>/
+    │           ├── config.yaml
+    │           └── prompt.txt
+    ├── sessions/
+    │   └── <session_id>/
+    │       ├── goal.md
+    │       ├── goal_contract.json
+    │       ├── session.json
+    │       ├── workflow_contract.json
+    │       ├── state.json
+    │       ├── control.json
+    │       ├── inputs/{user_updates.jsonl,accepted_request.json,artifacts/}
+    │       ├── project_state/
+    │       ├── eval_checks/
+    │       ├── eval_readiness/
+    │       ├── eval_receipts/
+    │       ├── child_requests/{pending,accepted,rejected}/
+    │       ├── child_outcomes/
+    │       ├── parent_acceptance/
+    │       ├── git_receipts/
+    │       ├── delivery_receipts/
+    │       ├── trace_seals/
+    │       ├── iterations/
+    │       └── children/<child_session_id>/...
+    ├── traces/<root>/sessions/<session>/attempts/<attempt>/
+    └── trace_finalization_outbox/
 ```
 
 Workflow definitions are part of the repo and should usually be committed.
-Session directories are runtime output and are ignored by default.
+Session directories, traces, the trace-finalization outbox, and
+`repository.json` are runtime output and are ignored by default. Session
+state/evidence is required for recovery; trace retention is independent from
+that compact truth.
 
 ## Configuration
 
@@ -234,12 +290,11 @@ Important rules:
 - `model_tiers` (optional) declares named worker tiers — tier name → agent →
   `{model, effort}` — as the single source of truth for this repo's model
   ids. Loopy renders the table into the harness system prompt so coordinators
-  can pass `spawn_agent(model=…)` to move one task to a different tier
+  can pass `spawn_agent(model=…, effort=…)` to select one bundle for a task
   (guidance, not enforcement — see D8/D9 in `design/decisions.md`). The
-  per-spawn `effort` argument needs team-harness >= 0.4.0 (the minimum
-  dependency since loopy 0.6.0); on older installed versions the rendered
-  guidance points coordinators at the CLI's own reasoning-effort flag via
-  `flags`. With `default_tier` set, the named tier
+  per-spawn `effort` argument was introduced in team-harness 0.4.0. Loopy 0.7
+  requires team-harness 0.5.0 for the wider caller/trace contract, so current
+  installs always have it. With `default_tier` set, the named tier
   derives `team_harness_agent_models` and
   `team_harness_agent_reasoning_efforts` (the tier must cover every
   configured agent); setting those mappings explicitly alongside
@@ -319,120 +374,86 @@ run_after_successes:
   `goal_check.json` as an eval artifact. Stopping still requires updating
   session `control.json`.
 
+Each workflow set may declare `contract.yaml`. It names the layer kind, every
+workflow role's responsibility, accountable state paths, eval author/runner/
+goal-control roles, task-acceptance owner, terminal-blocker reporting roles,
+and whether the set uses the recursive child interface. This is accountability
+metadata and prompt context, not a filesystem ACL or semantic scheduler gate
+(D8). All built-in templates declare `session_protocol_version: 2`; an explicit
+contract that omits the field also selects v2. An older
+custom set without a contract receives a conservative derived protocol-v1 role
+contract and remains executable; add and validate an explicit v2 contract
+before expecting evidence-bound terminal control and child requests.
+
 ## Output and Logging
 
-Each fresh coordinator run creates one session directory:
+Each coordinator run creates a root under `.loopy_loop/sessions/`. Recursive
+workflow sets may create child sessions beneath it, but one worker still
+advances only the deepest active session. Session files hold compact durable
+truth: scoped goals, progress and decisions, task/recovery state, eval and
+control receipts, child handoffs, and git/delivery evidence.
 
-```text
-.loopy_loop/sessions/<session_id>/
-```
+Each attempt freezes its workflow sources and `assignment.json`. The
+assignment identifies the exact repository/session/workflow/attempt and gives
+the harness coordinator absolute paths to its own state and outputs. Durable
+receipts use logical `session:/`, `parent:/`, `root:/`, and `trace:` references
+so a stopped checkout can move. Team-harness gives every direct spawn its own
+absolute assignment/output paths and dynamic delegated task; the original
+coordinator remains accountable for integrating the result.
 
-Session ids start with a UTC timestamp and include a deterministic goal hash, so
-session directories sort chronologically and similar goals are easy to compare.
+Detailed observable execution goes to the separately gitignored
+`.loopy_loop/traces/<root>/sessions/<session>/attempts/<attempt>/` tree. It
+contains the attempt manifest, protocol exchange, canonical team-harness run,
+direct-agent streams, raw eval output, and verbose git/service records. These
+are raw local records and may contain private data. A sealed manifest means
+the local inventory is integrity-checked and its channel completeness is
+known; it does not mean the attempt succeeded semantically.
 
-Important session files:
-
-- `goal.md`: the exact goal text copied into the session.
-- `session.json`: session metadata.
-- `state.json`: coordinator-owned dispatch state, including the session's
-  token/duration usage ledger.
-- `events.jsonl`: append-only event stream — one versioned JSON line per
-  significant transition (`session_started`, `task_dispatched`,
-  `task_finished`, `iteration_abandoned`, `goal_check`, `child_started`,
-  `child_finished`, `session_stopped`). Tail it with `loopy events --follow`.
-- `control.json`: workflow-owned stop switch.
-- `updates_from_user.md`: human-writable inbox for changes after the session
-  starts.
-- `project_state/`: workflow-owned durable markdown state.
-- `eval_checks/`: session-scoped eval-banana checks.
-- `eval_results/`: raw eval-banana reports.
-- `harness_outputs/`: team-harness coordinator and worker artifacts.
-- `iterations/`: one directory per loopy-loop assignment.
-
-Each iteration directory contains:
-
-```text
-.loopy_loop/sessions/<session_id>/iterations/<NNNN>_<workflow_id>/
-├── prompt.txt
-├── result.json
-├── result_text.txt
-├── harness_run_id.txt
-├── pending_finished_request.json
-└── goal_check.json            # only for eval-emitting workflows
-```
-
-`prompt.txt` is the rendered prompt sent to `TeamHarness.run(...)`.
-`result.json` is loopy-loop's normalized result. `result_text.txt` is the
-plain-text final response. `harness_run_id.txt` links the iteration to the
-corresponding team-harness output under `harness_outputs/`.
-
-Team-harness outputs are routed here:
-
-```text
-.loopy_loop/sessions/<session_id>/harness_outputs/<NNNN>_<workflow_id>/<team_harness_run_id>/
-```
-
-Eval-banana outputs should be routed here:
-
-```text
-.loopy_loop/sessions/<session_id>/eval_results/<eval_banana_run_id>/
-```
-
-See [docs/session-layout.md](docs/session-layout.md) for the full session file
+Use `loopy status` and `loopy events` for compact progress, and `loopy traces
+list` plus `loopy traces inspect` for attempt detail. The complete artifact and
+writer/reader reference is [docs/session-layout.md](docs/session-layout.md).
+Legacy v1 files remain readable on resume but are not the fresh-session write
 contract.
 
 ## Control and Completion
 
-`control.json` is the session-scoped stop switch. It starts as:
+Each session evaluates its own scoped goal. A delivery child may prove its task
+while its parent still needs integration or release work. In the packaged
+`inner_outer_eval` set, `outer` accepts task evidence, `eval_reviewer` authors
+LLM-as-judge checks, and only `eval_runner` may publish successful terminal
+control after a matching same-session eval receipt. Readiness informs prompts;
+it does not become a semantic scheduler gate.
+
+The one D5 escape hatch is an identity-bound v2 `unresolvable_error`. It is for
+a genuinely terminal blocker after autonomous alternatives are exhausted:
 
 ```json
 {
-  "state": "running",
-  "reason": "session active",
-  "stop_reason": null,
-  "schema_version": 1
-}
-```
-
-To stop successfully, a workflow writes:
-
-```json
-{
-  "state": "stopped",
-  "reason": "evals passed",
-  "stop_reason": "goal_met",
-  "schema_version": 1
-}
-```
-
-To stop because the loop cannot continue:
-
-```json
-{
+  "schema_version": 2,
+  "control_id": "control-blocker-id",
   "state": "stopped",
   "reason": "specific terminal blocker",
   "stop_reason": "unresolvable_error",
-  "schema_version": 1
+  "producer": {
+    "session_id": "session-id",
+    "workflow_id": "inner",
+    "attempt_id": "attempt-id"
+  },
+  "attempted_routes": ["retry", "re-scope", "alternate local route"],
+  "evidence_refs": ["session:/protocol_failures/blocker.json"],
+  "created_at": "2026-07-15T12:00:00Z"
 }
 ```
 
-`goal_check.json` is a per-iteration eval artifact:
+Both successful and blocker control must identify the exact current
+session/workflow/attempt. A delegate reports its conclusion to the harness
+coordinator; it cannot publish a durable decision for another layer or a later
+attempt. Invalid v2 control is archived with repair diagnostics instead of
+being treated as semantic failure. Repeated broken protocol or workflow
+execution is bounded by the configured failure caps.
 
-```json
-{"goal_met": false, "reason": "docs still missing", "schema_version": 1}
-```
-
-A valid `goal_check.json` does not stop the loop by itself. It is evidence.
-Stopping is controlled by session `control.json`. If goal-check output is
-missing or invalid repeatedly, the coordinator stops with
-`stop_reason="goal_check_broken"` after the configured failure cap. Similarly,
-consecutive failed iterations of any single workflow stop the loop with
-`stop_reason="workflow_failure_cap"` after `workflow_consecutive_failures_cap`.
-Failed iterations record a `failure_kind` in history — `transient` (provider
-said retry; team-harness's own retries were exhausted), `deterministic`
-(auth/config errors retries cannot fix), `crash` (the task was abandoned by
-worker-crash recovery; this does not prove an unverifiable worker died), or
-`unknown` — so a stopped run is legible without reading harness logs.
+The exact eval receipt, goal-check projection, successful control, blocker, and
+rejection rules are in [docs/http-contract.md](docs/http-contract.md).
 
 ## Workflow Sets and Child Sessions
 
@@ -444,32 +465,33 @@ Workflow sets are mandatory. Even a single-loop repo uses:
 
 The older `.loopy_loop/workflows/...` layout is not loaded.
 
-A top-level session's workflow can request one sequential child session by
-writing a uniquely named `*.json` file under the active session's
-`child_requests/` directory (only `*.json` filenames are scanned; publish via
-a non-`.json` temp name plus rename — invalid requests are renamed to
-`*.json.rejected` and skipped):
+A session workflow may request one sequential child by atomically publishing a
+unique `*.json` file under the assignment's absolute
+`child_requests/pending/` path. The same edge works recursively, so one-loop,
+planner/dispatcher, and deeper trees use one state machine. Only the deepest
+session runs an assignment; every ancestor is suspended on one child.
 
-```json
-{
-  "workflow_set": "pm_planner_dispatcher",
-  "goal": "Implement the selected planner item.",
-  "schema_version": 1
-}
-```
+The v2 request carries parent provenance, a child-scoped goal contract, and
+hashed input references. The coordinator archives the accepted request and
+copies each verified input into the child's immutable `inputs/` area. Child
+attempts receive those logical references, hashes, and absolute local paths;
+later parent edits cannot change accepted work.
 
-The coordinator creates the child session under the parent session's
-`children/` directory, copies the request goal into the child `goal.md`, runs
-the requested workflow set, and resumes the parent after the child reaches a
-terminal state. v1 is depth-first and single-child-at-a-time.
+When the child stops, the engine writes a factual outcome. The parent then
+writes a separate acceptance, rework, or reroute decision after reviewing the
+evidence. Terminal descendants unwind iteratively, so the same edge supports
+three or more active depths without a depth-specific scheduler. Invalid
+requests are archived with reasons and can be repaired autonomously.
 
 The packaged `pm_planner_dispatcher` workflow set uses this contract for PM
 orchestration:
 
-- `planner` maintains PM state, selects one work item, and reviews terminal
-  child-session evidence.
-- `dispatcher` writes one child request for the selected work item or imports
-  terminal child evidence back into PM state.
+- `planner` maintains PM state, selects one work item, reviews terminal child
+  evidence, and owns parent-acceptance/eval-readiness receipts.
+- `dispatcher` publishes the selected v2 child assignment and tracks factual
+  lifecycle evidence without deciding acceptance.
+- `eval_reviewer` and `eval_runner` evaluate the PM layer's own broader goal;
+  only that layer's `eval_runner` may request successful terminal control.
 
 ## HTTP Contract
 
@@ -480,16 +502,18 @@ The coordinator exposes exactly two endpoints:
 
 Both return a `TaskResponse` with `action` equal to `"run"` or `"stop"`.
 
-A `run` response carries `workflow_set`, `workflow_id`, `session_id`,
-`iteration`, and a config snapshot. A `stop` response carries `stop_reason`.
+Fresh v2 registration binds worker protocol/capabilities to the absolute
+checkout and stable repository ID. A missing capability returns HTTP 426
+without advancing state. A run response identifies the frozen
+session/workflow/attempt assignment; completion must echo its worker,
+repository, attempt, and assignment hash. Stale or mismatched completion cannot
+mutate current work. Durable local result and pending-completion records allow
+the next registration to recover an interrupted acknowledgement exactly once.
 
-If `/finished` receives a stale response for a task that is no longer current,
-the coordinator does not mutate state. If a worker exits after writing
-`result.json` but before `/finished` is acknowledged, the next `/register`
-recovers the completed result from the iteration directory instead of marking
-the task abandoned.
-
-See [docs/http-contract.md](docs/http-contract.md) for exact JSON payloads.
+The authoritative payload models are `RegisterRequest`, `TaskResponse`, and
+`FinishedRequest` in
+[`src/loopy_loop/models.py`](src/loopy_loop/models.py). The recursive ownership
+and compatibility rules are in [docs/http-contract.md](docs/http-contract.md).
 
 ## CLI Reference
 
@@ -521,15 +545,30 @@ loopy status           # session stack, usage totals, estimated cost
 loopy status --watch   # re-render every 2 seconds
 loopy events           # the active session's event stream
 loopy events --follow  # tail it live (--json for raw lines)
-loopy stop
+loopy update TEXT...   # append to the deepest active layer
+loopy update --session SESSION_ID TEXT...
+loopy stop             # tree-wide stop at the next safe boundary
+loopy traces list
+loopy traces inspect MANIFEST_OR_ID
 ```
 
 `status` prints the latest session state — the whole session stack while a
 child runs (the live child is shown under its suspended parent), each
 session's subtree token usage, and (with `model_prices` configured) estimated
-cost. `stop` still flags the latest **top-level** session only: a running
-child does not see the flag, and the stop takes effect once the child reaches
-a terminal state and the parent resumes.
+cost. `update` appends the input record exactly as supplied; without `--session` it is
+routed to the deepest active layer and later assignments append delivery and
+acknowledgement records rather than editing history. `stop` projects root stop
+intent through the whole active path and takes effect at the next register or
+finish boundary; it does not invent a mid-harness interruption mechanism.
+
+Trace commands accept a manifest ID, a trace root, or a manifest path confined
+to this repository's `.loopy_loop/traces/`. `inspect` prints the manifest plus
+its currently observed integrity. Trace finalization is crash-safe: startup
+retries only transitions proved by durable attempt history, records an
+unobserved HTTP response as unavailable, and never lets trace-storage failure
+change semantic acceptance. See
+[docs/session-layout.md](docs/session-layout.md#caller-owned-attempt-traces) for
+the exact outbox and seal ordering.
 
 ## Related Projects
 

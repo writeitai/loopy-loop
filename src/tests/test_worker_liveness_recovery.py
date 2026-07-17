@@ -21,7 +21,6 @@ import pytest
 from loopy_loop import recovery as recovery_module
 from loopy_loop import worker_identity as worker_identity_module
 from loopy_loop.coordinator_app import create_coordinator_app
-from loopy_loop.models import RegisterRequest
 from loopy_loop.models import WorkerIdentity
 from loopy_loop.recovery import recover_interrupted_iteration
 from loopy_loop.recovery import RecoveryOutcome
@@ -31,6 +30,8 @@ from loopy_loop.state_store import StateStore
 from loopy_loop.worker import run_worker_loop
 from loopy_loop.worker_identity import current_worker_identity
 from loopy_loop.worker_identity import is_worker_alive
+from tests.protocol_helpers import v2_finished_body
+from tests.protocol_helpers import v2_register_body
 
 LOCAL_IDENTITY = {
     "hostname": socket.gethostname(),
@@ -38,7 +39,9 @@ LOCAL_IDENTITY = {
     "starttime": "lstart:Sun Jul 12 00:00:00 2026",
 }
 
-REGISTER_BODY = {"worker": {"hostname": "test-host", "pid": 999983, "starttime": None}}
+
+def _v2_register_body(repo_root: Path, identity: dict[str, Any]) -> dict[str, Any]:
+    return v2_register_body(repo_root, worker=identity)
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +156,10 @@ def _register_with_orphan(
     }
     if orphan_worker is not None:
         overrides["worker"] = orphan_worker
+    # These hand-built tasks model pre-v2 persisted recovery inputs. Fresh v2
+    # tasks are always created through /register and carry the full frozen
+    # assignment contract.
+    state.schema_version = 1
     state.current_task = current_task_factory(**overrides)
     store.write_state(state=state)
     monkeypatch.setattr(
@@ -162,7 +169,7 @@ def _register_with_orphan(
         "loopy_loop.coordinator_app.recover_interrupted_iteration",
         lambda **kwargs: recovery_outcome or RecoveryOutcome(),
     )
-    response = client.post("/register", json=REGISTER_BODY)
+    response = client.post("/register", json=v2_register_body(repo_root))
     return response, store, state
 
 
@@ -248,6 +255,7 @@ def test_register_surfaces_recovery_refused_as_409(
     state.current_task = current_task_factory(
         workflow_id="planner", session_id=state.active_session_id, iteration=1
     )
+    state.schema_version = 1
     store.write_state(state=state)
 
     def refuse(**kwargs: Any) -> RecoveryOutcome:
@@ -256,7 +264,7 @@ def test_register_surfaces_recovery_refused_as_409(
     monkeypatch.setattr(
         "loopy_loop.coordinator_app.recover_interrupted_iteration", refuse
     )
-    response = client.post("/register", json=REGISTER_BODY)
+    response = client.post("/register", json=v2_register_body(repo_root))
     assert response.status_code == 409
     assert "still alive" in response.json()["detail"]
     updated = store.read_state()
@@ -270,7 +278,7 @@ def test_register_stamps_worker_identity_on_dispatched_task(
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
-    body = RegisterRequest(worker=WorkerIdentity(**LOCAL_IDENTITY)).model_dump()
+    body = _v2_register_body(repo_root, LOCAL_IDENTITY)
     response = client.post("/register", json=body)
     assert response.status_code == 200
     state = StateStore(repo_root=repo_root).read_state()
@@ -286,16 +294,9 @@ def test_finished_stamps_callers_identity_on_next_task(
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
-    body = RegisterRequest(worker=WorkerIdentity(**LOCAL_IDENTITY)).model_dump()
+    body = _v2_register_body(repo_root, LOCAL_IDENTITY)
     task = client.post("/register", json=body).json()
-    finished = {
-        "workflow_id": task["workflow_id"],
-        "session_id": task["session_id"],
-        "iteration": task["iteration"],
-        "success": True,
-        "text": "done",
-        "worker": LOCAL_IDENTITY,
-    }
+    finished = v2_finished_body(task, success=True, worker=LOCAL_IDENTITY)
     next_task = client.post("/finished", json=finished).json()
     assert next_task["action"] == "run"
     state = StateStore(repo_root=repo_root).read_state()
@@ -305,12 +306,45 @@ def test_finished_stamps_callers_identity_on_next_task(
     assert state.current_task.worker.pid == LOCAL_IDENTITY["pid"]
 
 
+def test_v2_finished_reestablishes_dispatch_contract_after_restart(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    first = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task = first.post(
+        "/register", json=_v2_register_body(repo_root, LOCAL_IDENTITY)
+    ).json()
+
+    # The replacement coordinator has no in-memory record of the original
+    # /register handshake. The exact v2 completion is sufficient proof to
+    # restore that contract before its response dispatches the next task.
+    restarted = TestClient(create_coordinator_app(repo_root=repo_root, resume=True))
+    response = restarted.post(
+        "/finished", json=v2_finished_body(task, success=True, worker=LOCAL_IDENTITY)
+    )
+
+    assert response.status_code == 200
+    next_task = response.json()
+    assert next_task["action"] == "run"
+    assert next_task["coordinator_protocol_version"] == 2
+    assert next_task["assignment_sha256"].startswith("sha256:")
+    state = StateStore(repo_root=repo_root).read_state()
+    assert state is not None
+    assert state.current_task is not None
+    assert state.current_task.completion_contract_version == 2
+    assert state.current_task.worker is not None
+    assert state.current_task.worker.pid == LOCAL_IDENTITY["pid"]
+    assert state.current_task.workflow_snapshot is not None
+    assert state.current_task.repository_id == next_task["repository_id"]
+
+
 def test_register_with_identity_dispatches(repo_builder: Any, monkeypatch: Any) -> None:
     # The canonical register: identity present, task dispatched and stamped.
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
-    response = client.post("/register", json=REGISTER_BODY)
+    response = client.post("/register", json=v2_register_body(repo_root))
     assert response.status_code == 200
     assert response.json()["action"] == "run"
 
@@ -650,7 +684,7 @@ def test_stale_finished_from_other_identified_worker_is_refused(
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
-    body = RegisterRequest(worker=WorkerIdentity(**LOCAL_IDENTITY)).model_dump()
+    body = _v2_register_body(repo_root, LOCAL_IDENTITY)
     task = client.post("/register", json=body).json()
     other = {"hostname": socket.gethostname(), "pid": 777, "starttime": "lstart:x"}
     stale = {
@@ -684,12 +718,22 @@ def test_stale_finished_replays_for_pre_upgrade_ownerless_task(
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
-    body = RegisterRequest(worker=WorkerIdentity(**LOCAL_IDENTITY)).model_dump()
+    body = _v2_register_body(repo_root, LOCAL_IDENTITY)
     task = client.post("/register", json=body).json()
     store = StateStore(repo_root=repo_root)
     state = store.read_state()
     assert state is not None and state.current_task is not None
-    state.current_task = state.current_task.model_copy(update={"worker": None})
+    state.schema_version = 1
+    state.current_task = state.current_task.model_copy(
+        update={
+            "worker": None,
+            "attempt_id": None,
+            "workflow_snapshot": None,
+            "repository_id": None,
+            "assignment_sha256": None,
+            "completion_contract_version": 1,
+        }
+    )
     store.write_state(state=state)
     stale = {
         "workflow_id": task["workflow_id"],
@@ -724,6 +768,6 @@ def test_config_snapshot_on_the_wire_has_no_recovery_fields(
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder(root_config={"recovery_policy": "reap"})
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     assert "recovery_policy" not in task["config_snapshot"]
     assert "recovery_drain_timeout_s" not in task["config_snapshot"]

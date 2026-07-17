@@ -13,9 +13,23 @@ from loopy_loop.sessions import control_path
 from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.sessions import result_path
 from loopy_loop.sessions import session_dir_path
+from loopy_loop.sessions import workflow_contract_path
 from loopy_loop.state_store import StateStore
+from tests.protocol_helpers import v2_completion_binding
+from tests.protocol_helpers import v2_finished_body
+from tests.protocol_helpers import v2_register_body
 
-REGISTER_BODY = {"worker": {"hostname": "test-host", "pid": 999983, "starttime": None}}
+
+def _write_legacy_task_fixture(
+    *, repo_root: Any, store: StateStore, state: Any
+) -> None:
+    """Persist a deliberately pre-v2 task used by legacy recovery unit tests."""
+    state.schema_version = 1
+    contract_path = workflow_contract_path(
+        repo_root=repo_root, session_id=state.active_session_id
+    )
+    contract_path.unlink()
+    store.write_state(state=state)
 
 
 def test_register_returns_run_response(repo_builder: Any, monkeypatch: Any) -> None:
@@ -23,7 +37,7 @@ def test_register_returns_run_response(repo_builder: Any, monkeypatch: Any) -> N
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
 
     assert response["action"] == "run"
 
@@ -35,14 +49,16 @@ def test_register_response_has_correct_fields(
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
 
     assert response["action"] == "run"
     assert response["workflow_id"] == "planner"
     assert response["session_id"] is not None
     assert response["iteration"] == 1
     assert response["config_snapshot"] is not None
-    assert response["config_snapshot"]["goal_hash"] == "71393ee22450"
+    assert response["config_snapshot"]["goal_hash"] == (
+        "sha256:71393ee224508164d4b9bdc26c160e860c1862611612d67e052bccec59e59b24"
+    )
     assert response["config_snapshot"]["team_harness_model"] == "gpt-5.5"
     assert response["stop_reason"] is None
 
@@ -53,7 +69,7 @@ def test_register_sets_current_task(repo_builder: Any, monkeypatch: Any) -> None
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     store = StateStore(repo_root=repo_root)
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
     state = store.read_state()
 
     assert state is not None
@@ -69,19 +85,8 @@ def test_finished_records_history(repo_builder: Any, monkeypatch: Any) -> None:
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     store = StateStore(repo_root=repo_root)
 
-    reg = client.post("/register", json=REGISTER_BODY).json()
-    client.post(
-        "/finished",
-        json={
-            "workflow_id": reg["workflow_id"],
-            "session_id": reg["session_id"],
-            "iteration": reg["iteration"],
-            "attempt_id": reg.get("attempt_id"),
-            "success": True,
-            "text": "done",
-            "error": None,
-        },
-    )
+    reg = client.post("/register", json=v2_register_body(repo_root)).json()
+    client.post("/finished", json=v2_finished_body(reg, success=True))
     state = store.read_state()
 
     assert state is not None
@@ -100,19 +105,8 @@ def test_finished_returns_next_run(repo_builder: Any, monkeypatch: Any) -> None:
     repo_root = repo_builder()
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    reg = client.post("/register", json=REGISTER_BODY).json()
-    finished = client.post(
-        "/finished",
-        json={
-            "workflow_id": reg["workflow_id"],
-            "session_id": reg["session_id"],
-            "iteration": reg["iteration"],
-            "attempt_id": reg.get("attempt_id"),
-            "success": True,
-            "text": "done",
-            "error": None,
-        },
-    ).json()
+    reg = client.post("/register", json=v2_register_body(repo_root)).json()
+    finished = client.post("/finished", json=v2_finished_body(reg, success=True)).json()
 
     assert finished["action"] == "run"
     assert finished["iteration"] == 2
@@ -151,7 +145,7 @@ def test_child_session_runs_inside_parent_and_resumes_parent(
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     store = StateStore(repo_root=repo_root)
 
-    parent_task = client.post("/register", json=REGISTER_BODY).json()
+    parent_task = client.post("/register", json=v2_register_body(repo_root)).json()
     request_dir = child_requests_dir_path(
         repo_root=repo_root, session_id=parent_task["session_id"]
     )
@@ -168,15 +162,7 @@ def test_child_session_runs_inside_parent_and_resumes_parent(
 
     child_task = client.post(
         "/finished",
-        json={
-            "workflow_id": parent_task["workflow_id"],
-            "session_id": parent_task["session_id"],
-            "iteration": parent_task["iteration"],
-            "attempt_id": parent_task.get("attempt_id"),
-            "success": True,
-            "text": "parent planned child",
-            "error": None,
-        },
+        json=v2_finished_body(parent_task, success=True, text="parent planned child"),
     ).json()
 
     assert child_task["action"] == "run"
@@ -205,16 +191,7 @@ def test_child_session_runs_inside_parent_and_resumes_parent(
         encoding="utf-8",
     )
     resumed_parent = client.post(
-        "/finished",
-        json={
-            "workflow_id": child_task["workflow_id"],
-            "session_id": child_task["session_id"],
-            "iteration": child_task["iteration"],
-            "attempt_id": child_task.get("attempt_id"),
-            "success": True,
-            "text": "child done",
-            "error": None,
-        },
+        "/finished", json=v2_finished_body(child_task, success=True, text="child done")
     ).json()
 
     assert resumed_parent["action"] == "run"
@@ -229,7 +206,7 @@ def test_child_session_runs_inside_parent_and_resumes_parent(
             repo_root=repo_root, session_id=parent_task["session_id"]
         ).read_text(encoding="utf-8")
     )
-    assert records["schema_version"] == 1
+    assert records["schema_version"] == 2
     assert records["children"][0]["session_id"] == child_task["session_id"]
     assert records["children"][0]["status"] == "goal_met"
 
@@ -256,7 +233,7 @@ def test_failed_parent_iteration_does_not_dispatch_child_request(
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    parent_task = client.post("/register", json=REGISTER_BODY).json()
+    parent_task = client.post("/register", json=v2_register_body(repo_root)).json()
     request_path = (
         child_requests_dir_path(
             repo_root=repo_root, session_id=parent_task["session_id"]
@@ -276,15 +253,9 @@ def test_failed_parent_iteration_does_not_dispatch_child_request(
 
     next_task = client.post(
         "/finished",
-        json={
-            "workflow_id": parent_task["workflow_id"],
-            "session_id": parent_task["session_id"],
-            "iteration": parent_task["iteration"],
-            "attempt_id": parent_task.get("attempt_id"),
-            "success": False,
-            "text": None,
-            "error": "failed before child dispatch",
-        },
+        json=v2_finished_body(
+            parent_task, success=False, error="failed before child dispatch"
+        ),
     ).json()
 
     assert next_task["action"] == "run"
@@ -301,13 +272,12 @@ def test_finished_stale_mismatch_does_not_mutate(
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     store = StateStore(repo_root=repo_root)
 
-    reg = client.post("/register", json=REGISTER_BODY).json()
+    reg = client.post("/register", json=v2_register_body(repo_root)).json()
     # Send /finished with wrong session_id — stale mismatch FROM THE OWNER
     # (the live-task replay is only served to the task's recorded worker).
     stale = client.post(
         "/finished",
         json={
-            "worker": REGISTER_BODY["worker"],
             "workflow_id": reg["workflow_id"],
             "session_id": "wrong-session-id",
             "iteration": reg["iteration"],
@@ -315,6 +285,7 @@ def test_finished_stale_mismatch_does_not_mutate(
             "success": True,
             "text": "done",
             "error": None,
+            **v2_completion_binding(reg),
         },
     ).json()
     state = store.read_state()
@@ -332,7 +303,7 @@ def test_finished_stale_mismatch_does_not_mutate(
     assert stale["iteration"] == reg["iteration"]
 
 
-def test_finished_stale_no_current_task_dispatches_fresh(
+def test_finished_stale_no_current_task_requires_v2_register(
     repo_builder: Any, monkeypatch: Any
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
@@ -344,7 +315,7 @@ def test_finished_stale_no_current_task_dispatches_fresh(
     # Ensure current_task is None (no active task).
     assert state.current_task is None
 
-    # /finished with no active task acts like /register: dispatches fresh work.
+    # A v2 completion request does not carry a full registration handshake.
     response = client.post(
         "/finished",
         json={
@@ -355,11 +326,10 @@ def test_finished_stale_no_current_task_dispatches_fresh(
             "text": "done",
             "error": None,
         },
-    ).json()
+    )
 
-    assert response["action"] == "run"
-    assert response["workflow_id"] is not None
-    assert response["iteration"] is not None
+    assert response.status_code == 426
+    assert "call /register with protocol v2" in response.json()["detail"]
 
 
 def test_finished_stale_no_current_task_terminal_returns_stop(
@@ -430,9 +400,9 @@ def test_register_recovers_abandoned_task(
         workflow_id="implement", session_id=state.active_session_id, iteration=1
     )
     state.current_task = orphaned
-    store.write_state(state=state)
+    _write_legacy_task_fixture(repo_root=repo_root, store=store, state=state)
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
     updated = store.read_state()
 
     # Abandoned task should be recorded in history.
@@ -460,7 +430,7 @@ def test_register_recovers_completed_task_from_pending_finished_request(
     )
     state.current_task = current_task
     state.stop_requested = True
-    store.write_state(state=state)
+    _write_legacy_task_fixture(repo_root=repo_root, store=store, state=state)
     pending_path = pending_finished_request_path(
         repo_root=repo_root,
         session_id=current_task.session_id,
@@ -482,7 +452,7 @@ def test_register_recovers_completed_task_from_pending_finished_request(
         encoding="utf-8",
     )
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
     updated = store.read_state()
 
     assert response["action"] == "stop"
@@ -511,7 +481,7 @@ def test_register_recovers_completed_task_from_result_json(
     )
     state.current_task = current_task
     state.stop_requested = True
-    store.write_state(state=state)
+    _write_legacy_task_fixture(repo_root=repo_root, store=store, state=state)
     result_json_path = result_path(
         repo_root=repo_root,
         session_id=current_task.session_id,
@@ -533,7 +503,7 @@ def test_register_recovers_completed_task_from_result_json(
         encoding="utf-8",
     )
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
     updated = store.read_state()
 
     assert response["action"] == "stop"
@@ -568,9 +538,9 @@ def test_register_terminal_plus_abandoned_task_cleanup_first(
         workflow_id="planner", session_id=state.active_session_id, iteration=1
     )
     state.current_task = orphaned
-    store.write_state(state=state)
+    _write_legacy_task_fixture(repo_root=repo_root, store=store, state=state)
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
     updated = store.read_state()
 
     # Abandoned entry must be recorded even though state was terminal.
@@ -592,7 +562,7 @@ def test_register_stop_when_terminal(repo_builder: Any, monkeypatch: Any) -> Non
     state.goal_met = True
     store.write_state(state=state)
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
 
     assert response["action"] == "stop"
     assert response["stop_reason"] == "goal_met"
@@ -604,19 +574,8 @@ def test_finished_stop_after_max_turns(repo_builder: Any, monkeypatch: Any) -> N
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
     store = StateStore(repo_root=repo_root)
 
-    reg = client.post("/register", json=REGISTER_BODY).json()
-    response = client.post(
-        "/finished",
-        json={
-            "workflow_id": reg["workflow_id"],
-            "session_id": reg["session_id"],
-            "iteration": reg["iteration"],
-            "attempt_id": reg.get("attempt_id"),
-            "success": True,
-            "text": "done",
-            "error": None,
-        },
-    ).json()
+    reg = client.post("/register", json=v2_register_body(repo_root)).json()
+    response = client.post("/finished", json=v2_finished_body(reg, success=True)).json()
     updated = store.read_state()
 
     assert response["action"] == "stop"
@@ -636,7 +595,7 @@ def test_stop_precedence_goal_met(repo_builder: Any, monkeypatch: Any) -> None:
     state.stop_requested = True
     store.write_state(state=state)
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
 
     assert response["action"] == "stop"
     assert response["stop_reason"] == "goal_met"
@@ -655,7 +614,7 @@ def test_session_control_signal_sets_unresolvable_error(
         workflow_id="planner", session_id=state.active_session_id, iteration=1
     )
     state.current_task = current_task
-    store.write_state(state=state)
+    _write_legacy_task_fixture(repo_root=repo_root, store=store, state=state)
     control = control_path(repo_root=repo_root, session_id=state.active_session_id)
     control.write_text(
         json.dumps(
@@ -709,13 +668,74 @@ def test_session_control_signal_sets_goal_met(
         encoding="utf-8",
     )
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
     updated = store.read_state()
 
     assert response["action"] == "stop"
     assert response["stop_reason"] == "goal_met"
     assert updated is not None
     assert updated.goal_met is True
+
+
+def test_resumed_legacy_session_derives_protocol_v1_contract_for_control(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    """A pre-v2 session must not inherit a newly upgraded set's v2 wire rules."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    contract_source = (
+        repo_root / ".loopy_loop" / "workflow_sets" / "main" / "contract.yaml"
+    )
+    contract_source.write_text(
+        """schema_version: 1
+session_protocol_version: 2
+layer_kind: delivery
+roles:
+  planner:
+    responsibility: plan
+  goal_check:
+    responsibility: evaluate
+state: []
+eval:
+  author_role: goal_check
+  runner_role: goal_check
+  goal_control_role: goal_check
+task_acceptance_role: planner
+terminal_blocker_reporting_roles: [planner, goal_check]
+child_interface: recursive
+""",
+        encoding="utf-8",
+    )
+    create_coordinator_app(repo_root=repo_root, resume=False)
+    store = StateStore(repo_root=repo_root)
+    state = store.read_state()
+    assert state is not None
+    state.schema_version = 1
+    store.write_state(state=state)
+    persisted_contract = workflow_contract_path(
+        repo_root=repo_root, session_id=state.active_session_id
+    )
+    persisted_contract.unlink()
+    control_path(repo_root=repo_root, session_id=state.active_session_id).write_text(
+        json.dumps(
+            {
+                "state": "stopped",
+                "reason": "legacy evaluation completed",
+                "stop_reason": "goal_met",
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=True))
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
+
+    assert response["action"] == "stop"
+    assert response["stop_reason"] == "goal_met"
+    restored_contract = json.loads(persisted_contract.read_text(encoding="utf-8"))
+    assert restored_contract["session_protocol_version"] == 1
 
 
 def test_invalid_session_control_signal_stops(
@@ -734,7 +754,7 @@ def test_invalid_session_control_signal_stops(
         encoding="utf-8",
     )
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
     updated = store.read_state()
 
     assert response["action"] == "stop"
@@ -761,7 +781,7 @@ def test_invalid_goal_check_output_stops_at_failure_cap(
         workflow_id="goal_check", session_id=state.active_session_id, iteration=2
     )
     state.current_task = current_task
-    store.write_state(state=state)
+    _write_legacy_task_fixture(repo_root=repo_root, store=store, state=state)
 
     # No goal_check.json written — triggers invalid_goal_check_output.
     response = client.post(
@@ -801,7 +821,7 @@ def test_goal_check_does_not_stop_without_session_control(
         workflow_id="goal_check", session_id=state.active_session_id, iteration=2
     )
     state.current_task = current_task
-    store.write_state(state=state)
+    _write_legacy_task_fixture(repo_root=repo_root, store=store, state=state)
     goal_check_path = (
         repo_root
         / ".loopy_loop"
@@ -862,7 +882,7 @@ def test_emits_goal_check_workflow_stops_with_session_control(
         workflow_id="eval_runner", session_id=state.active_session_id, iteration=1
     )
     state.current_task = current_task
-    store.write_state(state=state)
+    _write_legacy_task_fixture(repo_root=repo_root, store=store, state=state)
     goal_check_path = (
         repo_root
         / ".loopy_loop"
@@ -936,7 +956,7 @@ def test_invalid_emits_goal_check_output_stops_at_failure_cap(
         workflow_id="eval_runner", session_id=state.active_session_id, iteration=1
     )
     state.current_task = current_task
-    store.write_state(state=state)
+    _write_legacy_task_fixture(repo_root=repo_root, store=store, state=state)
 
     response = client.post(
         "/finished",
@@ -977,7 +997,7 @@ def test_no_eligible_workflow_stops(repo_builder: Any, monkeypatch: Any) -> None
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
 
     assert response["action"] == "stop"
     assert response["stop_reason"] == "no_eligible_workflow"
@@ -1029,7 +1049,7 @@ def test_stop_precedence_matrix(
         setattr(state, key, value)
     store.write_state(state=state)
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
 
     assert response["action"] == "stop"
     assert response["stop_reason"] == expected_stop_reason
@@ -1048,7 +1068,9 @@ def test_resume_reuses_in_progress_session(repo_builder: Any, monkeypatch: Any) 
     resumed_client = TestClient(resumed_app)
     resumed_store = StateStore(repo_root=repo_root)
     resumed_state = resumed_store.read_state()
-    register_response = resumed_client.post("/register", json=REGISTER_BODY).json()
+    register_response = resumed_client.post(
+        "/register", json=v2_register_body(repo_root)
+    ).json()
 
     assert first_app is not None
     assert resumed_state is not None
@@ -1080,7 +1102,7 @@ def test_child_snapshot_inherits_parent_config_despite_yaml_edit(
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    parent_task = client.post("/register", json=REGISTER_BODY).json()
+    parent_task = client.post("/register", json=v2_register_body(repo_root)).json()
     assert parent_task["config_snapshot"]["team_harness_model"] == "gpt-5.5"
 
     config_path = repo_root / "loopy_loop_config.yaml"
@@ -1105,15 +1127,7 @@ def test_child_snapshot_inherits_parent_config_despite_yaml_edit(
 
     child_task = client.post(
         "/finished",
-        json={
-            "workflow_id": parent_task["workflow_id"],
-            "session_id": parent_task["session_id"],
-            "iteration": parent_task["iteration"],
-            "attempt_id": parent_task.get("attempt_id"),
-            "success": True,
-            "text": "parent planned child",
-            "error": None,
-        },
+        json=v2_finished_body(parent_task, success=True, text="parent planned child"),
     ).json()
 
     assert child_task["action"] == "run"

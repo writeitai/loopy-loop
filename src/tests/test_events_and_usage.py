@@ -25,8 +25,9 @@ from loopy_loop.sessions import state_path
 from loopy_loop.state_store import StateStore
 from loopy_loop.worker import _read_harness_usage
 from loopy_loop.worker import _run_task
-
-REGISTER_BODY = {"worker": {"hostname": "test-host", "pid": 999983, "starttime": None}}
+from tests.protocol_helpers import v2_completion_binding
+from tests.protocol_helpers import v2_finished_body
+from tests.protocol_helpers import v2_register_body
 
 PLANNER_ONLY = {
     "planner": {
@@ -57,18 +58,7 @@ CHILD_WORKFLOW_CONFIG = "\n".join(
 def _finished_body(
     task: dict[str, Any], *, success: bool, **extra: Any
 ) -> dict[str, Any]:
-    body: dict[str, Any] = {
-        "workflow_id": task["workflow_id"],
-        "session_id": task["session_id"],
-        "iteration": task["iteration"],
-        "attempt_id": task["attempt_id"],
-        "success": success,
-        "text": "done" if success else None,
-        "error": None if success else "boom",
-        "worker": REGISTER_BODY["worker"],
-    }
-    body.update(extra)
-    return body
+    return v2_finished_body(task, success=success, **extra)
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +73,7 @@ def test_event_stream_envelope_and_lifecycle(
     repo_root = repo_builder(workflows=PLANNER_ONLY)
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     client.post(
         "/finished",
         json=_finished_body(task, success=False, usage=USAGE, duration_s=1.5),
@@ -122,12 +112,12 @@ def test_session_stopped_event_emitted_once(
     repo_root = repo_builder(workflows=PLANNER_ONLY)
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     # A single-workflow set stops with no_eligible_workflow after a success.
     stop = client.post("/finished", json=_finished_body(task, success=True)).json()
     assert stop["action"] == "stop"
     # A repeated register against the terminal state must not re-emit.
-    client.post("/register", json=REGISTER_BODY)
+    client.post("/register", json=v2_register_body(repo_root))
 
     events = read_events(
         path=events_path(repo_root=repo_root, session_id=task["session_id"])
@@ -161,7 +151,7 @@ def test_usage_ledger_accumulates_and_counts_unknown(
     repo_root = repo_builder(workflows=PLANNER_ONLY)
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     task = client.post(
         "/finished",
         json=_finished_body(task, success=False, usage=USAGE, duration_s=2.0),
@@ -190,7 +180,7 @@ def test_max_cost_usd_stops_loop(repo_builder: Any, monkeypatch: Any) -> None:
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     response = client.post(
         "/finished", json=_finished_body(task, success=False, usage=USAGE)
     ).json()
@@ -230,7 +220,7 @@ def test_budget_fields_not_in_wire_snapshot(
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
 
     assert "max_cost_usd" not in task["config_snapshot"]
     assert "model_prices" not in task["config_snapshot"]
@@ -263,7 +253,7 @@ def test_child_usage_rolls_up_and_child_events_emitted(
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    parent_task = client.post("/register", json=REGISTER_BODY).json()
+    parent_task = client.post("/register", json=v2_register_body(repo_root)).json()
     request_dir = child_requests_dir_path(
         repo_root=repo_root, session_id=parent_task["session_id"]
     )
@@ -438,7 +428,7 @@ def test_cli_status_shows_usage_and_cost(repo_builder: Any, monkeypatch: Any) ->
         workflows=PLANNER_ONLY,
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     client.post("/finished", json=_finished_body(task, success=False, usage=USAGE))
 
     monkeypatch.chdir(repo_root)
@@ -454,7 +444,7 @@ def test_cli_events_prints_stream(repo_builder: Any, monkeypatch: Any) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder(workflows=PLANNER_ONLY)
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     client.post("/finished", json=_finished_body(task, success=False))
 
     monkeypatch.chdir(repo_root)
@@ -486,7 +476,7 @@ def test_result_json_recovery_preserves_usage(
         workflows=PLANNER_ONLY,
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
 
     # The worker completed and wrote result.json (with usage), then died
     # before writing pending_finished_request.json.
@@ -507,10 +497,11 @@ def test_result_json_recovery_preserves_usage(
             "attempt_id": task["attempt_id"],
             "usage": USAGE,
             "duration_s": 9.5,
+            **v2_completion_binding(task),
         },
     )
 
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
 
     state = StateStore(repo_root=repo_root).read_state()
     assert state is not None
@@ -532,7 +523,7 @@ def test_partial_turn_usage_counts_as_unknown_iteration(
     repo_root = repo_builder(workflows=PLANNER_ONLY)
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     client.post(
         "/finished",
         json=_finished_body(

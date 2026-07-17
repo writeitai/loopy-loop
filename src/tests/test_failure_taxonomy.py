@@ -18,8 +18,8 @@ from loopy_loop.config import ConfigError
 from loopy_loop.coordinator_app import create_coordinator_app
 from loopy_loop.harness_runner import classify_failure_detail
 from loopy_loop.state_store import StateStore
-
-REGISTER_BODY = {"worker": {"hostname": "test-host", "pid": 999983, "starttime": None}}
+from tests.protocol_helpers import v2_finished_body
+from tests.protocol_helpers import v2_register_body
 
 PLANNER_ONLY = {
     "planner": {
@@ -38,18 +38,8 @@ PLANNER_ONLY = {
 def _finished_body(
     task: dict[str, Any], *, success: bool, **extra: Any
 ) -> dict[str, Any]:
-    body: dict[str, Any] = {
-        "workflow_id": task["workflow_id"],
-        "session_id": task["session_id"],
-        "iteration": task["iteration"],
-        "attempt_id": task["attempt_id"],
-        "success": success,
-        "text": "done" if success else None,
-        "error": None if success else "harness exploded",
-        "worker": REGISTER_BODY["worker"],
-    }
-    body.update(extra)
-    return body
+    error = None if success else "harness exploded"
+    return v2_finished_body(task, success=success, error=error, **extra)
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +79,7 @@ def test_consecutive_failures_stop_at_cap(repo_builder: Any, monkeypatch: Any) -
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     for expected_action in ("run", "run", "stop"):
         response = client.post(
             "/finished", json=_finished_body(task, success=False)
@@ -129,6 +119,7 @@ def test_success_resets_the_workflow_counter(
             session_id=state.active_session_id,
             iteration=iteration,
         )
+        state.schema_version = 1
         store.write_state(state=state)
         client.post(
             "/finished",
@@ -167,7 +158,7 @@ def test_counter_survives_coordinator_restart(
         root_config={"workflow_consecutive_failures_cap": 3}, workflows=PLANNER_ONLY
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     for _ in range(2):
         task = client.post("/finished", json=_finished_body(task, success=False)).json()
 
@@ -176,7 +167,7 @@ def test_counter_survives_coordinator_restart(
     # verifiably alive, nothing is recoverable, and the recorded worker ran on
     # another host, so the register records a crash-abandoned iteration —
     # the third consecutive planner failure.
-    response = resumed.post("/register", json=REGISTER_BODY)
+    response = resumed.post("/register", json=v2_register_body(repo_root))
     assert response.status_code == 200
     body = response.json()
     assert body["action"] == "stop"
@@ -211,6 +202,7 @@ def test_goal_check_broken_wins_over_workflow_cap(
     state.current_task = current_task_factory(
         workflow_id="goal_check", session_id=state.active_session_id, iteration=2
     )
+    state.schema_version = 1
     store.write_state(state=state)
 
     # No goal_check.json written — both caps trip on the same iteration; the
@@ -245,7 +237,7 @@ def test_failure_kind_recorded_in_history(repo_builder: Any, monkeypatch: Any) -
     repo_root = repo_builder(workflows=PLANNER_ONLY)
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     task = client.post(
         "/finished", json=_finished_body(task, success=False, failure_kind="transient")
     ).json()
@@ -262,7 +254,7 @@ def test_invalid_failure_kind_is_rejected(repo_builder: Any, monkeypatch: Any) -
     repo_root = repo_builder(workflows=PLANNER_ONLY)
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     response = client.post(
         "/finished", json=_finished_body(task, success=False, failure_kind="oops")
     )
@@ -276,7 +268,7 @@ def test_cap_is_not_sent_in_wire_snapshot(repo_builder: Any, monkeypatch: Any) -
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     # Released workers validate the snapshot with extra="forbid"; the cap is a
     # coordinator-side setting and must stay off the wire.
     assert "workflow_consecutive_failures_cap" not in task["config_snapshot"]
@@ -319,7 +311,7 @@ def test_register_resumes_parent_when_child_trips_cap(
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    parent_task = client.post("/register", json=REGISTER_BODY).json()
+    parent_task = client.post("/register", json=v2_register_body(repo_root)).json()
     request_dir = child_requests_dir_path(
         repo_root=repo_root, session_id=parent_task["session_id"]
     )
@@ -339,7 +331,7 @@ def test_register_resumes_parent_when_child_trips_cap(
     # replacement /register records a crash-abandoned iteration — the child's
     # first and (cap=1) final failure. The register must come back with the
     # PARENT's next work, not the dead child's stop.
-    response = client.post("/register", json=REGISTER_BODY).json()
+    response = client.post("/register", json=v2_register_body(repo_root)).json()
 
     assert response["session_id"] == parent_task["session_id"]
     child_state = StateStore(
@@ -385,6 +377,7 @@ def test_coordinator_flip_overrides_stale_failure_kind(
     state.current_task = current_task_factory(
         workflow_id="goal_check", session_id=state.active_session_id, iteration=2
     )
+    state.schema_version = 1
     store.write_state(state=state)
 
     # Harness "succeeded" but no goal_check.json exists -> flipped to failure.
@@ -419,7 +412,7 @@ def test_workflow_cap_wins_over_simultaneous_max_turns(
     )
     client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
 
-    task = client.post("/register", json=REGISTER_BODY).json()
+    task = client.post("/register", json=v2_register_body(repo_root)).json()
     response = client.post("/finished", json=_finished_body(task, success=False)).json()
 
     assert response["action"] == "stop"

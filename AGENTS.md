@@ -41,10 +41,29 @@ involvement is a last resort, never a normal step.
 - **The one sanctioned escape hatch already exists.** When a workflow hits a *genuinely
   terminal* blocker — a decision only a human can make, a missing credential, a
   billable/destructive action it isn't permitted to take — it writes the session
-  `control.json` with:
+  `control.json`. Fresh v2 sessions use the identity-bound form below; the
+  assignment envelope supplies the exact session, workflow, attempt, control path,
+  and timestamp context:
   ```json
-  {"state": "stopped", "reason": "<specific terminal blocker>", "stop_reason": "unresolvable_error", "schema_version": 1}
+  {
+    "schema_version": 2,
+    "control_id": "<stable unique id>",
+    "state": "stopped",
+    "reason": "<specific terminal blocker>",
+    "stop_reason": "unresolvable_error",
+    "producer": {
+      "session_id": "<current session id>",
+      "workflow_id": "<current workflow id>",
+      "attempt_id": "<current attempt id>"
+    },
+    "attempted_routes": ["<autonomous route already tried>"],
+    "evidence_refs": ["<logical evidence reference, when available>"],
+    "created_at": "<UTC timestamp>"
+  }
   ```
+  Only an already-running legacy v1 session uses the historical compact
+  `schema_version: 1` form. Do not emit that form for a v2 assignment: it is
+  archived as a repairable protocol failure rather than stopping the session.
   This stops the loop as terminal, with a recorded reason. That is the entire
   human-in-the-loop mechanism, and it is enough.
 - **Exhaust autonomous options first.** Re-scope, retry with a better child goal, route

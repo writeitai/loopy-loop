@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -15,11 +16,17 @@ from pydantic import model_validator
 from pydantic import ValidationError
 import yaml
 
+from loopy_loop.models import SAFE_DURABLE_ID_PATTERN
+from loopy_loop.models import WorkflowEvalContract
+from loopy_loop.models import WorkflowRoleContract
+from loopy_loop.models import WorkflowSetContract
+
 ROOT_CONFIG_FILENAME = "loopy_loop_config.yaml"
 DEFAULT_GOAL_FILENAME = "loopy_loop_goal.txt"
 LOOPY_DIRNAME = ".loopy_loop"
 WORKFLOWS_DIRNAME = "workflows"
 WORKFLOW_SETS_DIRNAME = "workflow_sets"
+WORKFLOW_SET_CONTRACT_FILENAME = "contract.yaml"
 GOAL_HASH_LENGTH = 12
 DEFAULT_GOAL_CHECK_FAILURE_CAP = 3
 DEFAULT_WORKFLOW_FAILURE_CAP = 5
@@ -285,8 +292,12 @@ class RootConfig(BaseModel):
     @field_validator("workflow_set")
     @classmethod
     def validate_workflow_set(cls, value: str) -> str:
+        """Require workflow-set names that are safe as durable directory IDs."""
+
         if not value.strip():
             raise ValueError("workflow_set must not be empty")
+        if not SAFE_DURABLE_ID_PATTERN.fullmatch(value):
+            raise ValueError("workflow_set must be a filesystem-safe identifier")
         return value
 
     @field_validator("team_harness_api_base")
@@ -418,6 +429,10 @@ class WorkflowDefinition(WorkflowConfig):
     directory: Path = Field(...)
     prompt_path: Path = Field(...)
     config_path: Path = Field(...)
+    prompt_text: str = Field(default="")
+    config_text: str = Field(default="")
+    prompt_sha256: str = Field(default="")
+    config_sha256: str = Field(default="")
 
 
 class PreflightResult(BaseModel):
@@ -426,6 +441,9 @@ class PreflightResult(BaseModel):
     root_config: RootConfig
     workflow_set: str
     workflows: list[WorkflowDefinition]
+    workflow_contract: WorkflowSetContract
+    workflow_contract_text: str
+    workflow_contract_sha256: str
 
 
 def estimate_cost_usd(
@@ -447,6 +465,11 @@ def normalize_api_base(*, value: str) -> str:
 
 def derive_goal_hash(*, goal: str) -> str:
     return hashlib.sha256(goal.encode("utf-8")).hexdigest()[:GOAL_HASH_LENGTH]
+
+
+def derive_full_goal_hash(*, goal: str) -> str:
+    """Canonical v2 goal identity; the short hash is only a session-ID fragment."""
+    return "sha256:" + hashlib.sha256(goal.encode("utf-8")).hexdigest()
 
 
 def load_root_config(*, repo_root: Path, goal_file: Path | None = None) -> RootConfig:
@@ -523,11 +546,9 @@ def render_model_tier_guidance(*, config: RootConfig) -> str:
     """
     lines = [
         "Model tier policy:",
-        "- When spawning worker agents you may pass `model` per spawn to move "
-        "a single task to a different tier. Pass `effort` too if the spawn "
-        "tool accepts it; if it rejects `effort` (older team-harness "
-        "versions), pass the worker CLI's own reasoning-effort flag via "
-        "`flags` instead (e.g. codex: `-c model_reasoning_effort=<level>`).",
+        "- When spawning worker agents, pass the tier's `model` and structured "
+        "`effort` arguments together. Omit both to use the default tier; do not "
+        "translate effort into raw worker CLI flags.",
         "- Named tiers:",
     ]
     for tier_name, agents in config.model_tiers.items():
@@ -573,6 +594,8 @@ def workflow_set_workflows_dir_path(*, repo_root: Path, workflow_set: str) -> Pa
 def load_workflow_definitions(
     *, repo_root: Path, workflow_set: str
 ) -> list[WorkflowDefinition]:
+    """Load validated workflow definitions for one configured workflow set."""
+
     selected_workflow_set = workflow_set
     workflows_dir = workflow_set_workflows_dir_path(
         repo_root=repo_root, workflow_set=selected_workflow_set
@@ -586,6 +609,8 @@ def load_workflow_definitions(
         config = load_workflow_config(workflow_dir=workflow_dir)
         prompt_path = workflow_dir / "prompt.txt"
         config_path = workflow_dir / "config.yaml"
+        prompt_text = prompt_path.read_text(encoding="utf-8")
+        config_text = config_path.read_text(encoding="utf-8")
         try:
             definition = WorkflowDefinition.model_validate(
                 {
@@ -595,6 +620,10 @@ def load_workflow_definitions(
                     "directory": workflow_dir,
                     "prompt_path": prompt_path,
                     "config_path": config_path,
+                    "prompt_text": prompt_text,
+                    "config_text": config_text,
+                    "prompt_sha256": _sha256_text(value=prompt_text),
+                    "config_sha256": _sha256_text(value=config_text),
                 }
             )
         except ValidationError as exc:
@@ -603,6 +632,77 @@ def load_workflow_definitions(
             ) from exc
         definitions.append(definition)
     return definitions
+
+
+def workflow_set_contract_path(*, repo_root: Path, workflow_set: str) -> Path:
+    """Return the declared role-contract path for a workflow set."""
+
+    return (
+        workflow_set_dir_path(repo_root=repo_root, workflow_set=workflow_set)
+        / WORKFLOW_SET_CONTRACT_FILENAME
+    )
+
+
+def load_workflow_set_contract(
+    *, repo_root: Path, workflow_set: str, workflows: list[WorkflowDefinition]
+) -> tuple[WorkflowSetContract, str, str]:
+    """Load a declared role contract or derive a conservative legacy one.
+
+    The derived form keeps arbitrary existing workflow sets executable while
+    still giving every attempt explicit role/accountability metadata. Packaged
+    workflow sets declare their stronger ownership contract in contract.yaml.
+    """
+    path = workflow_set_contract_path(repo_root=repo_root, workflow_set=workflow_set)
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+        try:
+            raw = yaml.safe_load(text)
+            if isinstance(raw, dict) and "session_protocol_version" not in raw:
+                # An explicit contract belongs to the current recursive
+                # protocol.  Default it safely here instead of inheriting the
+                # model's legacy-v1 default, which exists only so historical
+                # persisted payloads remain readable.  The no-contract branch
+                # below remains the deliberately derived v1 compatibility
+                # path.
+                raw["session_protocol_version"] = 2
+            contract = WorkflowSetContract.model_validate(raw)
+        except (yaml.YAMLError, ValidationError) as exc:
+            raise ConfigError(
+                f"Invalid workflow-set contract at {path}: {exc}"
+            ) from exc
+    else:
+        roles = {
+            workflow.id: WorkflowRoleContract(
+                responsibility=workflow.description or f"Run {workflow.id} workflow"
+            )
+            for workflow in workflows
+        }
+        eval_candidates = [
+            workflow.id
+            for workflow in workflows
+            if workflow.id == "goal_check" or workflow.emits_goal_check
+        ]
+        goal_control_role = eval_candidates[0] if eval_candidates else None
+        contract = WorkflowSetContract(
+            session_protocol_version=1,
+            layer_kind="legacy_work",
+            roles=roles,
+            eval=WorkflowEvalContract(
+                author_role=goal_control_role,
+                runner_role=goal_control_role,
+                goal_control_role=goal_control_role,
+            ),
+            terminal_blocker_reporting_roles=list(roles),
+            child_interface="recursive",
+        )
+        text = yaml.safe_dump(json.loads(contract.model_dump_json()), sort_keys=False)
+    return contract, text, _sha256_text(value=text)
+
+
+def _sha256_text(*, value: str) -> str:
+    """Return the prefixed SHA-256 digest used by frozen contracts."""
+
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def validate_workflow_graph(*, workflows: list[WorkflowDefinition]) -> None:
@@ -643,9 +743,14 @@ def resolve_api_key(*, config: RootConfig) -> str | None:
 def run_preflight(
     *, repo_root: Path, workflow_set: str | None = None, goal_file: Path | None = None
 ) -> PreflightResult:
+    """Validate the selected root configuration and workflow-set contract."""
+
     errors: list[str] = []
     root_config: RootConfig | None = None
     workflows: list[WorkflowDefinition] = []
+    workflow_contract: WorkflowSetContract | None = None
+    workflow_contract_text = ""
+    workflow_contract_sha256 = ""
     selected_workflow_set = workflow_set
 
     try:
@@ -679,6 +784,19 @@ def run_preflight(
             validate_workflow_graph(workflows=workflows)
         except ConfigError as exc:
             errors.append(str(exc))
+        if selected_workflow_set is not None and workflows:
+            try:
+                (
+                    workflow_contract,
+                    workflow_contract_text,
+                    workflow_contract_sha256,
+                ) = load_workflow_set_contract(
+                    repo_root=repo_root,
+                    workflow_set=selected_workflow_set,
+                    workflows=workflows,
+                )
+            except ConfigError as exc:
+                errors.append(str(exc))
         try:
             resolve_api_key(config=root_config)
         except ConfigError as exc:
@@ -707,8 +825,14 @@ def run_preflight(
 
     assert root_config is not None
     assert selected_workflow_set is not None
+    assert workflow_contract is not None
     return PreflightResult(
-        root_config=root_config, workflow_set=selected_workflow_set, workflows=workflows
+        root_config=root_config,
+        workflow_set=selected_workflow_set,
+        workflows=workflows,
+        workflow_contract=workflow_contract,
+        workflow_contract_text=workflow_contract_text,
+        workflow_contract_sha256=workflow_contract_sha256,
     )
 
 

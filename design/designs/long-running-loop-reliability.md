@@ -1,15 +1,26 @@
 # Design: Reliability and Operations for Long-Running Loops
 
-**Status:** Accepted and implemented in releases 0.3.0–0.6.0
+**Status:** Historical binding baseline for releases 0.3.0–0.6.0; retained
+mechanisms remain in 0.7, while the recursive v2 contract supersedes the
+explicit limitations identified below
 **Date consolidated:** 2026-07-15
 **Applies to:** the coordinator/worker runtime, planner/dispatcher child sessions,
 crash recovery, operational telemetry, failure containment, and model selection.
 
-This document describes current behavior. It consolidates the shipped parts of
-the July 2026 improvement review, whose historical identifiers (P0.1, P1.1,
-and so on) still appear in code comments, tests, and the changelog. The active
-work that did not ship is kept separately in
+This document explains the long-running reliability mechanisms shipped through
+0.6.0, whose historical identifiers (P0.1, P1.1, and so on) still appear in
+code comments, tests, and the changelog. Those mechanisms remain binding where
+the 0.7 design does not refine them. Work that did not ship is kept separately in
 [`../proposals/improvement-proposals.md`](../proposals/improvement-proposals.md).
+
+The implemented 0.7 design in
+[`recursive-loop-layer-contract.md`](./recursive-loop-layer-contract.md)
+generalizes the same depth-first session edge, replaces the v1 child protocol,
+and adds stronger assignment, evaluation, Git-subject, and trace contracts. It
+is authoritative for fresh v2 sessions. Statements below about a two-level
+limit, flat child requests, the global team-harness run-record mismatch, or
+missing grandchildren describe the shipped 0.3–0.6 baseline and legacy v1
+resume behavior, not fresh 0.7 sessions.
 
 The design is driven by three existing decisions:
 
@@ -58,17 +69,26 @@ The filesystem cannot atomically commit parent `state.json`, child `state.json`,
 `_dispatch_child_session_if_requested()` writes them in a discoverable order and
 startup reconciliation handles every crash window.
 
-The originating request filename is stored on the child record. While that
-record is running, `_dispatched_request_files()` treats a leftover request file
-as a tombstone, so a crash between recording and unlinking cannot dispatch it
-twice. Invalid or unusable child requests are renamed to `*.json.rejected` with
-the reason logged; the rejected file itself does not gain a structured reason.
-They do not remain in the scan loop forever. A completed child's old filename
-may be reused for genuinely new work.
+For a legacy v1 flat child request, the originating filename is stored on the
+child record. While that record is running, `_dispatched_request_files()`
+treats a leftover request file as a tombstone, so a crash between recording and
+unlinking cannot dispatch it twice. Invalid or unusable v1 requests are renamed
+to `*.json.rejected` with the reason logged; the rejected file itself does not
+gain a structured reason. A completed child's old filename may be reused for
+genuinely new v1 work.
 
-The implementation intentionally supports a depth-first, two-level tree: only a
-top-level session dispatches one child at a time. This matches the single shared
-checkout and D2/D6; it is not an accidental recursion limit.
+Fresh v2 sessions strengthen the same staged transition with request IDs,
+immutable accepted bodies, child-local input copies, structured rejection
+receipts, and bounded ledger reconstruction. Those details are specified in
+the recursive v2 design rather than retrofitted into this historical v1
+description.
+
+The 0.3–0.6 implementation intentionally supported a depth-first, two-level
+tree: only a top-level session dispatched one child at a time. Version 0.7
+removed that historical depth guard after the same typed edge passed
+three-depth dispatch/recovery/unwind tests. D2/D6 still require one deepest
+active assignment and one active child per ancestor; they do not require a
+depth-two limit.
 
 ### One transition function enforces the suspended-parent invariant
 
@@ -122,8 +142,10 @@ This guarantee does not extend magically to workflow-authored files such as
 workflows to publish those via temporary-file-plus-rename. The engine validates
 them and never trusts torn/invalid content as evidence: invalid child requests
 are rejected, invalid expected goal checks count toward `goal_check_broken`, and
-invalid control stops with `invalid_control_output`. The crash model is process
-crash consistency, not power-loss durability across every file (there is no
+invalid legacy v1 control stops with `invalid_control_output`. In v2, invalid
+terminal control is archived with a protocol-failure receipt and restored to
+running for bounded autonomous repair. The crash model is process crash
+consistency, not power-loss durability across every file (there is no
 multi-file fsync transaction).
 
 ---
@@ -248,16 +270,29 @@ team-harness's `run.json`. It cannot measure the separate Codex/Claude/Gemini CL
 accounts. Missing records return `None`, not zero; partially measured runs keep
 their known token subtotal but count as an unknown iteration.
 
+**Historical integration defect (team-harness 0.4.0; resolved by the 0.7
+contract).** Team-harness wrote its
+complete `run.json` to `~/.team-harness/runs/<run_id>/run.json`, while the worker
+looked for it under the caller-supplied session harness-output directory.
+Recovery used the global path, confirming the mismatch. Ordinary successful
+runs therefore recorded usage as unknown and could not trigger
+`max_cost_usd`. Loopy 0.7 with team-harness 0.5 instead uses one caller-owned
+canonical run directory returned explicitly on success and structured failure;
+the real integration is tested. Unknown or partial provider usage still remains
+honestly unknown.
+
 `LoopState.usage_totals` is the durable per-session ledger. When a child
 finalizes, its totals are copied to its `children.json` record;
 `session_tree_usage_totals()` derives a parent's subtree total without
 double-storing it. A resumed pre-ledger session reconciles historical iterations
 as usage-unknown rather than pretending they cost nothing.
 
-When `model_prices` is configured, `estimate_cost_usd()` prices the known
-coordinator tokens. `max_cost_usd` stops a session when its subtree estimate
-reaches the configured budget, and preflight rejects a budget without prices.
-This is an estimate with an explicit blind spot, not a claim to total agent spend.
+When a run record is available and `model_prices` is configured,
+`estimate_cost_usd()` prices the known coordinator tokens. The intended budget
+branch stops a session when its subtree estimate reaches `max_cost_usd`, and
+preflight rejects a budget without prices. Until the defect above is fixed, that
+branch has no known cost to compare. Even after the fix this is an estimate with
+an explicit blind spot, not a claim to total agent spend.
 The shipped budget is session-subtree-wide; per-workflow and wall-clock budgets
 were deliberately left out until a concrete need appears. The budget and prices
 are coordinator-side root settings loaded when the coordinator starts (and
@@ -356,20 +391,19 @@ The shipped hardening does not imply the following features:
 
 - no parallel loopy workers or concurrent child sessions (D2);
 - no human-answer gate or `waiting_for_human` state (D5);
-- no independently configured per-child budgets (the running child still
-  enforces the session tree's shared `max_cost_usd`; child-specific limits were
-  withdrawn as needless complexity);
+- no independently configured per-child budgets (the configuration exposes one
+  root-tree-wide `max_cost_usd`; child-specific limits remain withdrawn as
+  needless complexity);
 - no per-depth coordinator profiles (D9);
 - no agent-authored deterministic checks in the stock eval template (D4);
-- no breadth-first child scheduling (D2/D6), and no grandchildren in the current
-  implementation even though a deeper depth-first chain is not forbidden by
-  those decisions;
+- no breadth-first child scheduling (D2/D6); deeper v2 chains recurse through
+  the same one-child, depth-first edge;
 - no synthetic success result for drained work (D3/D7); and
 - no claim that coordinator-token cost includes agent-CLI spend.
 
 Changing a D-numbered boundary requires amending that decision. Changing another
-current scope choice, such as child depth or child-specific budgets, requires
-an explicit design update rather than treating the missing feature as a bug.
+current scope choice, such as child-specific budgets, requires an explicit
+design update rather than treating the missing feature as a bug.
 
 ---
 

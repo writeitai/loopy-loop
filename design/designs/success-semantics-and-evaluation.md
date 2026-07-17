@@ -15,6 +15,13 @@ Both decisions share one principle:
 > **Do not infer semantic success from noisy mechanical signals. Push the
 > success/acceptance decision to an explicit, purpose-built evaluation layer.**
 
+D11 and its companion
+[`recursive loop-layer contract`](./recursive-loop-layer-contract.md) refine
+how that evaluation layer composes across session depths: each session evaluates
+its own goal and names one terminal goal-control owner. This document remains
+authoritative for D3/D4's mechanical-success and LLM-as-judge boundaries; the
+new design adds subject provenance and ownership without changing either.
+
 ---
 
 ## Decision 1 — Iteration success means "the assignment ran," not "the work is good"
@@ -34,9 +41,12 @@ exception handlers.
 **Semantic success is decided elsewhere**, by artifacts the workflow writes:
 
 - `control.json` — the session stop switch (`running` → `stopped` with a
-  `stop_reason`). This, and only this, stops the loop.
-- `goal_check.json` — per-iteration evidence (`goal_met` / `reason`). Evidence only;
-  a valid `goal_check.json` does **not** by itself stop the loop.
+  `stop_reason`). In a fresh v2 session it must identify the exact current
+  session/workflow/attempt; successful control comes from the declared
+  goal-control role and cites the same-session eval receipt. This, and only
+  this, stops the loop.
+- `goal_check.json` — a per-iteration projection of the canonical eval receipt.
+  Evidence only; a valid `goal_check.json` does **not** by itself stop the loop.
 
 ### Context / why
 
@@ -51,7 +61,9 @@ manufacture false precision.
 So `loopy-loop` draws the line at the only thing it can observe reliably — *did the
 assignment run to completion without the harness itself erroring* — and delegates the
 "was it any good" question to an explicit evaluation step that produces
-`goal_check.json`, with the human/agent-owned `control.json` as the actual gate.
+an eval receipt and matching `goal_check.json`, with workflow-owned
+`control.json` as the actual gate. D11 defines the exact role and provenance
+contract; D5 keeps human involvement out of normal operation.
 
 This has been the behavior since the first commit of `harness_runner.py`
 (`a4cca5e`, 2026-04-19); it is original design intent, not drift.
@@ -86,14 +98,17 @@ repo-owned deterministic checks and the active
   unreliable for the reasons above; produces false negatives (good outcome, failed
   worker) and false positives (all-green, useless outcome).
 - *Make `goal_check.json` directly stop the loop.* Rejected: conflates evidence with
-  control. Keeping `control.json` as the sole stop switch means a workflow (or human)
-  must make an explicit stop decision, which is auditable and reversible.
+  control. Keeping `control.json` as the sole stop switch means the accountable
+  current workflow must make an explicit, auditable stop decision. A human gate
+  is not part of this path (D5).
 
 ### When to revisit
 
-If the cadence inaccuracy ever causes a concrete problem, add an **opt-in** for
-cadence to require an *accepted* eval rather than a merely *completed* run. That is a
-small, additive change; it does not require touching the success boundary itself.
+If cadence inaccuracy causes a concrete problem, tune the workflow set's
+mechanical eval frequency and the evidence rendered into eval prompts. Do not
+make semantic readiness or an accepted eval determine workflow eligibility:
+D8 forbids semantic scheduling gates, and D11 keeps readiness as prompt context.
+Accepted eval affects terminal control, not which assignment may run next.
 
 ---
 
@@ -179,9 +194,9 @@ than abandoning the approach.
 |---|---|---|
 | **What** | Iteration success = harness completed, not work-is-good | Eval = LLM-as-judge on outcomes; agents don't author deterministic checks |
 | **Why** | Worker exit codes are a noisy proxy for real success | Agent-authored deterministic checks were gameable nonsense |
-| **True gate** | `control.json` (stop) + `goal_check.json` (evidence) | The judge's verdict, recorded as evidence |
+| **True gate** | identity-bound `control.json` (stop) + eval receipt/`goal_check.json` (evidence) | The judge's verdict, recorded as evidence |
 | **Shared principle** | Delegate the success decision to an explicit eval layer | Same |
-| **Backstop for high-stakes** | Optionally require *accepted* eval for cadence | Add repo-owned deterministic check under the judge |
+| **Backstop for high-stakes** | Run eval on a suitably frequent mechanical cadence; keep semantic acceptance in control | Add repo-owned deterministic check under the judge |
 
 Both decisions are sound. Neither should be reverted. The one thing worth adding —
 for high-stakes targets only — is a deterministic backstop built from the target

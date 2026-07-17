@@ -10,6 +10,9 @@ Companion docs:
 - `design/designs/long-running-loop-reliability.md` — the self-contained description
   of the crash recovery, telemetry, failure containment, and model-tier mechanisms
   already implemented under several decisions below.
+- `design/designs/recursive-loop-layer-contract.md` — the implemented contract
+  for recursive session layers, dynamic harness delegation, layer-scoped
+  evaluation, and the state/evidence-versus-trace boundary (**D10–D12**).
 - `design/proposals/` — forward-looking changes we are *considering* (not decided;
   do not treat them as binding or as descriptions of current behavior).
 - `design/analysis/` — the July 2026 review that produced several of these decisions
@@ -44,6 +47,12 @@ external structure.
 Crash recovery reads artifacts on disk (e.g. `pending_finished_request.json`,
 `result.json`), never in-memory conversation. A finished run is legible after the fact.
 This is the premise the rest of the log depends on.
+
+**Refined by D12.** Files remain the source of truth, but correctness-critical
+session state/evidence and exhaustive execution traces have different retention
+contracts. Exact loopy assignments and normalized results remain with the session;
+bulk multi-agent execution detail lives in a separately ignored trace plane whose
+loss cannot break recovery or acceptance.
 
 ## D2. The single-worker model is deliberate
 
@@ -122,6 +131,9 @@ sanctioned escape hatch is already built: a workflow that hits a genuinely termi
 blocker writes `control.json` with `stop_reason: "unresolvable_error"`, which stops the
 session as terminal and leaves a recorded reason. We deliberately **do not** build a
 preferred, resumable "pause and wait for a human to answer" gate.
+For a fresh v2 session, D11's identity-bound form applies: the producer must be the
+exact current session/workflow/attempt, its role must be declared for terminal-blocker
+reporting, and the record must list autonomous routes already tried.
 
 **Context.** An autonomous long-horizon loop will occasionally hit something it truly
 cannot do alone — a decision only a human can make, a credential it lacks, a
@@ -169,6 +181,10 @@ reconstructs session/child *state* from files; it does not re-adopt a crashed wo
 agent subprocesses. A hard worker crash is handled by the D7 drain/reap cleanup path.
 Child sessions remain depth-first and one-at-a-time (consistent with D2). The planner
 drives the target's *own* authoritative plan; it does not invent a parallel backlog.
+
+**Refined by D10 and D11.** The same depth-first session edge now recurses beyond one
+child level; three-depth dispatch, recovery, budget, and unwind tests guard that
+behavior. Every layer still performs its own scoped evaluation before it can close.
 
 ## D7. Process-lifecycle ownership is split: team-harness owns agent processes, loopy-loop owns the worker
 
@@ -297,3 +313,102 @@ per-session coordinator profiles ever become genuinely needed, they compose with
 decision. Effort-as-spawn-argument lives in team-harness (0.4.0+, TH-D6); on older
 installed versions the tier guidance still works for `model`, and effort escalation
 falls back to raw CLI `flags`.
+
+## D10. Durable loop layers recurse; harness subagents remain dynamic delegations
+
+**Decision.** A durable loop layer is one loopy session with a scoped goal, state,
+decisions, evals, attempts, and optional child. One-layer, planner/dispatcher, and
+deeper systems compose the same session node and parent→child protocol. Only the
+deepest session owns a live loopy assignment.
+
+Inside that assignment, the team-harness coordinator remains free to choose a dynamic
+team, roles, models, ordering, retries, and follow-ups. Spawned agents—including a
+nested `type=harness` coordinator—are delegates in the current layer unless the
+owning workflow explicitly publishes a child-session request.
+
+Every attempt receives a frozen assignment with loop identity, role, responsibility,
+and worker-local absolute state/output paths. Team-harness derives a smaller absolute
+assignment for each direct spawn. Durable records use validated logical references so
+they survive a moved checkout. Child request/input bytes are copied into the child's
+immutable `inputs/` area so later parent edits cannot change accepted work.
+
+**Context.** “Inner loop,” “child,” and “subagent” blurred durable session depth,
+workflow roles, and short-lived processes. Encoding a fixed agent graph would weaken
+the coordinator, while relying on prompt authors to repeat ecosystem context left
+delegates unsure of their layer and paths.
+
+**Consequences.** D2 still permits parallel harness agents inside one assignment but
+not parallel loopy workers. Ownership metadata is accountability, not an ACL or model
+allowlist (D8/D9). The same edge is tested through three active depths. Provider-native
+nested actors are recorded only when observable. See the
+[binding design](designs/recursive-loop-layer-contract.md) for the full contract and
+legacy boundary.
+
+## D11. Every session evaluates its own goal and names its terminal-control owner
+
+**Decision.** Every durable session evaluates its own scoped goal. A child verdict is
+evidence for its parent, never proof that the parent's broader goal is complete. Each
+workflow contract names the check author, runner, task-acceptance owner, terminal
+`goal_met` owner, and terminal-blocker reporters. In `inner_outer_eval`, `outer`
+records task acceptance/readiness and only `eval_runner` may request success.
+
+The canonical eval receipt binds the verdict to session/goal identity, exact check
+definitions, producer/harness identity, judge settings, raw and canonical report
+hashes, and evaluated git state. `goal_check.json` is a matching iteration projection;
+successful v2 control cites the same receipt. The engine validates provenance and
+all-pass mechanics but does not reinterpret the LLM judge's semantic conclusion.
+
+Both success and D5 blocker control must identify the exact current
+session/workflow/attempt and come from a role named by the frozen workflow contract.
+A spawned agent reports to its coordinator; it cannot leave durable control for
+another layer or later attempt.
+
+**Context.** Before D11, the one-layer prompts gave both `outer` and `eval_runner`
+paths to close the session, so outer could stop before eval ran. The PM set could
+similarly close a root after reviewing child evidence without a separate root-goal
+evaluation.
+That ambiguity becomes more dangerous at three depths: a leaf may correctly finish
+its task while the feature integration or release goal remains incomplete. Existing
+`goal_check.json` also lacks enough provenance to prove exactly what goal, checks,
+judge, and repository state it evaluated.
+
+**Consequences.** D3 mechanical success and D4 LLM-as-judge semantics remain
+unchanged. Receipt checks are structural validation with a repair path, not a new
+semantic scheduler gate (D8). Readiness remains prompt context under mechanical eval
+cadence. `unresolvable_error` remains D5's last resort and needs no passing eval.
+Malformed v2 control is archived and bounded as repairable protocol failure. Legacy
+sessions retain their historical provenance. See the
+[binding design](designs/recursive-loop-layer-contract.md).
+
+## D12. Correctness state/evidence and exhaustive execution traces have separate retention contracts
+
+**Decision.** Compact facts required to schedule, recover, or justify acceptance stay
+with the session: topology, goals, assignments, progress, decisions, child handoffs,
+normalized results, and eval/git/delivery/recovery receipts. Detailed observable
+execution lives under separately gitignored `.loopy_loop/traces/`: prompts, visible
+turns, tool/spawn I/O, process/provider identity, streams, raw eval output, verbose git
+evidence, timing, and usage. Inputs are persisted before their provider calls.
+
+Each attempt has one caller-owned, completeness-aware trace manifest. The coordinator
+creates it during dispatch; the worker and team-harness populate that same canonical
+tree. Matching completion or crash abandonment uses a write-ahead finalization record,
+then a hashed manifest and compact session-side seal receipt. Startup retries only
+after durable history proves the transition committed; an unavailable HTTP response
+is recorded as unavailable rather than invented. Trace I/O failure is observable but
+never becomes a semantic acceptance gate (D3/D8).
+
+**Context.** Before this decision, execution records were split inconsistently:
+session-local worker artifacts lived under harness outputs, while team-harness 0.4.0
+wrote its complete coordinator `run.json` to a global directory. Loopy's
+successful-run usage reader looked in the session location even though recovery used
+the global location, so the contract was not self-contained: ordinary successful
+usage was unknown and `max_cost_usd` could not fire against that integration. Prompts
+and raw logs also shared retention boundaries with semantic state, making later cloud
+analysis and independent retention unclear.
+
+**Consequences.** D1 is refined, not replaced: continuity remains inspectable files
+and git. “All I/O” means observable/model-visible logical I/O; hidden reasoning and
+provider-internal bytes remain unavailable, and unavailable channels are stated
+honestly. Raw traces are sensitive local data; correctness-critical facts do not rely
+on their retention. See the [binding design](designs/recursive-loop-layer-contract.md)
+and [session layout](../docs/session-layout.md).

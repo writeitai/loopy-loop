@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 import yaml
 
-from loopy_loop.config import derive_goal_hash
+from loopy_loop.config import derive_full_goal_hash
 from loopy_loop.models import CurrentTask
 from loopy_loop.models import HistoryEntry
 from loopy_loop.models import LoopState
@@ -108,7 +108,9 @@ def snapshot_factory():
     def factory(**overrides: Any) -> RootConfigSnapshot:
         data = {
             "goal": "Goal",
-            "goal_hash": "cdbf6975e8a3",
+            "goal_hash": (
+                "sha256:cdbf6975e8a35b0d03558be6822dfae166482c24fb86b0433f60e8167f5c91e4"
+            ),
             "workflow_set": "main",
             "completion_criteria": ["done"],
             "stop_criteria": ["blocked"],
@@ -125,7 +127,7 @@ def snapshot_factory():
         }
         data.update(overrides)
         if "goal_hash" not in overrides:
-            data["goal_hash"] = derive_goal_hash(goal=data["goal"])
+            data["goal_hash"] = derive_full_goal_hash(goal=data["goal"])
         return RootConfigSnapshot.model_validate(data)
 
     return factory

@@ -421,6 +421,9 @@ def test_model_tiers_render_guidance_into_prompt_extension(repo_builder: Any) ->
     assert "- strong: codex model=gpt-5.6-sol effort=high; " in extension
     assert "claude model=claude-fable-5" in extension
     assert "Default tier: economy" in extension
+    assert "structured `effort` arguments" in extension
+    assert "`flags`" not in extension
+    assert "model_reasoning_effort" not in extension
 
 
 def test_model_tiers_guidance_appends_after_existing_extension(
