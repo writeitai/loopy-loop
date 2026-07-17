@@ -20,7 +20,22 @@ factual outcome into concise parent state and mark the item ready for planner
 review; do not call it accepted.
 
 When the selected item has no matching live or terminal child, atomically
-publish exactly one v2 JSON request under the absolute `child_requests` path:
+create an immutable selection snapshot first. Use a stable unique request id.
+The contract-owned logical path is
+`project_state/dispatch_inputs/<request_id>.json`; write it as
+`dispatch_inputs/<request_id>.json` beneath the assignment's absolute
+`project_state` path, creating the directory when needed. The snapshot must
+contain the selected item's exact id, child scope, planner decision/evidence
+references, and any curated input inventory needed to reconstruct why this
+child was chosen. Write it via a temporary sibling and atomic rename. Once
+published, never edit or replace that request id's snapshot; a superseding
+request gets a new id and snapshot. After a crash, an existing snapshot may be
+reused only when its exact content still describes the same intended request.
+If it does not, leave it intact and use a new request id and snapshot.
+
+Compute the ordinary `sha256:` digest of the snapshot's exact bytes. Then
+atomically publish exactly one v2 JSON request under the absolute
+`child_requests` path:
 
 ```json
 {
@@ -46,8 +61,8 @@ publish exactly one v2 JSON request under the absolute `child_requests` path:
   },
   "inputs": [
     {
-      "ref": "parent:/project_state/work_items.md",
-      "sha256": "sha256 of the exact referenced input"
+      "ref": "parent:/project_state/dispatch_inputs/stable-unique-request-id.json",
+      "sha256": "sha256 of the exact immutable snapshot bytes"
     }
   ]
 }
@@ -60,11 +75,19 @@ autonomously, but do not ask it to manage the parent backlog. Use the selected
 workflow set deliberately; `inner_outer_eval` is the packaged delivery-layer
 default, not a hard-coded requirement for every future topology.
 
+Never declare mutable `project_state/work_items.md` as a child input. The
+coordinator validates declared hashes after the dispatcher attempt returns;
+the required post-publication ledger update would otherwise change those bytes
+and make a correct request fail validation. The immutable dispatch snapshot is
+the child-facing input; `work_items.md` remains the mutable parent ledger.
+
 Write a complete temporary sibling whose name does not end in `.json`, close
 it, and rename it atomically to a unique `.json` final name. Only after the
-rename succeeds, mark the item `waiting_for_child` and record request id/path.
-Preserve accepted/rejected request archives and exact bodies. Put scratch and
-verbose dispatch analysis under `trace_root`.
+request rename succeeds, mark the item `waiting_for_child` and record request
+id/path in `work_items.md`. This ordering is strict: immutable snapshot,
+snapshot hash, request rename, then mutable ledger update. Preserve
+accepted/rejected request archives and exact bodies. Put scratch and verbose
+dispatch analysis under `trace_root`.
 
 Dynamic delegation is optional. You may delegate bounded request review or
 context gathering, but every delegate remains inside this attempt and reports

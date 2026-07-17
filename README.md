@@ -51,11 +51,11 @@ uv sync --extra dev
 Version 0.7's recursive contract spans three owned projects. It requires
 `team-harness>=0.5.0` for caller-owned run records, pre-call coordinator input,
 spawn assignment envelopes, and canonical stdout/stderr capture; it requires
-`eval-banana>=0.3.2` for hermetic `--no-project-config` evaluation and explicit
-harness-agent validation. Install all three companion changes together. While
-developing before those releases are published, install the corresponding
-team-harness and eval-banana checkouts into this environment as editable
-dependencies:
+`eval-banana>=0.3.3` for hermetic `--no-project-config` evaluation, explicit
+harness-agent validation, and the public canonical check-definition digest
+used to verify eval receipts. Install all three companion changes together.
+For coordinated development across the repositories, install the corresponding
+team-harness and eval-banana checkouts as editable dependencies:
 
 ```bash
 uv pip install -e /path/to/team-harness -e /path/to/eval-banana
@@ -477,6 +477,12 @@ copies each verified input into the child's immutable `inputs/` area. Child
 attempts receive those logical references, hashes, and absolute local paths;
 later parent edits cannot change accepted work.
 
+The stock PM dispatcher first freezes the selected work item and its planning
+evidence under `project_state/dispatch_inputs/<request_id>.json`, then hashes
+that immutable snapshot into the request. Only after the request is atomically
+published does it update the mutable `work_items.md` ledger. Hashing the ledger
+itself would invalidate the request when that required status update occurs.
+
 When the child stops, the engine writes a factual outcome. The parent then
 writes a separate acceptance, rework, or reroute decision after reviewing the
 evidence. Terminal descendants unwind iteratively, so the same edge supports
@@ -488,8 +494,9 @@ orchestration:
 
 - `planner` maintains PM state, selects one work item, reviews terminal child
   evidence, and owns parent-acceptance/eval-readiness receipts.
-- `dispatcher` publishes the selected v2 child assignment and tracks factual
-  lifecycle evidence without deciding acceptance.
+- `dispatcher` freezes the selected item into an immutable request input,
+  publishes the v2 child assignment, and tracks factual lifecycle evidence
+  without deciding acceptance.
 - `eval_reviewer` and `eval_runner` evaluate the PM layer's own broader goal;
   only that layer's `eval_runner` may request successful terminal control.
 

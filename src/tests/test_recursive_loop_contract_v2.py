@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+from eval_banana.runner import compute_check_definition_sha256
 from fastapi.testclient import TestClient
 import pytest
 import yaml
@@ -1726,6 +1727,8 @@ def _setup_eval_task(
 def _write_valid_eval_bundle(
     *, repo_root: Path, task: dict[str, Any], state: LoopState
 ) -> tuple[dict[str, Any], str, Path]:
+    """Write one internally consistent passing eval-banana receipt bundle."""
+
     check_path = (
         session_dir_path(repo_root=repo_root, session_id=task["session_id"])
         / "eval_checks"
@@ -1736,6 +1739,7 @@ def _write_valid_eval_bundle(
         "description: Judge the goal.\ninstructions: Inspect the result.\n",
         encoding="utf-8",
     )
+    definition_sha256 = compute_check_definition_sha256(source_path=check_path)
     canonical_path = (
         eval_receipts_dir_path(repo_root=repo_root, session_id=task["session_id"])
         / "eval-valid.report.md"
@@ -1764,7 +1768,7 @@ def _write_valid_eval_bundle(
                 "checks": [
                     {
                         "check_id": "judge-goal",
-                        "check_definition_sha256": file_sha256(check_path),
+                        "check_definition_sha256": definition_sha256,
                         "status": "passed",
                         "exit_code": 0,
                         "details": {
@@ -1821,7 +1825,7 @@ def _write_valid_eval_bundle(
         "checks": [
             {
                 "check_id": "judge-goal",
-                "definition_sha256": file_sha256(check_path),
+                "definition_sha256": definition_sha256,
                 "kind": "harness_judge",
             }
         ],
@@ -1842,9 +1846,108 @@ def _write_valid_eval_bundle(
     return payload, "session:/eval_receipts/eval-valid.json", trace_root
 
 
+def test_eval_receipt_accepts_eval_banana_canonical_definition_digest(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Canonical report/receipt definition digests pass independent validation."""
+
+    repo_root, service, _, task, state = _setup_eval_task(
+        repo_builder=repo_builder, monkeypatch=monkeypatch
+    )
+    payload, _, _ = _write_valid_eval_bundle(
+        repo_root=repo_root, task=task, state=state
+    )
+    check_path = (
+        session_dir_path(repo_root=repo_root, session_id=task["session_id"])
+        / "eval_checks"
+        / "judge-goal.yaml"
+    )
+    canonical_digest = compute_check_definition_sha256(source_path=check_path)
+
+    assert payload["checks"][0]["definition_sha256"] == canonical_digest
+    assert canonical_digest != file_sha256(path=check_path)
+    assert (
+        service._validate_eval_receipt_artifacts(
+            session_id=task["session_id"],
+            receipt=EvalReceipt.model_validate(obj=payload),
+        )
+        == []
+    )
+
+
+def test_eval_receipt_rejects_yaml_mutated_after_eval_report(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Changing authored YAML bytes after evaluation invalidates its receipt."""
+
+    repo_root, service, _, task, state = _setup_eval_task(
+        repo_builder=repo_builder, monkeypatch=monkeypatch
+    )
+    payload, _, _ = _write_valid_eval_bundle(
+        repo_root=repo_root, task=task, state=state
+    )
+    check_path = (
+        session_dir_path(repo_root=repo_root, session_id=task["session_id"])
+        / "eval_checks"
+        / "judge-goal.yaml"
+    )
+    check_path.write_text(
+        data=check_path.read_text(encoding="utf-8") + "# changed after report\n",
+        encoding="utf-8",
+    )
+
+    reasons = service._validate_eval_receipt_artifacts(
+        session_id=task["session_id"], receipt=EvalReceipt.model_validate(obj=payload)
+    )
+
+    assert any("definition hash does not match" in reason for reason in reasons)
+
+
+@pytest.mark.parametrize(
+    argnames="digest_error",
+    argvalues=[OSError("definition unreadable"), ValueError("invalid check")],
+)
+def test_eval_receipt_reports_actionable_canonical_hash_failure(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch, digest_error: Exception
+) -> None:
+    """Digest I/O and schema failures identify the authored check needing repair."""
+
+    repo_root, service, _, task, state = _setup_eval_task(
+        repo_builder=repo_builder, monkeypatch=monkeypatch
+    )
+    payload, _, _ = _write_valid_eval_bundle(
+        repo_root=repo_root, task=task, state=state
+    )
+
+    def fail_digest(*, source_path: Path) -> str:
+        """Raise the requested eval-banana digest failure for one check."""
+
+        assert source_path.name == "judge-goal.yaml"
+        raise digest_error
+
+    monkeypatch.setattr(
+        target="loopy_loop.coordinator_app.compute_check_definition_sha256",
+        name=fail_digest,
+    )
+
+    reasons = service._validate_eval_receipt_artifacts(
+        session_id=task["session_id"], receipt=EvalReceipt.model_validate(obj=payload)
+    )
+
+    assert any(
+        "authored eval check 'judge-goal.yaml' cannot be canonically hashed "
+        "by eval-banana"
+        in reason
+        and str(digest_error) in reason
+        for reason in reasons
+    )
+
+
 def test_valid_evidence_bound_eval_and_current_attempt_control_close_session(
     repo_builder: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A passing canonical eval bundle may close its exact current session."""
+
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     repo_root = repo_builder(
         workflows={
@@ -1889,6 +1992,7 @@ def test_valid_evidence_bound_eval_and_current_attempt_control_close_session(
         "description: Judge the goal.\ninstructions: Inspect the result.\n",
         encoding="utf-8",
     )
+    definition_sha256 = compute_check_definition_sha256(source_path=check_path)
     canonical_path = (
         eval_receipts_dir_path(repo_root=repo_root, session_id=task["session_id"])
         / "eval-valid.report.md"
@@ -1917,7 +2021,7 @@ def test_valid_evidence_bound_eval_and_current_attempt_control_close_session(
                 "checks": [
                     {
                         "check_id": "judge-goal",
-                        "check_definition_sha256": file_sha256(check_path),
+                        "check_definition_sha256": definition_sha256,
                         "status": "passed",
                         "exit_code": 0,
                         "details": {
@@ -1980,7 +2084,7 @@ def test_valid_evidence_bound_eval_and_current_attempt_control_close_session(
                 "checks": [
                     {
                         "check_id": "judge-goal",
-                        "definition_sha256": file_sha256(check_path),
+                        "definition_sha256": definition_sha256,
                         "kind": "harness_judge",
                     }
                 ],
@@ -2861,6 +2965,8 @@ def test_passing_eval_subject_must_still_match_live_repository_at_acceptance(
 def test_eval_check_kind_must_match_yaml_definition_type(
     repo_builder: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Stock receipts cannot relabel a non-harness check as harness-judge."""
+
     repo_root, service, _, task, state = _setup_eval_task(
         repo_builder=repo_builder, monkeypatch=monkeypatch
     )
@@ -2879,7 +2985,6 @@ def test_eval_check_kind_must_match_yaml_definition_type(
     )
     checks = payload["checks"]
     assert isinstance(checks, list)
-    checks[0]["definition_sha256"] = file_sha256(check_path)
 
     reasons = service._validate_eval_receipt_artifacts(
         session_id=task["session_id"], receipt=EvalReceipt.model_validate(payload)
@@ -2946,6 +3051,8 @@ def test_eval_receipt_schema_failure_reports_actionable_field(
 def test_raw_eval_report_must_echo_the_exact_authored_check_hash(
     repo_builder: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A rehashed report still fails when its definition digest is forged."""
+
     repo_root, service, _, task, state = _setup_eval_task(
         repo_builder=repo_builder, monkeypatch=monkeypatch
     )

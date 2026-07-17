@@ -1,8 +1,8 @@
 # Design: Recursive Loop Layers, Dynamic Agent Delegation, and Execution Records
 
-**Status:** Implemented on coordinated feature branches targeting loopy-loop
-0.7.0, team-harness 0.5.0, and eval-banana 0.3.2. Rollout awaits publication
-of the support packages and refresh of loopy-loop's dependency lock.
+**Status:** Implemented and released in loopy-loop 0.7.0, team-harness 0.5.0,
+and eval-banana 0.3.2. The canonical eval-definition digest interoperability
+fix ships in loopy-loop 0.7.1 with eval-banana 0.3.3.
 
 **Date accepted:** 2026-07-15
 
@@ -296,6 +296,14 @@ attempt/work item, child workflow set, scoped goal, completion/stop criteria,
 constraints, deliverables, required evidence, and hashed logical input
 references.
 
+When the source planning record is mutable, the workflow first writes an
+immutable per-request selection snapshot and hashes that snapshot in the
+request. The packaged PM dispatcher uses
+`project_state/dispatch_inputs/<request_id>.json`, publishes the request, and
+only then changes the mutable work-item ledger to `waiting_for_child`. Hashing
+the ledger directly would make its required status update look like input
+tampering when the coordinator validates the request after the attempt.
+
 The coordinator validates the request and hashes. A dispatchable body is
 archived unchanged under `accepted/`, indexed, and copied into the child's
 immutable `inputs/accepted_request.json`. Each declared input is resolved from
@@ -349,8 +357,8 @@ The canonical eval receipt binds the verdict to:
 
 - root/session/goal identity and evaluated git state;
 - producing workflow, iteration, attempt, and harness run;
-- every recursively discovered regular check file and its exact definition
-  hash;
+- every recursively discovered regular check file and its eval-banana
+  canonical definition hash copied from the raw report;
 - judge provider, model, and reasoning effort;
 - individual results and the final verdict;
 - one canonical report plus its hash; and
@@ -534,15 +542,14 @@ The cross-repository contract is fail-fast:
 - team-harness 0.5.0 supplies caller-owned run paths, input durability,
   direct-spawn envelopes/streams, nested caller context, and its capability
   API;
-- eval-banana 0.3.2 supplies hermetic config selection, exact flat output,
-  check-definition hashes, and effective judge metadata; and
-- loopy-loop 0.7.0 requires the advertised capabilities and returns HTTP 426
+- eval-banana 0.3.3 supplies hermetic config selection, exact flat output,
+  a public canonical check-definition digest, and effective judge metadata; and
+- loopy-loop 0.7.1 requires the advertised capabilities and returns HTTP 426
   before mutation when a fresh v2 tree meets an older worker.
 
-The team-harness and eval-banana support PRs must be merged and their packages
-published before, or atomically with, loopy-loop 0.7.0. The loopy dependency
-lock is then resolved against those releases. Editable sibling checkouts are
-only a development bridge.
+Support packages are published before the loopy-loop version that consumes
+them, so the loopy dependency lock resolves against public artifacts. Editable
+sibling checkouts are only the coordinated-development bridge.
 
 ## Verification boundaries
 

@@ -250,6 +250,12 @@ should not create a competing goal in project state.
 ledger. Mechanical harness completion does not append acceptance by itself.
 Implementation entries should link compact eval, git, and delivery evidence.
 
+The packaged PM set also uses
+`project_state/dispatch_inputs/<request_id>.json` for immutable, per-request
+selection snapshots. The dispatcher hashes this snapshot into a child request
+before updating its mutable `work_items.md` ledger. A published snapshot is
+never edited; a rework or reroute request receives a new request id and file.
+
 ### Evaluation directories
 
 - `eval_checks/` contains session-scoped eval-banana YAML definitions.
@@ -268,7 +274,8 @@ An eval receipt's own schema is v1 inside the v2 session protocol. It records:
 
 - root/session/goal and optional git subject identity;
 - producer workflow, iteration, attempt, and harness run;
-- a unique inventory of harness-judge check IDs and definition SHA-256 values;
+- a unique inventory of harness-judge check IDs and eval-banana canonical
+  definition SHA-256 values copied from the raw report;
 - effective judge provider/model/reasoning effort;
 - per-check results and the all-pass verdict;
 - a canonical report reference/hash and the producing attempt's exact
@@ -277,7 +284,10 @@ An eval receipt's own schema is v1 inside the v2 session protocol. It records:
 - creation time.
 
 `CoordinatorService._validate_eval_receipt_artifacts()` resolves and verifies
-the definition and report hashes. Every receipt, passing or failing, must have
+the definition and report hashes. A definition digest is not the raw YAML file
+hash: eval-banana frames the exact definition bytes with its versioned digest
+protocol, emits that value in `report.json`, and exposes the same computation
+for loopy-loop to verify independently. Every receipt, passing or failing, must have
 exactly one `raw_report_refs` entry: the producing attempt's canonical
 `eval/report.json`; the trace and harness identities must match the producer.
 Every regular `*.yaml`/`*.yml` check found recursively beneath `eval_checks/`

@@ -236,6 +236,13 @@ The acceptance contract is more than file presence:
 template, dispatches a child, and runs its first assignment through the worker
 path with the child's own goal.
 
+The stock dispatcher also separates its mutable parent ledger from child input
+bytes. It atomically freezes one selection under
+`project_state/dispatch_inputs/<request_id>.json`, hashes that file in the
+child request, publishes the request, and only then marks the ledger item as
+waiting. This ordering keeps coordinator hash validation stable while the
+parent continues tracking lifecycle state.
+
 ---
 
 ## Operational events, usage, and cost
@@ -352,6 +359,12 @@ in `pyproject.toml`, not an optional install mode. Tool installers such as
 directory containing the installed eval-banana script and appends it to `PATH`.
 Appending preserves any target-repo or operator-selected executable that is
 already earlier on `PATH`.
+
+Version 0.7.1 requires eval-banana 0.3.3 because eval receipts carry
+eval-banana's canonical check-definition digest. The eval runner copies that
+digest from `report.json`; `CoordinatorService._validate_eval_receipt_artifacts()`
+uses eval-banana's public digest function to recompute it. A raw YAML file hash
+is intentionally not substituted for the canonical protocol.
 
 The repository's Agent Skill was rewritten with the 0.5.0 release to describe
 the session-local layout, workflow sets, single identity-verified ping-pong
