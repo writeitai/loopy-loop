@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 SKILL_PATH = Path(__file__).resolve().parents[2] / "skills" / "loopy-loop" / "SKILL.md"
@@ -24,7 +26,7 @@ def test_agent_skill_describes_the_current_recursive_v2_contract() -> None:
         "one level only in v1",
         "grandchildren waits forever",
         "Outer workflows should read `updates_from_user.md` every run",
-        "stop still operates on the latest **top-level** session state",
+        "`stop` still operates on the latest",
     )
 
     for marker in required_current_contract:
