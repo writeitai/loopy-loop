@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.0
+
+- Added the protocol-v3 orchestration contract. Each layer now has an
+  inspectable semantic state spine, frozen workflow roster, attempt-local
+  scheduler view, rolling handoff, and topology-neutral terminal outcome.
+- Moved successful completion authority from eval roles to the declared layer
+  orchestrator (`outer` or `planner`). Evaluations remain provenance-checked
+  advisory evidence and may be omitted, non-passing, or cited across attempts.
+- Added a frozen four-tier harness capability roster to assignments and
+  coordinator prompts, including nested Team Harness coordinators and direct
+  spawn audit records. Requires Team Harness 0.5.4.
+- Made every protocol-v3 terminal lifecycle produce the same parent-linkable
+  outcome, including engine stops without terminal control. Accepted control
+  and handoff bytes are frozen in state so restart and trace refreshes cannot
+  rewrite the terminal basis.
+- Simplified the stock PM set to planner and dispatcher. The planner dispatches
+  milestone outcomes; standalone or nested `inner_outer_eval` owns leaf
+  decomposition and completion within its own scoped goal.
+
 ## 0.7.2
 
 - Corrected the installable `loopy-loop` Agent Skill to teach the released v2

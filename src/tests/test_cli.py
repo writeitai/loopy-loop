@@ -7,6 +7,7 @@ from typing import Any
 from click.testing import CliRunner
 
 from loopy_loop.cli import main
+from loopy_loop.models import REQUIRED_V3_WORKER_CAPABILITIES
 from loopy_loop.sessions import create_session_dir
 from loopy_loop.state_store import StateStore
 from tests.protocol_helpers import v2_finished_body
@@ -204,11 +205,11 @@ def test_init_pm_planner_dispatcher_template_scaffolds_expected_files(
     assert repo_root.joinpath(
         ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/dispatcher/prompt.txt"
     ).exists()
-    assert repo_root.joinpath(
-        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/eval_reviewer/prompt.txt"
+    assert not repo_root.joinpath(
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/eval_reviewer"
     ).exists()
-    assert repo_root.joinpath(
-        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/eval_runner/prompt.txt"
+    assert not repo_root.joinpath(
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/eval_runner"
     ).exists()
     assert repo_root.joinpath(
         ".loopy_loop/workflow_sets/pm_planner_dispatcher/contract.yaml"
@@ -324,7 +325,11 @@ def test_clean_pm_init_can_dispatch_an_inner_outer_eval_child(
     assert result.exit_code == 0, result.output
 
     client = TestClient(create_coordinator_app(repo_root=tmp_path, resume=False))
-    parent_task = client.post("/register", json=v2_register_body(tmp_path)).json()
+    register_body = v2_register_body(tmp_path)
+    register_body.update(
+        worker_protocol_version=3, capabilities=sorted(REQUIRED_V3_WORKER_CAPABILITIES)
+    )
+    parent_task = client.post("/register", json=register_body).json()
     assert parent_task["action"] == "run"
     assert parent_task["workflow_set"] == "pm_planner_dispatcher"
 

@@ -10,9 +10,13 @@ Companion docs:
 - `design/designs/long-running-loop-reliability.md` — the self-contained description
   of the crash recovery, telemetry, failure containment, and model-tier mechanisms
   already implemented under several decisions below.
-- `design/designs/recursive-loop-layer-contract.md` — the implemented contract
-  for recursive session layers, dynamic harness delegation, layer-scoped
-  evaluation, and the state/evidence-versus-trace boundary (**D10–D12**).
+- `design/designs/recursive-loop-layer-contract.md` — the implemented v2 recursive,
+  provenance, delegation, and state/trace baseline plus its accepted v3 amendment
+  boundary (**D10–D12**).
+- `design/designs/orchestrator-owned-completion-and-cross-harness-review.md` — the
+  accepted v3 contract for orchestration ownership, semantic state/handoff, optional
+  evaluation, schedule/capability context, phase-sized PM dispatch, and cross-harness
+  review. It is implemented in loopy-loop 0.8.0 and team-harness 0.5.4.
 - `design/proposals/` — forward-looking changes we are *considering* (not decided;
   do not treat them as binding or as descriptions of current behavior).
 - `design/analysis/` — the July 2026 review that produced several of these decisions
@@ -81,9 +85,11 @@ one at a time (see D6).
 **Decision.** `IterationResult.success` is `True` whenever a `team-harness` run returns
 normally, and `False` only when the harness itself raises. It is **not** a judgment
 about whether the requested work was accomplished, and the per-worker exit codes in
-`TeamHarnessResult.agents` are intentionally not consulted. Whether the work was any
-*good* is decided by the evaluation layer via `control.json` (the stop switch) and
-`goal_check.json` (evidence).
+`TeamHarnessResult.agents` are intentionally not consulted. Whether the session has
+enough evidence to stop is decided by the durable layer's declared orchestration role
+through `control.json`. Reviews, tests, child outcomes, delivery facts, and optional
+evaluation results are evidence for that decision; none is inferred from the harness
+return value.
 
 **Context.** `team-harness`'s coordinator is an orchestrator, not a build system: it can
 legitimately return a normal result after a worker failed (synthesize an answer, route
@@ -93,18 +99,30 @@ useless one. Mapping them to a boolean would manufacture false precision. This h
 the behavior since the first commit of `harness_runner.py`; it is original intent, not
 drift.
 
-**Consequences.** The evaluation layer, not the harness return value, is the real
-arbiter of completion. The scheduler keys cadence off mechanical success, so a
-harness-completed-but-worker-failed run still advances `run_every`/`must_follow`
-counters — an accepted, bounded inaccuracy, because `control.json`/`goal_check.json`
-remain the true gates. Full reasoning and alternatives:
+**Consequences.** The declared orchestration role, not the harness return value or a
+scheduled evaluator, is the semantic arbiter of completion. The scheduler keys cadence
+off mechanical success, so a harness-completed-but-worker-failed run still advances
+`run_every`/`must_follow` counters. An absent, failing, or malformed advisory eval is
+recorded as evidence/diagnostics; it does not retroactively flip mechanical success,
+increment the workflow's harness-failure counter, or disable the orchestration role's
+ability to decide. `control.json` remains the explicit stop switch. Full reasoning and
+alternatives:
 `design/designs/success-semantics-and-evaluation.md` (Decision 1).
 
-## D4. Evaluation is LLM-as-judge; agents do not author deterministic checks
+## D4. When evaluation is used, stock checks are LLM-as-judge; agents do not author deterministic checks
 
 **Decision.** In the packaged `inner_outer_eval` workflow set, the eval workflows create
 **only** `harness_judge` (LLM-as-judge) checks that describe desired *outcomes*.
-Authoring deterministic checks is explicitly forbidden in the stock template.
+Authoring deterministic checks is explicitly forbidden in the stock template. This
+decision governs the form and trust boundary of evaluation **when an orchestrator uses
+it**; it does not require an eval run and does not give an eval role terminal authority.
+
+Designing non-trivial eval checks is itself consequential reasoning. The eval-check
+authoring prompt should therefore prefer parallel, independent coverage and failure-mode
+analyses from different enabled harness families, followed by review of the proposed
+checks by a family other than the primary author when practical. The accountable
+coordinator synthesizes those views into one coherent check set. This is a strong
+judgment default, especially for high-stakes checks, not a fixed agent graph or quorum.
 
 **Context.** This is a lesson from experience, not theory. When agents were allowed to
 *author* deterministic checks, they produced brittle, wrong-target, gameable ones — the
@@ -116,11 +134,13 @@ deterministic but is not that failure mode.
 
 **Consequences.** The stock "deterministic forbidden" rule is correct for generic target
 repos, where the only deterministic checks would be agent-invented. For a target that
-already owns a trustworthy contract-test suite, the right configuration is *both* — the
-judge for qualitative outcomes, plus a deterministic backstop that shells out to the
-repo's own suite — via a dedicated child workflow set, not by loosening the stock
-template. Judge with a different model family than the implementer where practical. A
-single judge pass is evidence, not a hard gate for a high-stakes stop. Full reasoning:
+already owns a trustworthy contract-test suite, the orchestrator may use both the judge
+for qualitative outcomes and the repo's own deterministic suite as evidence, via a
+dedicated workflow set rather than by loosening the stock template. Prefer a judge from
+a different harness/model family than the primary implementer and check author where
+practical. Prefer the `frontier` tier for difficult eval-policy/check design and
+high-stakes judging when the session's capability roster offers it. A single judge pass
+is evidence, never an engine-owned completion gate. Full reasoning:
 `design/designs/success-semantics-and-evaluation.md` (Decision 2).
 
 ## D5. Full autonomy, with `unresolvable_error` as the only, last-resort human escape hatch
@@ -131,9 +151,10 @@ sanctioned escape hatch is already built: a workflow that hits a genuinely termi
 blocker writes `control.json` with `stop_reason: "unresolvable_error"`, which stops the
 session as terminal and leaves a recorded reason. We deliberately **do not** build a
 preferred, resumable "pause and wait for a human to answer" gate.
-For a fresh v2 session, D11's identity-bound form applies: the producer must be the
+For an identity-bound v2 or v3 session, D11's form applies: the producer must be the
 exact current session/workflow/attempt, its role must be declared for terminal-blocker
-reporting, and the record must list autonomous routes already tried.
+reporting, and the record must list autonomous routes already tried. The frozen
+assignment supplies the applicable schema version.
 
 **Context.** An autonomous long-horizon loop will occasionally hit something it truly
 cannot do alone — a decision only a human can make, a credential it lacks, a
@@ -163,15 +184,20 @@ considered and rejected. This entry is the canonical disposition and the mechani
 
 **Decision.** For a large, multi-phase target project, the intended execution shape is
 the **planner/dispatcher double loop** (the `pm_planner_dispatcher` workflow set) from
-day one — a parent "planner" session that maintains PM state and selects one unit of
-work, a "dispatcher" that spawns a child implementation session per unit, and a review
-of the child's evidence — rather than starting with a single flat loop and adding the
-double loop later.
+day one — a parent `planner` session that maintains program state and chooses a coherent
+milestone or phase outcome, and a `dispatcher` that transports that outcome into a child
+implementation session — rather than starting with a single flat loop and adding the
+double loop later. The parent deliberately stays above leaf-task level. The child
+`inner_outer_eval` orchestrator owns decomposition into work packages, tasks, reviews,
+commits, and PRs.
 
 **Context.** A single `inner_outer_eval` loop pointed at "build the whole thing" drowns
-in context; the double loop keeps each unit small (a fresh child context scoped to one
-work package) while the parent carries durable cross-cutting state. Committing to it from
-the start avoids re-architecting mid-project.
+in context; the double loop gives each substantial phase or milestone a fresh child
+planning context while the parent carries durable cross-cutting state. Sending an exact
+leaf such as "execute WP-0.1" down from the parent defeats that boundary: it hoards the
+real plan in the PM layer and leaves the child outer role unable to adapt. Milestone size
+is a semantic judgment, not an engine limit; the planner may split or combine phases when
+the live evidence warrants it.
 
 **Consequences.** The parent/child machinery is on the critical path from day one, so it
 must be hardened *first* — durable active-child crash recovery and a PM template that is
@@ -181,10 +207,15 @@ reconstructs session/child *state* from files; it does not re-adopt a crashed wo
 agent subprocesses. A hard worker crash is handled by the D7 drain/reap cleanup path.
 Child sessions remain depth-first and one-at-a-time (consistent with D2). The planner
 drives the target's *own* authoritative plan; it does not invent a parallel backlog.
+The stock PM workflow set contains `planner` and `dispatcher`; it does not duplicate the
+child layer's scheduled eval roles. A target goal may point the planner to prepared
+program-level evals and ask it to run them near the end, but that is semantic goal
+context, not a generic protocol gate.
 
-**Refined by D10 and D11.** The same depth-first session edge now recurses beyond one
-child level; three-depth dispatch, recovery, budget, and unwind tests guard that
-behavior. Every layer still performs its own scoped evaluation before it can close.
+**Refined by D10 and D11.** The same depth-first session edge recurses beyond one child
+level; three-depth dispatch, recovery, budget, and unwind tests guard that behavior.
+Every layer makes its own scoped completion decision; child evidence, including optional
+eval evidence, flows upward but cannot make that decision for an ancestor.
 
 ## D7. Process-lifecycle ownership is split: team-harness owns agent processes, loopy-loop owns the worker
 
@@ -237,89 +268,112 @@ verify-dead-before-reclaim rather than optimistic; legacy and remote identities 
 documented limitation above. The implemented protocol and salvage boundary are described in
 `designs/long-running-loop-reliability.md`; the process-group mechanism is team-harness TH-D5.
 
-## D8. Constraints on agents are fail-closed detection with a repair path, never hard prevention
+## D8. Semantic constraints are visible detection with accountable repair or disposition, never hard prevention
 
-**Decision.** The system constrains agent behavior by **detecting** violations in evidence
-and blocking *acceptance* of the work until they are repaired — never by **preventing** the
-action up front. No preventive fences: no path-level write sandboxes, no semantic scheduling
-vetoes ("this workflow may not run until X is proven"), no approval gates, no arbitrary
-mid-run hard-fails. Every constraint must be expressed as something the agent can see,
-contest, and repair against — an evaluation check or a recorded disposition — and the only
-hard stops are the evaluation gates that decide whether work is *accepted*
-(`goal_check.json` / `control.json`), not whether it may be *attempted*.
+**Decision.** The system handles semantic constraints by **detecting** relevant facts and
+making them visible to the accountable orchestration role, which repairs the issue,
+reroutes the work, or records why the finding does not apply. It never prevents the action
+up front and never turns one generic observation into an unconditional engine veto. No
+path-level write sandboxes, semantic scheduling vetoes ("this workflow may not run until X
+is proven"), approval gates, arbitrary mid-run hard-fails, or mandatory eval gates.
+
+This decision does not weaken structural protocol integrity. The engine still validates
+schemas, identity, current-attempt ownership, hashes, path confinement, explicit budgets,
+and state-machine topology. Those checks protect the durable machine from corrupt or stale
+input; they do not decide whether the work product is semantically good enough.
 
 **Context.** Stated as a general principle by the author (July 2026, during the design-loop
 work in writeit-loops-and-standards): agents should have enough freedom to decide;
 "fail-closed detection, not prevention" is the correct mental approach. It generalizes what
 three existing decisions already do individually: D3 keeps mid-run "success" mechanical and
-moves all quality judgment into after-the-fact evidence; D4 bans *agent-authored* pass/fail
-criteria while keeping repo/set-owned checks as detection backstops; D5 rejects a preferred
-human gate in favor of evidence-in (`updates_from_user`) and a last-resort terminal stop.
+makes quality a separate, explicit orchestration decision; D4 bans *agent-authored*
+pass/fail criteria while keeping repo/set-owned checks as useful evidence; D5 rejects a
+preferred human gate in favor of evidence-in (`updates_from_user`) and a last-resort
+terminal stop.
 The reasoning: prevention encodes today's guess about what agents shouldn't do and hides its
 own mistakes, while detection publishes every constraint as a visible, arguable check
 failure with a defined relaxation route — a wrongly-scoped check gets repaired with a
 counterexample and independent review instead of being silently obeyed forever. Concrete
-shape (from the design-loop): a workflow set ships a deterministic "write barrier" check
-that diffs protected paths against the session-start digest; a child session can physically
-write anywhere, but cannot terminate successfully while the barrier fails — fail-closed
-detection, not a sandbox.
+shape: a workflow set may report that protected paths differ from their session-start
+digest. The orchestrator sees the exact diff, normally repairs it, and can explain a
+legitimate exception. The engine neither hides the action with a sandbox nor silently
+promotes the report to terminal authority.
 
 **Consequences.** New engine features and workflow sets must not introduce preventive
 mechanisms: no coordinator-enforced path permissions, no eligibility gates keyed to semantic
 state, no paused/waiting-for-human states (already banned by D5). Where discipline over
-files is needed (a research workflow must not touch binding docs), express it as a shipped
-deterministic check over the diff — consistent with D4's boundary (set-owned, not
-agent-authored) — whose failure blocks the session's goal check until the write is undone.
-The accepted cost: a violating action can occur and must be detected and repaired after the
-fact; that inefficiency buys inspectability and reversibility of the constraint itself.
+files is needed (a research workflow should not touch binding docs), express it as visible
+diff evidence and clear prompt responsibility. A failing test, review, or eval is important
+input, and ignoring it should demand an explicit rationale, but its existence alone does not
+rewrite `HistoryEntry.success` or prohibit orchestrator-owned `control.json`. The accepted
+cost is that a violating action can occur and must be detected and repaired after the fact;
+that inefficiency buys inspectability and reversibility of the constraint itself.
 
-## D9. Coordinators are uniformly strong; worker model choice is per-spawn, prompt-guided, and audited — never enforced
+## D9. Strong coordinators receive a frozen harness/tier roster; delegation and review remain prompt-guided
 
-**Decision.** Every harness coordinator in a session tree — the root PM loop, child
-implementation loops, any deeper level — runs the **same strong coordinator model**
-(`team_harness_model`, one value per repo). Cost control comes from the **workers**:
-the root config may declare **named model tiers** (`model_tiers`: tier name → agent →
-`{model, effort}`), and each coordinator chooses a tier per spawned agent via
-team-harness's per-spawn `spawn_agent(model=…, effort=…)` overrides. Tier selection is
-**guidance rendered into the system prompt plus an audit trail** (team-harness records
-requested/effective model and effort per agent in `run.json`) — the engine never
-validates or blocks a coordinator's model choice (D8). With `default_tier` set, the
-named tier *derives* `team_harness_agent_models` / `team_harness_agent_reasoning_efforts`
-(setting both is a config error), so a model id lives in exactly one place.
+**Decision.** Every harness coordinator in a session tree — root PM, child
+implementation, and any deeper layer — runs the same strong coordinator model
+(`team_harness_model`, one value per repo). Every attempt also receives a frozen roster
+of all enabled **harness families** and their configured `{model, effort}` bundles by
+semantic strength tier. The canonical stock vocabulary is:
 
-**Context.** The obvious alternative — differentiating whole sessions ("strong parent
-session, cheap child session", per-session execution profiles carried on
-`ChildSessionRequest`) — was analyzed (July 2026) and rejected for now, consistent with
-the withdrawal of P0.3. Uniform strong coordinators dissolve that design's two hardest
-problems at once: the cost ledger stays correct (loopy only meters the coordinator
-model, so one repo-global `model_prices` remains valid), and a child's planning/eval
-reasoning is never downgraded along with its implementation muscle (the D4 concern of a
-weak session judging its own work). The coordinator context is also cheaper than it
-looks: it orchestrates on bounded log tails and status polls while worker CLIs — billed
-to their own accounts — chew the bulk tokens. Tier names are deliberately
-capability-semantic bundles of model + effort ("strong", "economy"), not raw
-model-id/effort axes, so prompts reason about one word and model churn stays a one-line
-config edit (the P2.1 drift concern).
+- `frontier`: the maximum-capability configured bundle for the hardest planning,
+  architecture, adversarial review, and eval-policy/check design;
+- `strong`: a high-capability bundle for complex reasoning, implementation, and review
+  that does not require the maximum tier;
+- `standard`: a balanced default for ordinary implementation, analysis, and review; and
+- `economy`: a lower-cost/lower-latency bundle for bounded mechanical work, broad
+  reconnaissance, and low-risk checks.
 
-**Consequences.** Workflow prompts should name **tiers**, never model ids; the rendered
-guidance block (`render_model_tier_guidance`, `config.py`) is the only place tiers
-expand to models. Adherence is probabilistic by design: a coordinator can forget to
-escalate a review — the remedy is the audit trail (an outer reviewer or an eval check
-verifies `requested_model`/`effective_model` on the child's agent records), never an
-engine fence (D8). Do not add per-session/per-depth model allowlists, "children may not
-request expensive tiers" vetoes, or coordinator-model differentiation per loop level; if
-per-session coordinator profiles ever become genuinely needed, they compose with tiers
-(profiles set session defaults, tiers guide per-spawn choice) and require amending this
-decision. Effort-as-spawn-argument lives in team-harness (0.4.0+, TH-D6); on older
-installed versions the tier guidance still works for `model`, and effort escalation
-falls back to raw CLI `flags`.
+For orientation only, an Anthropic-family roster could map these tiers to
+Fable, Opus, Sonnet, and Haiku respectively. Prompts use the semantic tier
+names, never those provider-specific examples.
+
+Harness family and strength tier are independent choices. A different family provides
+diversity of tools and failure modes; a stronger tier provides more capability within a
+family. The roster states unavailable family/tier combinations explicitly. Every
+coordinator receives its absolute path and a rendered summary, then chooses family,
+tier, concurrency, retries, and review shape dynamically via team-harness per-spawn
+overrides.
+
+For consequential planning, design, uncertain analysis, review, and especially eval
+check creation, prompts should prefer independent analyses from different enabled
+harness families in parallel when separable, followed by review by a family other than
+the primary author. The accountable coordinator synthesizes disagreements. This is
+guidance plus an audit trail, never a required number of agents, a fixed graph, a vendor
+rule, or an engine gate (D8).
+
+**Context.** Differentiating whole sessions ("strong parent, cheap child") was analyzed
+and rejected: it complicates cost accounting and can downgrade the very coordinator
+that must plan and judge the layer. Uniform strong coordinators avoid both problems,
+while per-spawn tiers control the bulk worker cost. Earlier vendor-specific chains did
+produce useful independent review, but hard-coded one graph and repeated volatile model
+names in prompts. The frozen roster preserves that diversity benefit while allowing the
+coordinator to adapt to availability, task coupling, cost, and live evidence.
+
+**Consequences.** Stock prompts name semantic tiers and roster entries, never model IDs
+or required vendors. Repository config may omit unavailable canonical mappings and may
+add a clearly explained project-local tier; the frozen roster still renders every
+canonical cell for every enabled family and marks missing mappings unavailable. Stock
+prompts use `frontier`/`strong`/`standard`/`economy` and inspect that availability.
+With `default_tier` set, the tier derives `team_harness_agent_models` and
+`team_harness_agent_reasoning_efforts`, so concrete model IDs live in one place. The
+engine validates roster shape and records requested/effective harness, model, and
+effort; it does not judge whether a model deserves its label or reject a coordinator's
+choice. Parallel delegates write separate findings or trace artifacts rather than
+racing to edit one canonical plan or check set. If only one family is usable, the
+coordinator proceeds autonomously and records the limitation when material. Do not add
+per-depth model allowlists, spend vetoes, review quotas, or coordinator-model
+differentiation per layer.
 
 ## D10. Durable loop layers recurse; harness subagents remain dynamic delegations
 
 **Decision.** A durable loop layer is one loopy session with a scoped goal, state,
-decisions, evals, attempts, and optional child. One-layer, planner/dispatcher, and
-deeper systems compose the same session node and parent→child protocol. Only the
-deepest session owns a live loopy assignment.
+plan, decisions, accepted-work ledger, semantic handoff, attempts, optional eval
+evidence, and optional child. One-layer, planner/dispatcher, and deeper systems compose
+the same session node and parent→child protocol. Only the deepest session owns a live
+loopy assignment. The workflow contract names one persistent orchestration role that
+owns the layer's plan, handoff, and completion decision.
 
 Inside that assignment, the team-harness coordinator remains free to choose a dynamic
 team, roles, models, ordering, retries, and follow-ups. Spawned agents—including a
@@ -327,10 +381,19 @@ nested `type=harness` coordinator—are delegates in the current layer unless th
 owning workflow explicitly publishes a child-session request.
 
 Every attempt receives a frozen assignment with loop identity, role, responsibility,
-and worker-local absolute state/output paths. Team-harness derives a smaller absolute
-assignment for each direct spawn. Durable records use validated logical references so
-they survive a moved checkout. Child request/input bytes are copied into the child's
-immutable `inputs/` area so later parent edits cannot change accepted work.
+and worker-local absolute state/output paths. It also receives the complete frozen
+workflow roster, an attempt-frozen scheduler view with recent mechanical history and a
+clearly conditional next-workflow forecast, and D9's frozen harness/model capability
+roster. The forecast says what would run next if the current attempt returns normally
+without terminal control, child dispatch, stop, or failure; it is context, not a
+promise or eligibility gate. This lets an orchestrator avoid duplicating work that a
+scheduled reviewer or evaluator is already due to perform.
+
+Team-harness derives a smaller absolute assignment for each direct spawn. Durable
+records use validated logical references so they survive a moved checkout. Child
+request/input bytes are copied into the child's immutable `inputs/` area so later
+parent edits cannot change accepted work. The workflow roster describes scheduled
+Loopy roles, not a predicted harness-subagent graph; those delegates remain dynamic.
 
 **Context.** “Inner loop,” “child,” and “subagent” blurred durable session depth,
 workflow roles, and short-lived processes. Encoding a fixed agent graph would weaken
@@ -339,63 +402,97 @@ delegates unsure of their layer and paths.
 
 **Consequences.** D2 still permits parallel harness agents inside one assignment but
 not parallel loopy workers. Ownership metadata is accountability, not an ACL or model
-allowlist (D8/D9). The same edge is tested through three active depths. Provider-native
-nested actors are recorded only when observable. See the
+allowlist (D8/D9). Prompts should encourage independent parallel analysis and review by
+other enabled harness families while leaving team shape to the coordinator. The same
+edge is tested through three active depths. Provider-native nested actors are recorded
+only when observable. See the
 [binding design](designs/recursive-loop-layer-contract.md) for the full contract and
 legacy boundary.
 
-## D11. Every session evaluates its own goal and names its terminal-control owner
+## D11. Every session's orchestrator owns completion; evals are optional evidence
 
-**Decision.** Every durable session evaluates its own scoped goal. A child verdict is
-evidence for its parent, never proof that the parent's broader goal is complete. Each
-workflow contract names the check author, runner, task-acceptance owner, terminal
-`goal_met` owner, and terminal-blocker reporters. In `inner_outer_eval`, `outer`
-records task acceptance/readiness and only `eval_runner` may request success.
+**Decision.** Every durable session owns a scoped goal and names exactly one persistent
+orchestration role that owns the layer plan, integrates evidence, publishes the semantic
+handoff, and decides when that goal is complete. In the stock sets:
 
-The canonical eval receipt binds the verdict to session/goal identity, exact check
-definitions, producer/harness identity, judge settings, raw and canonical report
-hashes, and evaluated git state. `goal_check.json` is a matching iteration projection;
-successful v2 control cites the same receipt. The engine validates provenance and
-all-pass mechanics but does not reinterpret the LLM judge's semantic conclusion.
+- `inner_outer_eval`: `outer` owns task selection and acceptance, the layer handoff,
+  and terminal `goal_met`; and
+- `pm_planner_dispatcher`: `planner` owns the program plan, child acceptance, root
+  handoff, and terminal `goal_met`.
 
-Both success and D5 blocker control must identify the exact current
-session/workflow/attempt and come from a role named by the frozen workflow contract.
-A spawned agent reports to its coordinator; it cannot leave durable control for
-another layer or later attempt.
+A child outcome is evidence for its parent, never proof that the parent's broader goal
+is complete. Eval reviewer/runner roles, when configured or dynamically invoked, are
+evidence producers. They may author or run checks on their schedule and publish
+provenance-rich observations for a later orchestrator attempt. The orchestrator may
+also run or delegate an eval directly, wait for a due scheduled eval role shown in its
+scheduler view, rerun or supersede an observation, or decide that evaluation is
+unnecessary. The stock PM workflow therefore needs only planner and dispatcher;
+program-level prepared evals run near completion when the target goal asks the planner
+to run them.
 
-**Context.** Before D11, the one-layer prompts gave both `outer` and `eval_runner`
-paths to close the session, so outer could stop before eval ran. The PM set could
-similarly close a root after reviewing child evidence without a separate root-goal
-evaluation.
-That ambiguity becomes more dangerous at three depths: a leaf may correctly finish
-its task while the feature integration or release goal remains incomplete. Existing
-`goal_check.json` also lacks enough provenance to prove exactly what goal, checks,
-judge, and repository state it evaluated.
+Successful control must identify the exact current session, workflow, and attempt; come
+from the completion role frozen in the workflow contract; and contain a non-empty
+reasoned completion disposition. It may cite the evidence considered, but evidence
+references are not required to be non-empty. An eval receipt is optional and
+need not come from the same attempt. When cited, the engine strictly validates its
+session/goal identity, check definitions, producer/harness identity, judge settings,
+declared runner role, raw and canonical report hashes, and evaluated git state. It
+validates provenance, not the weight the orchestrator gives the verdict. An absent or
+malformed advisory eval is
+a visible diagnostic; it does not turn a mechanically completed harness invocation into
+failure or starve the orchestration role.
 
-**Consequences.** D3 mechanical success and D4 LLM-as-judge semantics remain
-unchanged. Receipt checks are structural validation with a repair path, not a new
-semantic scheduler gate (D8). Readiness remains prompt context under mechanical eval
-cadence. `unresolvable_error` remains D5's last resort and needs no passing eval.
-Malformed v2 control is archived and bounded as repairable protocol failure. Legacy
-sessions retain their historical provenance. See the
-[binding design](designs/recursive-loop-layer-contract.md).
+D5 terminal-blocker control retains exact identity, allowed-role, attempted-route, and
+evidence requirements. A spawned delegate reports upward to its harness coordinator; it
+cannot publish durable control for another role, attempt, or layer.
+
+**Context.** The first one-layer prompt made `outer` the persistent planner and used
+scheduled evaluators as occasional independent observations. The first PM workflow had
+only `planner` and `dispatcher`, with planner owning the program decision. The v2
+provenance work fixed real stale/sibling/goal ambiguity, but overcorrected by moving
+completion authority to `eval_runner` and requiring a same-attempt passing eval. That
+made one advisory mechanism mandatory, duplicated evaluation at PM and child layers,
+and could prevent a smart orchestrator from finishing despite stronger direct evidence.
+The required boundary is exact identity and truthful provenance, not semantic deference
+to a particular scheduled role.
+
+**Consequences.** Remove terminal control from the eval sub-contract and represent the
+orchestration/completion role at top level. Remove the universal same-attempt passing
+receipt and `goal_check.json` prerequisite. Invalid advisory eval output becomes a
+durable diagnostic rather than `goal_check_broken` or a generic workflow failure.
+`inner_outer_eval` remains fully standalone: root and nested sessions use identical
+planning, optional-evidence, handoff, and completion semantics. Fresh stock or explicitly
+amended-v3 sessions use the new contract; custom sets retain the version they declare,
+a contract file with no version remains pinned to the historical v2 default, and
+already-live sessions retain their frozen historical contract rather than changing
+authority midway. See the
+[binding design](designs/orchestrator-owned-completion-and-cross-harness-review.md).
 
 ## D12. Correctness state/evidence and exhaustive execution traces have separate retention contracts
 
 **Decision.** Compact facts required to schedule, recover, or justify acceptance stay
-with the session: topology, goals, assignments, progress, decisions, child handoffs,
-normalized results, and eval/git/delivery/recovery receipts. Detailed observable
+with the session: topology, goals, assignments, layer plans and accepted-work ledgers,
+progress, decisions, semantic handoffs, workflow/scheduler/harness rosters, normalized
+results, orchestration completion rationale, and optional eval plus
+git/delivery/recovery receipts. Detailed observable
 execution lives under separately gitignored `.loopy_loop/traces/`: prompts, visible
 turns, tool/spawn I/O, process/provider identity, streams, raw eval output, verbose git
 evidence, timing, and usage. Inputs are persisted before their provider calls.
+
+Independent analyses and reviewer transcripts stay in the trace plane. The accountable
+coordinator promotes conclusions that future attempts need into compact plan, decision,
+eval-definition, accepted-work, or handoff artifacts; continuity never depends on
+re-reading raw conversations. Raw eval bytes are validated when a canonical receipt is
+accepted and sealed; later citations trust that compact accepted receipt and subject
+identity rather than requiring retained trace bytes.
 
 Each attempt has one caller-owned, completeness-aware trace manifest. The coordinator
 creates it during dispatch; the worker and team-harness populate that same canonical
 tree. Matching completion or crash abandonment uses a write-ahead finalization record,
 then a hashed manifest and compact session-side seal receipt. Startup retries only
 after durable history proves the transition committed; an unavailable HTTP response
-is recorded as unavailable rather than invented. Trace I/O failure is observable but
-never becomes a semantic acceptance gate (D3/D8).
+is recorded as unavailable rather than invented. Trace I/O failure and advisory-eval
+failure are observable but never become semantic acceptance gates (D3/D8/D11).
 
 **Context.** Before this decision, execution records were split inconsistently:
 session-local worker artifacts lived under harness outputs, while team-harness 0.4.0

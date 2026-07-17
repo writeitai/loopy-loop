@@ -29,22 +29,33 @@ from loopy_loop.sessions import child_sessions_dir_path
 from loopy_loop.sessions import children_path
 from loopy_loop.sessions import control_path
 from loopy_loop.sessions import control_rejected_dir_path
+from loopy_loop.sessions import current_state_path
+from loopy_loop.sessions import decisions_dir_path
 from loopy_loop.sessions import delivery_receipts_dir_path
 from loopy_loop.sessions import eval_checks_dir_path
 from loopy_loop.sessions import eval_readiness_dir_path
 from loopy_loop.sessions import eval_receipts_dir_path
+from loopy_loop.sessions import eval_state_path
 from loopy_loop.sessions import file_sha256
 from loopy_loop.sessions import finished_path
 from loopy_loop.sessions import git_receipts_dir_path
 from loopy_loop.sessions import goal_contract_path
+from loopy_loop.sessions import handoff_path
+from loopy_loop.sessions import harness_capability_roster_path
+from loopy_loop.sessions import inputs_dir_path
+from loopy_loop.sessions import layer_plan_path
 from loopy_loop.sessions import parent_acceptance_dir_path
 from loopy_loop.sessions import project_state_dir_path
 from loopy_loop.sessions import protocol_failures_dir_path
+from loopy_loop.sessions import scheduler_view_path
 from loopy_loop.sessions import session_dir_path
 from loopy_loop.sessions import session_goal_path
+from loopy_loop.sessions import session_outcome_path
 from loopy_loop.sessions import state_path
+from loopy_loop.sessions import tasks_dir_path
 from loopy_loop.sessions import user_updates_journal_path
 from loopy_loop.sessions import workflow_contract_path
+from loopy_loop.sessions import workflow_roster_path
 from loopy_loop.sessions import workflow_snapshot_dir_path
 from loopy_loop.sessions import write_json_atomic
 from loopy_loop.sessions import write_text_atomic
@@ -369,12 +380,13 @@ def build_attempt_assignment(
         raise AssignmentContractError(
             "attempt snapshot is not bound to the session workflow contract"
         )
+    is_v3 = contract.session_protocol_version == 3
     parent_root = (
         session_dir_path(
             repo_root=root, session_id=manifest.parent_session_id
         ).resolve()
         if manifest.parent_session_id
-        else session_root
+        else (None if is_v3 else session_root)
     )
     root_session_root = session_dir_path(
         repo_root=root, session_id=manifest.root_session_id
@@ -386,12 +398,52 @@ def build_attempt_assignment(
         workflow_id=task.workflow_id,
         attempt_id=task.attempt_id or "legacy",
     ).parent.resolve()
-    paths = {
+    scheduler_path = scheduler_view_path(
+        repo_root=root,
+        session_id=task.session_id,
+        iteration=task.iteration,
+        workflow_id=task.workflow_id,
+        attempt_id=task.attempt_id or "legacy",
+    )
+    capability_roster = harness_capability_roster_path(
+        repo_root=root, session_id=manifest.root_session_id
+    )
+    paths: dict[str, Path | None] = {
         "repo_root": root,
         "root_session_root": root_session_root,
         "root_state": state_path(repo_root=root, session_id=manifest.root_session_id),
         "session_root": session_root,
         "parent_session_root": parent_root,
+        "layer_goal": session_goal_path(repo_root=root, session_id=task.session_id),
+        "layer_goal_contract": goal_contract_path(
+            repo_root=root, session_id=task.session_id
+        ),
+        "layer_inputs": inputs_dir_path(repo_root=root, session_id=task.session_id),
+        "layer_plan": layer_plan_path(repo_root=root, session_id=task.session_id),
+        "layer_tasks": tasks_dir_path(repo_root=root, session_id=task.session_id),
+        "layer_current_state": current_state_path(
+            repo_root=root, session_id=task.session_id
+        ),
+        "layer_decisions": decisions_dir_path(
+            repo_root=root, session_id=task.session_id
+        ),
+        "layer_finished_ledger": finished_path(
+            repo_root=root, session_id=task.session_id
+        ),
+        "layer_eval_state": eval_state_path(repo_root=root, session_id=task.session_id),
+        "layer_handoff": handoff_path(repo_root=root, session_id=task.session_id),
+        "session_state": state_path(repo_root=root, session_id=task.session_id),
+        "session_outcome": session_outcome_path(
+            repo_root=root, session_id=task.session_id
+        ),
+        "workflow_contract": workflow_contract_path(
+            repo_root=root, session_id=task.session_id
+        ),
+        "workflow_roster": workflow_roster_path(
+            repo_root=root, session_id=task.session_id
+        ),
+        "scheduler_view": scheduler_path,
+        "harness_capability_roster": capability_roster,
         "goal": session_goal_path(repo_root=root, session_id=task.session_id),
         "goal_contract": goal_contract_path(repo_root=root, session_id=task.session_id),
         "project_state": project_state_dir_path(
@@ -399,8 +451,10 @@ def build_attempt_assignment(
         ),
         "finished_ledger": finished_path(repo_root=root, session_id=task.session_id),
         "eval_checks": eval_checks_dir_path(repo_root=root, session_id=task.session_id),
-        "eval_readiness": eval_readiness_dir_path(
-            repo_root=root, session_id=task.session_id
+        "eval_readiness": (
+            None
+            if is_v3
+            else eval_readiness_dir_path(repo_root=root, session_id=task.session_id)
         ),
         "eval_receipts": eval_receipts_dir_path(
             repo_root=root, session_id=task.session_id
@@ -421,6 +475,7 @@ def build_attempt_assignment(
         "user_inputs": user_updates_journal_path(
             repo_root=root, session_id=task.session_id
         ),
+        "session_control": control_path(repo_root=root, session_id=task.session_id),
         "control": control_path(repo_root=root, session_id=task.session_id),
         "control_rejected": control_rejected_dir_path(
             repo_root=root, session_id=task.session_id
@@ -439,6 +494,31 @@ def build_attempt_assignment(
         "trace_root": trace_root.resolve(),
         "raw_eval_output": trace_root.resolve() / "eval",
     }
+    if is_v3:
+        paths.update(
+            {
+                "parent_goal": (
+                    session_goal_path(
+                        repo_root=root, session_id=manifest.parent_session_id
+                    )
+                    if manifest.parent_session_id
+                    else None
+                ),
+                "parent_goal_contract": (
+                    goal_contract_path(
+                        repo_root=root, session_id=manifest.parent_session_id
+                    )
+                    if manifest.parent_session_id
+                    else None
+                ),
+                "parent_handoff": (
+                    handoff_path(repo_root=root, session_id=manifest.parent_session_id)
+                    if manifest.parent_session_id
+                    else None
+                ),
+                "accepted_child_request": None,
+            }
+        )
     accepted_request_ref = goal_contract.accepted_request_ref
     if accepted_request_ref is not None:
         try:
@@ -460,7 +540,10 @@ def build_attempt_assignment(
             raise AssignmentContractError(
                 "accepted child request no longer matches its frozen hash"
             )
+        paths["accepted_child_request"] = accepted_request_path
         paths["accepted_request"] = accepted_request_path
+    elif is_v3:
+        paths["accepted_request"] = None
     input_artifacts: list[dict[str, str]] = []
     for item in goal_contract.inputs:
         try:
@@ -482,9 +565,34 @@ def build_attempt_assignment(
                 "absolute_path": str(input_path.resolve()),
             }
         )
-    absolute_paths = {key: str(path.resolve()) for key, path in paths.items()}
+    absolute_paths = {
+        key: str(path.resolve()) if path is not None else None
+        for key, path in paths.items()
+    }
     role = contract.roles.get(task.workflow_id)
+    provenance = {
+        "repository_id": repository_id(repo_root=root),
+        "root_config_sha256": descriptor.root_config_snapshot_sha256,
+        "workflow_config_sha256": descriptor.workflow_config_sha256,
+        "workflow_prompt_sha256": descriptor.workflow_prompt_sha256,
+        "workflow_contract_sha256": descriptor.workflow_contract_sha256,
+        "goal_contract_sha256": file_sha256(
+            path=goal_contract_path(repo_root=root, session_id=task.session_id)
+        ),
+        "git_before_ref": git_before_ref,
+    }
+    for label, path in (
+        (
+            "workflow_roster",
+            workflow_roster_path(repo_root=root, session_id=task.session_id),
+        ),
+        ("scheduler_view", scheduler_path),
+        ("harness_capability_roster", capability_roster),
+    ):
+        if path.is_file():
+            provenance[f"{label}_sha256"] = file_sha256(path=path)
     return AttemptAssignment(
+        schema_version=(2 if is_v3 else 1),
         identity={
             "root_session_id": manifest.root_session_id,
             "session_id": task.session_id,
@@ -496,6 +604,7 @@ def build_attempt_assignment(
             "workflow_id": task.workflow_id,
             "iteration": task.iteration,
             "attempt_id": task.attempt_id,
+            "session_protocol_version": contract.session_protocol_version,
         },
         actor={
             "kind": "harness_coordinator",
@@ -520,16 +629,23 @@ def build_attempt_assignment(
             "parent_session": "read/reference; communicate through typed receipts",
             "engine_state": "read only",
         },
-        provenance={
-            "repository_id": repository_id(repo_root=root),
-            "root_config_sha256": descriptor.root_config_snapshot_sha256,
-            "workflow_config_sha256": descriptor.workflow_config_sha256,
-            "workflow_prompt_sha256": descriptor.workflow_prompt_sha256,
-            "workflow_contract_sha256": descriptor.workflow_contract_sha256,
-            "goal_contract_sha256": file_sha256(
-                path=goal_contract_path(repo_root=root, session_id=task.session_id)
+        provenance=provenance,
+        context={
+            "layer": {
+                "session_id": task.session_id,
+                "root_session_id": manifest.root_session_id,
+                "parent_session_id": manifest.parent_session_id,
+                "depth": manifest.depth,
+                "layer_kind": manifest.layer_kind,
+                "workflow_role": task.workflow_id,
+            },
+            "workflow_roster": _read_optional_json_object(
+                path=workflow_roster_path(repo_root=root, session_id=task.session_id)
             ),
-            "git_before_ref": git_before_ref,
+            "scheduler_view": _read_optional_json_object(path=scheduler_path),
+            "harness_capability_roster": _read_optional_json_object(
+                path=capability_roster
+            ),
         },
     )
 
@@ -546,6 +662,24 @@ def write_attempt_assignment(*, path: Path, assignment: AttemptAssignment) -> No
         )
         path.rename(conflict)
     write_json_atomic(path=path, payload=assignment.model_dump(mode="json"))
+
+
+def _read_optional_json_object(*, path: Path) -> dict[str, object] | None:
+    """Load compact assignment context when its canonical artifact exists."""
+
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise AssignmentContractError(
+            f"assignment context is unreadable at {path}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise AssignmentContractError(
+            f"assignment context must be a JSON object at {path}"
+        )
+    return payload
 
 
 def _load_model(*, path: Path, model: type, label: str):

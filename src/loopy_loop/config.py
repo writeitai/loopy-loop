@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -16,6 +17,8 @@ from pydantic import model_validator
 from pydantic import ValidationError
 import yaml
 
+from loopy_loop.models import HarnessCapabilityBundle
+from loopy_loop.models import HarnessCapabilityRoster
 from loopy_loop.models import SAFE_DURABLE_ID_PATTERN
 from loopy_loop.models import WorkflowEvalContract
 from loopy_loop.models import WorkflowRoleContract
@@ -45,6 +48,15 @@ DEFAULT_WORKFLOW_DESCRIPTION = ""
 DEFAULT_WORKFLOW_PRIORITY = 0
 DEFAULT_WORKFLOW_RUN_ON_START = False
 DEFAULT_WORKFLOW_EMITS_GOAL_CHECK = False
+CANONICAL_MODEL_TIER_DESCRIPTIONS: dict[str, str] = {
+    "frontier": (
+        "maximum-capability work: the hardest planning, architecture, "
+        "adversarial review, and eval-policy/check design"
+    ),
+    "strong": "complex high-capability reasoning, implementation, and review",
+    "standard": "balanced ordinary implementation, analysis, and review",
+    "economy": "bounded mechanical work, reconnaissance, and low-risk checks",
+}
 
 
 class ConfigError(Exception):
@@ -504,20 +516,19 @@ def resolve_model_tiers(*, config: RootConfig) -> RootConfig:
 
     Applied once, on the config freshly loaded from YAML (never on a config
     reconstructed from a session snapshot — snapshots carry only the resolved
-    values). Two effects when ``model_tiers`` is non-empty:
+    values). It has two effects:
 
-    - ``default_tier`` (if set) derives ``team_harness_agent_models`` /
+    - ``default_tier`` (when declared) derives ``team_harness_agent_models`` /
       ``team_harness_agent_reasoning_efforts`` so per-agent spawn defaults
       and the tier table cannot drift apart.
     - A rendered tier-guidance block is appended to
       ``team_harness_system_prompt_extension`` so every harness coordinator
-      in the session tree knows which named tiers exist and how to select
-      one per spawned agent. This is guidance, not enforcement (D8):
+      sees every enabled family and canonical tier, including unavailable
+      cells, and knows how to select one per spawned agent. This is guidance,
+      not enforcement (D8):
       adherence is checked by reviewers via the harness audit trail, never
       gated.
     """
-    if not config.model_tiers:
-        return config
     update: dict[str, Any] = {}
     if config.default_tier is not None:
         tier = config.model_tiers[config.default_tier]
@@ -538,38 +549,148 @@ def resolve_model_tiers(*, config: RootConfig) -> RootConfig:
 
 
 def render_model_tier_guidance(*, config: RootConfig) -> str:
-    """Render the coordinator-facing tier table from ``model_tiers``.
+    """Render the coordinator-facing family/tier matrix from root config.
 
     Workflow prompts should refer to tier NAMES only; this block is the one
     place tier names expand to model ids, so model churn stays a one-line
-    config edit.
+    config edit. Missing mappings stay visible as unavailable instead of
+    silently inheriting a harness default of unknown semantic strength.
     """
+    harnesses = _derive_harness_capability_matrix(config=config)
     lines = [
         "Model tier policy:",
-        "- When spawning worker agents, pass the tier's `model` and structured "
-        "`effort` arguments together. Omit both to use the default tier; do not "
-        "translate effort into raw worker CLI flags.",
-        "- Named tiers:",
+        "- Enabled harness families: "
+        + (", ".join(harnesses) if harnesses else "none"),
+        "- When spawning nested agents or harnesses, choose an enabled family "
+        "and an available tier, then pass the selected family, `model`, and "
+        "structured `effort` arguments explicitly. If a bundle has no effort, "
+        "pass its family and model without inventing an effort value.",
+        "- Missing family/tier mappings are unavailable. Do not guess a model "
+        "or infer semantic strength from a harness default.",
+        "- Canonical tier meanings:",
     ]
-    for tier_name, agents in config.model_tiers.items():
+    for tier_name, description in CANONICAL_MODEL_TIER_DESCRIPTIONS.items():
+        lines.append(f"  - {tier_name}: {description}")
+    lines.append("- Configured tier matrix:")
+    for tier_name in _ordered_model_tier_names(config=config):
         parts: list[str] = []
-        for agent_name, spec in agents.items():
-            part = f"{agent_name} model={spec.model}"
-            if spec.effort is not None:
-                part += f" effort={spec.effort}"
+        for family, tiers in harnesses.items():
+            bundle = tiers[tier_name]
+            if not bundle.available:
+                parts.append(f"{family} unavailable")
+                continue
+            part = f"{family} model={bundle.model}"
+            if bundle.effort is not None:
+                part += f" effort={bundle.effort}"
             parts.append(part)
         lines.append(f"  - {tier_name}: " + "; ".join(parts))
     if config.default_tier is not None:
         lines.append(
-            f"- Default tier: {config.default_tier}. It is already applied as "
-            "the spawn defaults; omitting model/effort uses it."
+            f"- Default tier: {config.default_tier}. It is applied to the "
+            "harness defaults, but nested delegates should still receive the "
+            "selected roster bundle explicitly."
         )
     lines.append(
-        "- Choose a stronger tier for review, evaluation authoring, and "
-        "planning work, or when your assignment names a tier; choose a "
-        "cheaper tier for routine mechanical work."
+        "- Prefer different enabled harness families for independent analysis "
+        "and review when that materially improves confidence. Prefer frontier "
+        "for high-stakes review and eval-policy/check design when available; "
+        "these are judgment defaults, not quotas or completion gates."
     )
     return "\n".join(lines)
+
+
+def build_harness_capability_roster(
+    *,
+    config: RootConfig,
+    root_session_id: str,
+    root_execution_config_sha256: str,
+    created_at: datetime,
+) -> HarnessCapabilityRoster:
+    """Build the immutable harness/tier roster for one root session tree.
+
+    The caller supplies the timestamp and frozen config digest so this helper
+    is deterministic and can be used before the roster is written. Children
+    should reuse that root artifact rather than rebuilding it from live config.
+    """
+
+    return HarnessCapabilityRoster(
+        root_session_id=root_session_id,
+        root_execution_config_sha256=root_execution_config_sha256,
+        created_at=created_at,
+        coordinator={
+            "provider": config.team_harness_provider,
+            "model": config.team_harness_model,
+        },
+        tiers=_model_tier_descriptions(config=config),
+        harnesses=_derive_harness_capability_matrix(config=config),
+        default_tier=config.default_tier,
+    )
+
+
+def _model_tier_descriptions(*, config: RootConfig) -> dict[str, str]:
+    """Return canonical descriptions plus neutral labels for custom tiers."""
+
+    descriptions = dict(CANONICAL_MODEL_TIER_DESCRIPTIONS)
+    for tier_name in config.model_tiers:
+        descriptions.setdefault(tier_name, "project-local configured bundle")
+    return descriptions
+
+
+def _ordered_model_tier_names(*, config: RootConfig) -> list[str]:
+    """Return canonical tier names first, followed by configured custom tiers."""
+
+    canonical_names = list(CANONICAL_MODEL_TIER_DESCRIPTIONS)
+    custom_names = [
+        tier_name
+        for tier_name in config.model_tiers
+        if tier_name not in canonical_names
+    ]
+    return [*canonical_names, *custom_names]
+
+
+def _derive_harness_capability_matrix(
+    *, config: RootConfig
+) -> dict[str, dict[str, HarnessCapabilityBundle]]:
+    """Materialize every enabled family against every canonical/custom tier.
+
+    An explicit tier mapping always wins. A legacy flat per-family model is
+    represented as the configured ``standard`` default when no explicit
+    standard mapping exists. No semantic tier is inferred from an opaque
+    harness default.
+    """
+
+    tier_names = _ordered_model_tier_names(config=config)
+    harnesses: dict[str, dict[str, HarnessCapabilityBundle]] = {}
+    for family in dict.fromkeys(config.team_harness_agents):
+        bundles: dict[str, HarnessCapabilityBundle] = {}
+        for tier_name in tier_names:
+            spec = config.model_tiers.get(tier_name, {}).get(family)
+            if spec is not None:
+                bundles[tier_name] = HarnessCapabilityBundle(
+                    available=True,
+                    model=spec.model,
+                    effort=spec.effort,
+                    source="configured_tier",
+                )
+                continue
+            configured_default_model = config.team_harness_agent_models.get(family)
+            if (
+                tier_name == "standard"
+                and config.default_tier is None
+                and configured_default_model is not None
+            ):
+                bundles[tier_name] = HarnessCapabilityBundle(
+                    available=True,
+                    model=configured_default_model,
+                    effort=config.team_harness_agent_reasoning_efforts.get(family),
+                    source="configured_default",
+                )
+                continue
+            bundles[tier_name] = HarnessCapabilityBundle(
+                available=False, source="unavailable"
+            )
+        harnesses[family] = bundles
+    return harnesses
 
 
 def load_workflow_config(*, workflow_dir: Path) -> WorkflowConfig:

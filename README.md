@@ -6,8 +6,8 @@
 
 `loopy-loop` runs long-running AI agent workflows inside your repository.
 It turns a goal file in your repository into an inspectable sequence of agent
-iterations: plan, implement, evaluate, record evidence, and continue until the
-goal is met or the loop hits a terminal blocker.
+iterations: plan, implement, review, optionally evaluate, record evidence, and
+continue until the goal is met or the loop hits a terminal blocker.
 
 The value is control and durability. Instead of asking one agent to solve a
 large task in one fragile chat, loopy-loop gives each durable goal layer a
@@ -48,15 +48,13 @@ For development inside this repository:
 uv sync --extra dev
 ```
 
-Version 0.7's recursive contract spans three owned projects. It requires
-`team-harness>=0.5.0` for caller-owned run records, pre-call coordinator input,
-spawn assignment envelopes, and canonical stdout/stderr capture; it requires
-`eval-banana>=0.3.5` for hermetic `--no-project-config` evaluation, explicit
-harness-agent validation, and the public canonical check-definition digest
-used to verify eval receipts. Version 0.3.5 also retains the exact judge input
-and gives every per-check result, stream, and deterministic evidence directory
-a common collision-safe stem inside the caller-owned eval trace. Install all
-three companion changes together.
+The stock protocol-v3 contract spans three owned projects. It requires
+`team-harness>=0.5.4` for caller-owned run records, nested assignment context,
+capability-roster propagation, and canonical agent streams. When a workflow
+uses evaluation, `eval-banana>=0.3.5` supplies hermetic
+`--no-project-config` runs, explicit harness selection, canonical check
+digests, and retained judge evidence. Install compatible releases of all three
+projects together.
 For coordinated development across the repositories, install the corresponding
 team-harness and eval-banana checkouts as editable dependencies:
 
@@ -64,9 +62,9 @@ team-harness and eval-banana checkouts as editable dependencies:
 uv pip install -e /path/to/team-harness -e /path/to/eval-banana
 ```
 
-An older dependency is not a reduced-fidelity v2 mode: a fresh v2 session
-fails registration clearly if the worker cannot advertise the required
-capabilities.
+An older dependency is not a reduced-fidelity mode: a fresh stock session
+fails registration clearly if its worker or harness cannot advertise the
+required protocol-v3 capabilities.
 
 ## Install the Agent Skill
 
@@ -100,6 +98,18 @@ This is the recommended starting template. It creates:
 - additive `.gitignore` entries for session state, traces, the trace-finalization
   outbox, repository identity, and root state/lock/archive files
 
+For a double loop, initialize the program-level template instead:
+
+```bash
+loopy init --template pm_planner_dispatcher
+```
+
+Its planner works in high-level phase or milestone outcomes. Its dispatcher
+turns one selected outcome into an `inner_outer_eval` child session, whose
+outer role owns the detailed leaf plan. The program layer deliberately has no
+scheduled eval roles; the planner may coordinate optional program-level or
+goal-required final evaluation itself.
+
 `loopy init` is idempotent. It creates missing files and leaves existing files
 alone — except `.gitignore`, which is updated additively with all runtime ignore
 rules.
@@ -122,9 +132,10 @@ Completion criteria:
 - README documents required environment variables.
 ```
 
-Keep the goal specific enough that a reviewer or eval workflow can decide
-whether the loop is done. For one-off overrides, start the coordinator with
-`--goal-file PATH`; the file is copied into the session as `goal.md`.
+Keep the goal specific enough that its orchestrator and reviewers can assess
+whether the scoped outcome is complete. For one-off overrides, start the
+coordinator with `--goal-file PATH`; the file is copied into the session as
+`goal.md`.
 
 ## Run the Loop
 
@@ -167,47 +178,77 @@ At a high level:
 1. `loopy init` writes a root config, a goal file, and workflow files into the
    target repo.
 2. `loopy coordinator` loads `loopy_loop_config.yaml`, freezes the goal and
-   workflow-set contract, creates a v2 root session under
+   stock protocol-v3 workflow contract, creates a root session under
    `.loopy_loop/sessions/`, and exposes `/register` and `/finished`.
-3. A v2 worker advertises its protocol/capabilities and repository identity.
-   The coordinator assigns work only to a matching checkout, freezes the exact
-   workflow config/prompt/contract and assignment, creates the active attempt
-   trace, and returns one identity-bound attempt with its assignment hash.
-4. Before calling a model, the worker reopens and verifies that same trace,
-   records the exact task response, verifies the frozen `assignment.json`, and
-   writes the rendered prompt and git-before evidence. The assignment gives the
-   harness coordinator absolute paths for its own session layer while durable
-   receipts continue to use portable logical references.
-5. `team-harness` runs the coordinator model. It may dynamically spawn Codex,
-   Claude Code, Gemini, or other configured agents; each direct spawn receives
-   an automatic assignment envelope identifying its parent attempt, delegated
-   task, relevant state paths, and output directory.
-6. The worker records the normalized result and compact evidence with the
-   session and posts a completion bound to the exact worker, repository,
-   attempt, and assignment hash. The coordinator records the exact observed
-   completion response (or an explicit unavailable status after interruption)
-   and then seals detailed observable execution under
+3. A protocol-v3 worker advertises its Loopy and team-harness capabilities plus
+   repository identity. The coordinator dispatches only to a matching checkout
+   with the required capability-roster context support.
+4. For each attempt, the coordinator freezes the exact workflow
+   config/prompt/contract, an assignment, and a conditional scheduler view.
+   The assignment gives the harness coordinator absolute paths to its scoped
+   goal, plan, tasks, decisions, handoff, workflow roster, scheduler view,
+   capability roster, outputs, and trace directory. Durable receipts still use
+   portable logical references.
+5. Before calling a model, the worker verifies that assignment and its trace,
+   records the exact task response, and writes rendered prompt and git-before
+   evidence.
+6. `team-harness` runs the coordinator model. It may dynamically spawn Codex,
+   Claude Code, Gemini, or another enabled family. Each direct spawn receives
+   the current layer identity, relevant absolute state paths, the frozen
+   capability roster, and its focused delegated assignment. The workflow
+   coordinator remains accountable for integration.
+7. The worker posts a completion bound to the exact worker, repository,
+   attempt, and assignment hash. A successful iteration means the harness ran
+   without an execution error; it does not mean the work was semantically
+   accepted. The coordinator records and seals the observable execution under
    `.loopy_loop/traces/`.
-7. The coordinator checks structural protocol evidence, session-local eval and
-   control artifacts, child requests, and stop/budget conditions. Semantic
-   quality remains the responsibility of the workflow/eval agents (D3/D4).
+8. The coordinator enforces protocol facts such as identity, topology,
+   schemas, hashes, and reference containment. The workflow contract's durable
+   orchestrator decides semantic acceptance and completion from the available
+   evidence. A terminal protocol-v3 session receives a topology-neutral
+   `session_outcome.json` that links its control, handoff, and available
+   evidence.
 
 The `inner_outer_eval` template is organized around four workflows:
 
-- `outer`: reviews implementation evidence, accepts or returns work, maintains
-  the accepted ledger, and publishes eval-readiness context without closing
-  the session.
-- `inner`: dynamically plans/delegates and implements one focused unit in the
-  target repo; its harness coordinator integrates all spawned-agent work.
-- `eval_reviewer`: creates or refreshes outcome-oriented, session-scoped
-  eval-banana checks.
-- `eval_runner`: runs those checks, publishes the canonical eval receipt and
-  matching `goal_check.json`, and alone may request successful terminal control
-  for this layer.
+- `outer`: owns the layer plan, selects and accepts leaves, maintains compact
+  resumption state and the upward handoff, and alone decides successful
+  completion for this layer.
+- `inner`: implements and verifies the one leaf selected by `outer`, then
+  reports evidence upward. It does not create the layer plan or accept its own
+  work.
+- `eval_reviewer`: may create or refresh outcome-oriented, session-scoped
+  `harness_judge` checks as advisory evidence.
+- `eval_runner`: may run those checks and publish provenance-rich receipts for
+  `outer` to weigh. It does not write `goal_check.json` or successful terminal
+  control.
 
-The loop does not hide state inside a chat transcript. Continuity comes from
-git plus compact files in `.loopy_loop/sessions/<session_id>/`; detailed
-execution records live separately in `.loopy_loop/traces/`.
+The `pm_planner_dispatcher` template has two durable roles:
+
+- `planner`: owns a high-level phase/milestone plan, accepts or reroutes child
+  outcomes, maintains the program handoff, and decides program completion.
+- `dispatcher`: faithfully turns the one selected milestone outcome into a
+  child request. It does not pre-plan the child's leaves or accept the child's
+  result.
+
+Evaluation is optional evidence in both sets. The completion owner can run or
+delegate checks, wait for a scheduled eval role, or decide from stronger
+repository, review, child, test, git, or delivery evidence. Protocol-v3
+`control.json` binds `goal_met` to the exact current orchestrator attempt;
+`evidence_refs`, plural `eval_receipt_refs`, and `handoff_ref` are optional,
+but any cited reference must validate. `unresolvable_error` remains the
+last-resort stop for a genuinely terminal blocker after autonomous routes are
+exhausted.
+
+The loop does not hide state inside a chat transcript. Each layer has a visible
+semantic spine in `project_state/`—plan, stable task records, current state,
+decisions, accepted-work ledger, optional eval index, and rolling handoff. A
+session-frozen workflow roster explains every scheduled role; an
+attempt-frozen scheduler view forecasts the next role under explicit
+assumptions; and the root capability roster shows every enabled harness family
+across the configured strength tiers. Detailed prompts, model turns, tool and
+spawn I/O, raw eval reports, and verbose logs live separately in the gitignored
+trace tree.
 
 ## Repo Layout
 
@@ -231,12 +272,21 @@ target repo/
     │       ├── goal_contract.json
     │       ├── session.json
     │       ├── workflow_contract.json
+    │       ├── workflow_roster.json
+    │       ├── harness_capability_roster.json  # root, shared by session tree
     │       ├── state.json
-    │       ├── control.json
+    │       ├── control.json                    # written only to stop
+    │       ├── session_outcome.json            # terminal projection
     │       ├── inputs/{user_updates.jsonl,accepted_request.json,artifacts/}
     │       ├── project_state/
+    │       │   ├── plan.md
+    │       │   ├── tasks/
+    │       │   ├── current_state.md
+    │       │   ├── decisions/
+    │       │   ├── finished.md
+    │       │   ├── eval_state.md
+    │       │   └── handoff.json
     │       ├── eval_checks/
-    │       ├── eval_readiness/
     │       ├── eval_receipts/
     │       ├── child_requests/{pending,accepted,rejected}/
     │       ├── child_outcomes/
@@ -244,7 +294,9 @@ target repo/
     │       ├── git_receipts/
     │       ├── delivery_receipts/
     │       ├── trace_seals/
-    │       ├── iterations/
+    │       ├── iterations/<n>/<role>/workflow_snapshot/<attempt>/
+    │       │   ├── assignment.json
+    │       │   └── scheduler_view.json
     │       └── children/<child_session_id>/...
     ├── traces/<root>/sessions/<session>/attempts/<attempt>/
     └── trace_finalization_outbox/
@@ -290,28 +342,42 @@ Important rules:
 - `max_turns` is the maximum number of completed workflow iterations.
 - `team_harness_model` controls the team-harness coordinator model.
 - `team_harness_agent_models` controls default models for worker subprocesses.
-- `model_tiers` (optional) declares named worker tiers — tier name → agent →
-  `{model, effort}` — as the single source of truth for this repo's model
-  ids. Loopy renders the table into the harness system prompt so coordinators
-  can pass `spawn_agent(model=…, effort=…)` to select one bundle for a task
-  (guidance, not enforcement — see D8/D9 in `design/decisions.md`). The
-  per-spawn `effort` argument was introduced in team-harness 0.4.0. Loopy 0.7
-  requires team-harness 0.5.0 for the wider caller/trace contract, so current
-  installs always have it. With `default_tier` set, the named tier
-  derives `team_harness_agent_models` and
-  `team_harness_agent_reasoning_efforts` (the tier must cover every
-  configured agent); setting those mappings explicitly alongside
-  `default_tier` is a config error.
+- `model_tiers` (optional) maps semantic strength → enabled harness family →
+  `{model, effort}`. The four stock tiers are `frontier` for maximum-capability
+  and highest-stakes work, `strong` for complex work, `standard` for the
+  balanced default, and `economy` for bounded low-risk work. At root-session
+  creation, Loopy freezes every family/tier cell—including unavailable cells—
+  into `harness_capability_roster.json`; the assignment and team-harness caller
+  context carry that roster to coordinators and nested delegates. Agents choose
+  proportionately and are encouraged to use another enabled family for useful
+  independent review, especially during eval-check design. This remains
+  guidance, not a quota or semantic gate (D8/D9).
+
+  With `default_tier` set, that tier derives
+  `team_harness_agent_models` and
+  `team_harness_agent_reasoning_efforts`; it must cover every configured
+  family, and the two flat mappings must be omitted. Without `default_tier`,
+  flat per-family model settings appear as configured `standard` bundles.
 
   ```yaml
   model_tiers:
+    frontier:
+      codex: {model: "<frontier codex model>", effort: "<effort>"}
+      claude: {model: "<frontier claude model>", effort: "<effort>"}
+      gemini: {model: "<frontier gemini model>", effort: "<effort>"}
     strong:
-      codex: {model: "gpt-5.6-sol", effort: "xhigh"}
-      claude: {model: "claude-fable-5", effort: "max"}
+      codex: {model: "<strong codex model>", effort: "<effort>"}
+      claude: {model: "<strong claude model>", effort: "<effort>"}
+      gemini: {model: "<strong gemini model>", effort: "<effort>"}
+    standard:
+      codex: {model: "<standard codex model>", effort: "<effort>"}
+      claude: {model: "<standard claude model>", effort: "<effort>"}
+      gemini: {model: "<standard gemini model>", effort: "<effort>"}
     economy:
-      codex: {model: "gpt-5.6-terra", effort: "low"}
-      claude: {model: "claude-haiku-4-5"}
-  default_tier: "economy"
+      codex: {model: "<economy codex model>", effort: "<effort>"}
+      claude: {model: "<economy claude model>", effort: "<effort>"}
+      gemini: {model: "<economy gemini model>", effort: "<effort>"}
+  default_tier: "standard"
   ```
 - `team_harness_api_base` is normalized by loopy-loop: trailing slash stripped,
   `/v1` appended when missing.
@@ -350,7 +416,6 @@ must_follow: null
 not_before_iteration: 0
 run_on_start: false
 run_after_successes: null
-emits_goal_check: false
 description: ""
 ```
 
@@ -373,36 +438,35 @@ run_after_successes:
   every: 10
 ```
 
-- `emits_goal_check=true` lets a non-`goal_check` workflow write
-  `goal_check.json` as an eval artifact. Stopping still requires updating
-  session `control.json`.
-
-Each workflow set may declare `contract.yaml`. It names the layer kind, every
-workflow role's responsibility, accountable state paths, eval author/runner/
-goal-control roles, task-acceptance owner, terminal-blocker reporting roles,
-and whether the set uses the recursive child interface. This is accountability
-metadata and prompt context, not a filesystem ACL or semantic scheduler gate
-(D8). All built-in templates declare `session_protocol_version: 2`; an explicit
-contract that omits the field also selects v2. An older
-custom set without a contract receives a conservative derived protocol-v1 role
-contract and remains executable; add and validate an explicit v2 contract
-before expecting evidence-bound terminal control and child requests.
+Each workflow set declares `contract.yaml`. It names the layer kind, every
+scheduled role's responsibility and accountable state paths, the one
+orchestrator that owns planning/handoff/completion, optional advisory eval
+authors and runners, terminal-blocker reporting roles, and whether the set uses
+the recursive child interface. This is accountability metadata and prompt
+context, not a filesystem ACL or semantic scheduler gate (D8). The stock sets
+declare `session_protocol_version: 3`; the coordinator validates that the same
+orchestration role owns plan, handoff, and successful completion. Historical
+custom v1/v2 contracts remain resumable under the version frozen in their
+session.
 
 ## Output and Logging
 
 Each coordinator run creates a root under `.loopy_loop/sessions/`. Recursive
 workflow sets may create child sessions beneath it, but one worker still
 advances only the deepest active session. Session files hold compact durable
-truth: scoped goals, progress and decisions, task/recovery state, eval and
-control receipts, child handoffs, and git/delivery evidence.
+truth: scoped goals, the semantic state spine, workflow and capability rosters,
+attempt scheduler views, task/recovery state, optional eval receipts, child
+handoffs, control, terminal outcomes, and git/delivery evidence.
 
 Each attempt freezes its workflow sources and `assignment.json`. The
 assignment identifies the exact repository/session/workflow/attempt and gives
-the harness coordinator absolute paths to its own state and outputs. Durable
-receipts use logical `session:/`, `parent:/`, `root:/`, and `trace:` references
-so a stopped checkout can move. Team-harness gives every direct spawn its own
-absolute assignment/output paths and dynamic delegated task; the original
-coordinator remains accountable for integrating the result.
+the harness coordinator absolute paths to its own layer state and outputs,
+along with compact roster and scheduler context. Durable receipts use logical
+`session:/`, `parent:/`, `root:/`, and `trace:` references so a stopped checkout
+can move. Team-harness gives every direct spawn its own absolute
+assignment/output paths, current layer identity, dynamic delegated task, and
+inherited capability roster; the original coordinator remains accountable for
+integrating the result.
 
 Detailed observable execution goes to the separately gitignored
 `.loopy_loop/traces/<root>/sessions/<session>/attempts/<attempt>/` tree. It
@@ -415,24 +479,52 @@ known; it does not mean the attempt succeeded semantically.
 Use `loopy status` and `loopy events` for compact progress, and `loopy traces
 list` plus `loopy traces inspect` for attempt detail. The complete artifact and
 writer/reader reference is [docs/session-layout.md](docs/session-layout.md).
-Legacy v1 files remain readable on resume but are not the fresh-session write
-contract.
+Fresh stock workflow sets use protocol v3.
 
 ## Control and Completion
 
 Each session evaluates its own scoped goal. A delivery child may prove its task
 while its parent still needs integration or release work. In the packaged
-`inner_outer_eval` set, `outer` accepts task evidence, `eval_reviewer` authors
-LLM-as-judge checks, and only `eval_runner` may publish successful terminal
-control after a matching same-session eval receipt. Readiness informs prompts;
-it does not become a semantic scheduler gate.
+`inner_outer_eval` set, `outer` accepts task evidence and owns completion. In
+`pm_planner_dispatcher`, `planner` independently accepts child outcomes and
+owns program completion. Eval roles and dynamically spawned delegates report
+evidence to those orchestrators; they cannot complete another role's layer.
 
-The one D5 escape hatch is an identity-bound v2 `unresolvable_error`. It is for
+Successful protocol-v3 control is identity-bound to the exact current attempt
+and must come from the completion role frozen in the workflow contract:
+
+```json
+{
+  "schema_version": 3,
+  "control_id": "control-goal-met-id",
+  "state": "stopped",
+  "reason": "Why this scoped goal is complete",
+  "stop_reason": "goal_met",
+  "producer": {
+    "session_id": "session-id",
+    "workflow_id": "outer",
+    "attempt_id": "attempt-id"
+  },
+  "evidence_refs": [],
+  "eval_receipt_refs": [],
+  "handoff_ref": "session:/project_state/handoff.json",
+  "created_at": "2026-07-17T12:00:00Z"
+}
+```
+
+The three evidence fields are optional. An orchestrator does not need an eval
+to complete the goal. A missing, malformed, stale, non-passing, or conflicting
+advisory eval from an otherwise completed harness attempt is recorded as a
+diagnostic; it does not consume workflow-failure budget or become an engine
+veto. If control cites an artifact, however, its reference, hash, subject, and
+accepted provenance must be truthful.
+
+The one D5 escape hatch is an identity-bound v3 `unresolvable_error`. It is for
 a genuinely terminal blocker after autonomous alternatives are exhausted:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "control_id": "control-blocker-id",
   "state": "stopped",
   "reason": "specific terminal blocker",
@@ -449,14 +541,14 @@ a genuinely terminal blocker after autonomous alternatives are exhausted:
 ```
 
 Both successful and blocker control must identify the exact current
-session/workflow/attempt. A delegate reports its conclusion to the harness
-coordinator; it cannot publish a durable decision for another layer or a later
-attempt. Invalid v2 control is archived with repair diagnostics instead of
-being treated as semantic failure. Repeated broken protocol or workflow
-execution is bounded by the configured failure caps.
+session/workflow/attempt. A blocker producer must be authorized by the frozen
+contract and list the autonomous routes already tried. Invalid control is
+archived with repair diagnostics instead of being treated as semantic truth.
+Repeated broken protocol or workflow execution is bounded by the configured
+failure caps.
 
-The exact eval receipt, goal-check projection, successful control, blocker, and
-rejection rules are in [docs/http-contract.md](docs/http-contract.md).
+The exact eval-receipt acceptance, successful control, blocker, and rejection
+rules are in [docs/http-contract.md](docs/http-contract.md).
 
 ## Workflow Sets and Child Sessions
 
@@ -474,34 +566,40 @@ unique `*.json` file under the assignment's absolute
 planner/dispatcher, and deeper trees use one state machine. Only the deepest
 session runs an assignment; every ancestor is suspended on one child.
 
-The v2 request carries parent provenance, a child-scoped goal contract, and
-hashed input references. The coordinator archives the accepted request and
-copies each verified input into the child's immutable `inputs/` area. Child
-attempts receive those logical references, hashes, and absolute local paths;
-later parent edits cannot change accepted work.
+The child-request payload currently uses schema version 2. It carries parent
+provenance, a child-scoped outcome and completion criteria, and hashed input
+references. The coordinator archives the accepted request and copies each
+verified input into the child's immutable `inputs/` area. Child attempts
+receive those logical references, hashes, and absolute local paths; later
+parent edits cannot change accepted work.
 
-The stock PM dispatcher first freezes the selected work item and its planning
+The stock PM dispatcher first freezes the selected milestone and its planning
 evidence under `project_state/dispatch_inputs/<request_id>.json`, then hashes
 that immutable snapshot into the request. Only after the request is atomically
-published does it update the mutable `work_items.md` ledger. Hashing the ledger
-itself would invalidate the request when that required status update occurs.
+published does it add the factual request/lifecycle link to the stable task
+record. Mutable plan and task prose are never used as hashed child inputs.
 
-When the child stops, the engine writes a factual outcome. The parent then
-writes a separate acceptance, rework, or reroute decision after reviewing the
-evidence. Terminal descendants unwind iteratively, so the same edge supports
-three or more active depths without a depth-specific scheduler. Invalid
-requests are archived with reasons and can be repaired autonomously.
+When the child stops, the engine writes its topology-neutral
+`session_outcome.json` and links that result from the parent's factual child
+outcome. The parent then writes a separate acceptance, rework, or reroute
+decision after reviewing the child's handoff and evidence. Terminal
+descendants unwind iteratively, so the same edge supports three or more active
+depths without a depth-specific scheduler. Invalid requests are archived with
+reasons and can be repaired autonomously.
 
 The packaged `pm_planner_dispatcher` workflow set uses this contract for PM
 orchestration:
 
-- `planner` maintains PM state, selects one work item, reviews terminal child
-  evidence, and owns parent-acceptance/eval-readiness receipts.
-- `dispatcher` freezes the selected item into an immutable request input,
-  publishes the v2 child assignment, and tracks factual lifecycle evidence
+- `planner` maintains the high-level phase/milestone plan, selects one outcome,
+  reviews terminal child evidence, owns parent acceptance and the rolling
+  handoff, and decides completion.
+- `dispatcher` freezes the selected outcome into an immutable request input,
+  publishes the schema-v2 child request, and tracks factual lifecycle evidence
   without deciding acceptance.
-- `eval_reviewer` and `eval_runner` evaluate the PM layer's own broader goal;
-  only that layer's `eval_runner` may request successful terminal control.
+
+The planner can run prepared final evaluations named by the target goal or
+delegate other program-level review when useful. These are planner inputs, not
+additional scheduled PM roles.
 
 ## HTTP Contract
 
@@ -512,10 +610,11 @@ The coordinator exposes exactly two endpoints:
 
 Both return a `TaskResponse` with `action` equal to `"run"` or `"stop"`.
 
-Fresh v2 registration binds worker protocol/capabilities to the absolute
-checkout and stable repository ID. A missing capability returns HTTP 426
-without advancing state. A run response identifies the frozen
-session/workflow/attempt assignment; completion must echo its worker,
+Fresh stock registration requires worker protocol 3 and the declared Loopy and
+team-harness capabilities, then binds the worker to the absolute checkout and
+stable repository ID. A missing capability returns HTTP 426 without advancing
+state. A run response identifies the frozen session/workflow/attempt assignment
+and its absolute protocol-v3 context; completion must echo its worker,
 repository, attempt, and assignment hash. Stale or mismatched completion cannot
 mutate current work. Durable local result and pending-completion records allow
 the next registration to recover an interrupted acknowledgement exactly once.
@@ -531,11 +630,12 @@ and compatibility rules are in [docs/http-contract.md](docs/http-contract.md).
 loopy init [--template default|inner_outer_eval|pm_planner_dispatcher]
 ```
 
-Scaffolds loopy-loop files. The default template creates only the reserved
-`goal_check` workflow. `inner_outer_eval` creates the recommended outer/inner/eval
-workflow set. `pm_planner_dispatcher` creates planner/dispatcher workflows for
-child-session orchestration — and also ships the `inner_outer_eval` child set
-its dispatcher spawns, so a clean init is executable end to end.
+Scaffolds loopy-loop files. The compatibility `default` template creates only
+the historical `goal_check` workflow. `inner_outer_eval` creates the
+recommended protocol-v3 outer/inner/advisory-eval workflow set.
+`pm_planner_dispatcher` creates the two-role planner/dispatcher program layer
+and also ships the `inner_outer_eval` child set its dispatcher spawns, so a
+clean init is executable end to end.
 
 ```bash
 loopy coordinator --host 0.0.0.0 --port 8080 [--resume] [--workflow-set NAME] [--goal-file PATH]

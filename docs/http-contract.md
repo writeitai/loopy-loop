@@ -1,38 +1,34 @@
 # HTTP Contract
 
-loopy-loop exposes two coordinator endpoints: `POST /register` assigns the one
-available worker to the deepest runnable session, and `POST /finished` records
-one mechanical harness result before returning the next assignment. Recursive
-parent/child handoffs are files, not additional HTTP endpoints.
+loopy-loop has two coordinator endpoints:
 
-The wire models live in `src/loopy_loop/models.py`; endpoint validation and
-state transitions live in `create_coordinator_app()` and `CoordinatorService`
-in `src/loopy_loop/coordinator_app.py`.
+- `POST /register` gives the single worker the deepest runnable assignment;
+- `POST /finished` records one mechanical harness result and returns the next
+  assignment or stop response.
 
-## Protocol generations
+Recursive parent/child handoffs, semantic progress, evaluation evidence, and
+terminal decisions are files, not additional HTTP endpoints. Wire models live
+in `src/loopy_loop/models.py`; endpoint checks and transitions live in
+`create_coordinator_app()` and `CoordinatorService` in
+`src/loopy_loop/coordinator_app.py`.
 
-Every fresh 0.7 coordinator run creates a session tree with state schema v2.
-An existing state schema v1 tree can still be resumed with its historical wire
-behavior. Protocol generation is selected from durable session state, not from
-a client preference:
+## Version and capability negotiation
 
-- `/register` always requires a `worker` process identity. This requirement
-  predates v2; a missing identity returns HTTP 400.
-- A v1 session accepts a registration with just that identity. The new
-  registration fields are optional in the Pydantic model so old persisted
-  sessions remain usable.
-- A v2 session requires `worker_protocol_version >= 2` and every capability
-  named below. Missing support returns HTTP 426; the coordinator does not
-  silently downgrade a fresh session.
-- The bundled v2 worker also sends the absolute checkout path and the stable
-  checkout identity from `.loopy_loop/repository.json`. The coordinator checks
-  either value when supplied. This catches a worker connected from the wrong
-  checkout, but is not a general filesystem sandbox.
+The agent-facing protocol is frozen by each session's
+`workflow_contract.json` and engine-owned contract copy. It is not selected by
+the worker. Fresh stock `inner_outer_eval` and `pm_planner_dispatcher` sessions
+declare protocol v3. The persisted coordinator-state schema remains v2; those
+are separate version axes.
 
-The v2 capability set is deliberately feature-named rather than inferred from
-package versions:
+`POST /register` always requires a process identity. For a protocol-v3 tree it
+also requires:
+
+- `worker_protocol_version >= 3`;
+- the absolute checkout path and stable checkout-local repository ID; and
+- every feature capability below.
 
 ```text
+# carried forward from protocol v2
 assignment_v1
 frozen_workflow_v1
 trace_manifest_v1
@@ -40,39 +36,57 @@ caller_run_record_v1
 coordinator_input_v1
 spawn_assignment_v1
 nested_caller_context_v1
+
+# added for protocol v3
+assignment_v2
+harness_capability_roster_v1
+orchestrator_control_v3
+scheduler_view_v1
+semantic_handoff_v1
+capability_roster_context_v1
 ```
 
-The first three are loopy worker capabilities. The last four are advertised by
-team-harness through `get_capabilities()` and forwarded by
-`worker._worker_capabilities()`. This lets the coordinator reject an
-installation that can run agents but cannot satisfy the selected provenance
-and trace contract.
+The first group combines loopy worker features with team-harness caller/trace
+features. The v3 additions mean that the worker understands the semantic path
+map, tree-wide harness roster, scheduler view, orchestrator-owned control, and
+rolling handoff. `capability_roster_context_v1` is advertised by team-harness:
+it means the worker can forward the root roster's absolute path, SHA-256, and
+compact summary through caller context so a built-in nested `type=harness`
+coordinator inherits the same catalog.
 
-`nested_caller_context_v1` means a built-in `type=harness` spawn inherits the
-same root/current session, depth, workflow role, and loopy attempt; changes to
-the direct agent's absolute assignment and nested trace root; and records the
-parent harness-run ID. It is another harness coordinator inside the same
-workflow assignment, not another durable loop layer. Generic subprocesses are
-not inferred to have this lineage.
+`nested_caller_context_v1` is narrower: it preserves root/current session,
+depth, workflow role, parent loopy attempt, direct-agent assignment, nested
+trace root, and parent harness-run identity. A nested harness remains a dynamic
+delegate in the current durable assignment; it is not a child Loopy session.
 
-## POST /register
+Missing version or capability support returns HTTP 426 before a v3 assignment
+is dispatched. The coordinator never silently downgrades the session. A wrong
+checkout path or repository identity returns HTTP 409.
 
-The bundled 0.7 worker sends:
+## `POST /register`
+
+The bundled v3 worker sends:
 
 ```json
 {
   "worker": {
     "hostname": "buildbox",
     "pid": 4242,
-    "starttime": "lstart:Sun Jul 12 00:00:00 2026"
+    "starttime": "lstart:Fri Jul 17 10:00:00 2026"
   },
-  "worker_protocol_version": 2,
+  "worker_protocol_version": 3,
   "capabilities": [
     "assignment_v1",
+    "assignment_v2",
     "caller_run_record_v1",
+    "capability_roster_context_v1",
     "coordinator_input_v1",
     "frozen_workflow_v1",
+    "harness_capability_roster_v1",
     "nested_caller_context_v1",
+    "orchestrator_control_v3",
+    "scheduler_view_v1",
+    "semantic_handoff_v1",
     "spawn_assignment_v1",
     "trace_manifest_v1"
   ],
@@ -81,68 +95,69 @@ The bundled 0.7 worker sends:
 }
 ```
 
-`worker.starttime` is team-harness's pid-reuse-resistant process token. It can
-be null for an older identity record, in which case same-host liveness may be
-unknown rather than verified. `repository_id` is a random, checkout-local
-identity created once by `assignments.ensure_repository_identity()`; it is not
-a git remote or commit identifier.
+`worker.starttime` is team-harness's pid-reuse-resistant process token. It may
+be null for an older identity record, in which case same-host liveness can be
+unknown. `repository_id` is a random identity created once in
+`.loopy_loop/repository.json`; it is not a Git remote or commit.
 
 ### Run response
 
-A v2 run response contains the legacy scheduling fields plus protocol,
-repository, immutable-snapshot, and assignment fields:
+A v3 run response includes scheduling identity, the tree-frozen execution
+snapshot, required capabilities, repository binding, and exact attempt
+snapshot/assignment coordinates:
 
 ```json
 {
   "action": "run",
   "workflow_set": "inner_outer_eval",
-  "workflow_id": "inner",
-  "session_id": "20260715_143022_71393ee22450_ab12cd34",
-  "iteration": 3,
+  "workflow_id": "outer",
+  "session_id": "20260717_100000_71393ee22450_ab12cd34",
+  "iteration": 4,
   "attempt_id": "a1b2c3d4e5f6",
   "config_snapshot": {
-    "goal": "Ship a minimal working landing page",
+    "goal": "Deliver the scoped outcome",
     "goal_hash": "71393ee22450",
     "workflow_set": "inner_outer_eval",
-    "completion_criteria": ["Homepage renders without errors"],
-    "stop_criteria": ["A workflow publishes valid terminal control"],
-    "max_turns": 20,
+    "completion_criteria": ["The declared outcome is evidenced"],
+    "stop_criteria": ["A valid terminal control is accepted"],
+    "max_turns": 40,
     "goal_check_consecutive_failures_cap": 3,
-    "team_harness_provider": "openai_compat",
-    "team_harness_model": "gpt-5.5",
-    "team_harness_agents": ["codex"],
-    "team_harness_agent_models": {"codex": "gpt-5.5"},
-    "team_harness_agent_reasoning_efforts": {"codex": "high"},
-    "team_harness_max_retries": null,
-    "team_harness_retry_base_delay_s": null,
-    "team_harness_retry_max_delay_s": null,
-    "team_harness_api_base": "https://openrouter.ai/api/v1",
-    "team_harness_api_key_env": "OPENROUTER_API_KEY",
-    "team_harness_system_prompt_extension": ""
+    "team_harness_provider": "<configured provider>",
+    "team_harness_model": "<configured coordinator model>",
+    "team_harness_agents": ["<enabled family>"],
+    "team_harness_agent_models": {},
+    "team_harness_agent_reasoning_efforts": {},
+    "team_harness_system_prompt_extension": "<frozen roster guidance>"
   },
   "stop_reason": null,
-  "coordinator_protocol_version": 2,
+  "coordinator_protocol_version": 3,
   "required_capabilities": [
     "assignment_v1",
+    "assignment_v2",
     "caller_run_record_v1",
+    "capability_roster_context_v1",
     "coordinator_input_v1",
     "frozen_workflow_v1",
+    "harness_capability_roster_v1",
     "nested_caller_context_v1",
+    "orchestrator_control_v3",
+    "scheduler_view_v1",
+    "semantic_handoff_v1",
     "spawn_assignment_v1",
     "trace_manifest_v1"
   ],
   "repo_root": "/absolute/path/to/target-repo",
   "repository_id": "repo-c50d0d9a46c843ecaa493243baed524f",
-  "assignment_path": "/absolute/path/to/target-repo/.loopy_loop/sessions/session-id/iterations/0003_inner/workflow_snapshot/a1b2c3d4e5f6/assignment.json",
+  "assignment_path": "/absolute/path/to/target-repo/.loopy_loop/sessions/<session>/iterations/0004_outer/workflow_snapshot/a1b2c3d4e5f6/assignment.json",
   "assignment_sha256": "sha256:<64 hex characters>",
   "workflow_snapshot": {
     "schema_version": 1,
-    "session_id": "20260715_143022_71393ee22450_ab12cd34",
+    "session_id": "20260717_100000_71393ee22450_ab12cd34",
     "workflow_set": "inner_outer_eval",
-    "workflow_id": "inner",
-    "iteration": 3,
+    "workflow_id": "outer",
+    "iteration": 4,
     "attempt_id": "a1b2c3d4e5f6",
-    "snapshot_root": "/absolute/path/to/target-repo/.loopy_loop/sessions/session-id/iterations/0003_inner/workflow_snapshot/a1b2c3d4e5f6",
+    "snapshot_root": "/absolute/path/to/workflow_snapshot/a1b2c3d4e5f6",
     "workflow_config_path": "/absolute/path/to/workflow_snapshot/config.yaml",
     "workflow_prompt_path": "/absolute/path/to/workflow_snapshot/prompt.txt",
     "workflow_contract_path": "/absolute/path/to/workflow_snapshot/workflow_contract.yaml",
@@ -155,32 +170,40 @@ repository, immutable-snapshot, and assignment fields:
 }
 ```
 
-`config_snapshot.goal` is resolved text, not the configured goal-file path.
-The snapshot freezes execution settings for the whole recursive tree; a child
-changes its scoped goal, criteria, and workflow set but does not silently pick
-up later model/config edits.
+The actual `config_snapshot` also carries the remaining frozen retry/provider
+fields defined by `RootConfigSnapshot`; they are omitted from this example for
+readability. The snapshot freezes execution settings for the entire recursive
+tree. A child changes its scoped goal, criteria, and selected workflow set but
+does not silently pick up later configuration edits.
 
-`workflow_snapshot` identifies the scheduler-selected workflow config, prompt,
-workflow-set contract, and root execution config. The coordinator materializes
-these files and hashes before dispatch, creates `assignment.json`, and freezes
-its SHA-256 in the task response. The worker verifies their identity, absolute
-location, manifest, hashes, and independently reconstructed assignment at the
-returned absolute `assignment_path`. The assignment binds one checkout,
-session layer, workflow role, iteration, and attempt and gives the harness
-coordinator absolute paths for that layer. See
+Before returning the response, the coordinator:
+
+1. freezes the selected workflow config, prompt, workflow contract, and root
+   execution snapshot;
+2. writes a conditional `scheduler_view.json` for this attempt;
+3. builds schema-v2 `assignment.json` with actor/objective identity, the full
+   absolute semantic path map, compact workflow/scheduler/capability context,
+   and provenance hashes; and
+4. freezes the assignment SHA-256 in the current task and response.
+
+The worker verifies the immutable files, locations, manifest, hashes, and an
+independently reconstructed assignment before invoking team-harness. See
 `assignments.materialize_workflow_snapshot()`,
-`assignments.verify_workflow_snapshot()`, and
-`assignments.build_attempt_assignment()`.
+`assignments.build_attempt_assignment()`, and
+`assignments.verify_workflow_snapshot()`.
 
-A v1 run response uses the same additive response model but has
-`coordinator_protocol_version: 1`, an empty `required_capabilities`, no
-workflow snapshot or assignment path, and follows the legacy workflow/output
-path. Fields that do not apply are null.
+The assignment paths include the canonical layer goal/contract/inputs,
+plan/tasks/current state/decisions/finished ledger/eval state/handoff, engine
+state, terminal outcome, workflow contract/roster, scheduler view, root
+capability roster, user inputs, recursive request/outcome/acceptance records,
+Git and delivery receipts, session control, attempt root, and trace root.
+Parent-only origin paths are explicit nulls at the root. See
+[`session-layout.md`](./session-layout.md#attempt-snapshot-and-absolute-assignment-paths)
+for the stable key list.
 
 ### Stop response
 
-When the active tree is terminal, `/register` returns the same model with no
-assignment:
+When the active tree is terminal, the same response model has no assignment:
 
 ```json
 {
@@ -197,53 +220,50 @@ assignment:
   "repo_root": null,
   "repository_id": null,
   "assignment_path": null,
+  "assignment_sha256": null,
   "workflow_snapshot": null
 }
 ```
 
 ### Registration, liveness, and recovery
 
-If a prior `current_task` is still durable, registration follows these rules:
+If `state.json` still contains a current task, registration proceeds as
+follows:
 
-1. If its recorded same-host worker is verifiably alive with the same pid and
-   starttime, the coordinator returns HTTP 409 and does not duplicate work.
-2. Otherwise it first looks for a matching
-   `pending_finished_request.json` or `result.json` in the iteration directory.
-   Recoverable completion is recorded before scheduling anything new.
-3. With no recoverable result, it applies the configured drain/reap policy to
-   team-harness processes discoverable for that attempt. Replacement is
-   refused with HTTP 409 while ownership or a remaining process cannot be
-   resolved safely. A processed recovery is described by `salvage.json`.
-4. Once the interrupted task is settled, it is recorded as abandoned and the
-   normal stop/child/workflow scheduler advances.
+1. A verifiably live same-host owner with matching PID/starttime receives HTTP
+   409; work is not duplicated.
+2. Otherwise, the coordinator looks for that attempt's matching
+   `pending_finished_request.json` or `result.json` and records a recoverable
+   completion before scheduling new work.
+3. Without a result, it applies the configured drain/reap policy to tracked
+   team-harness processes. Replacement remains HTTP 409 while ownership or a
+   possibly live process is unresolved. A completed recovery is described by
+   `salvage.json`.
+4. After safe abandonment, normal terminal/child/workflow scheduling resumes.
 
-Recovery runs its potentially long process handling outside the state lock,
-then revalidates and commits under the lock. The bundled worker therefore uses
-an unbounded read timeout only for `/register`. Process liveness/reaping is
-same-host; a remote identity cannot be assumed dead.
+Potentially long process handling occurs outside the state lock, then the
+coordinator revalidates under the lock. On resume it follows durable
+`active_child_session_id` pointers to the deepest session and iteratively
+unwinds terminal descendants. A parent and its active child are never
+dispatched concurrently.
 
-On `--resume`, the coordinator follows durable `active_child_session_id`
-pointers to the deepest session. Terminal descendants are finalized and the
-tree is unwound iteratively. The scheduler never dispatches a parent and its
-active child at the same time.
+Relevant statuses are:
 
-Relevant error statuses are:
-
-- HTTP 400: missing worker identity.
-- HTTP 409: a live owner, stale different owner, wrong checkout/identity, or
-  unresolved recovery makes dispatch unsafe.
-- HTTP 426: a v2 tree requires a newer worker protocol or capability.
+- HTTP 400: required worker identity is absent;
+- HTTP 409: live/stale ownership, wrong checkout, or unresolved recovery makes
+  dispatch unsafe;
+- HTTP 426: protocol version or a required capability is missing; and
 - HTTP 503: the coordinator state lock could not be acquired in time.
 
-## POST /finished
+## `POST /finished`
 
-The bundled v2 worker posts:
+The bundled worker posts one exact completion envelope:
 
 ```json
 {
-  "workflow_id": "inner",
-  "session_id": "20260715_143022_71393ee22450_ab12cd34",
-  "iteration": 3,
+  "workflow_id": "outer",
+  "session_id": "20260717_100000_71393ee22450_ab12cd34",
+  "iteration": 4,
   "attempt_id": "a1b2c3d4e5f6",
   "success": true,
   "text": "done",
@@ -259,148 +279,111 @@ The bundled v2 worker posts:
   "worker": {
     "hostname": "buildbox",
     "pid": 4242,
-    "starttime": "lstart:Sun Jul 12 00:00:00 2026"
+    "starttime": "lstart:Fri Jul 17 10:00:00 2026"
   },
   "repository_id": "repo-c50d0d9a46c843ecaa493243baed524f",
   "assignment_sha256": "sha256:<64 hex characters>",
   "harness_run_id": "run-123",
-  "trace_manifest_path": "/absolute/path/to/trace_manifest.json"
+  "trace_manifest_path": "/absolute/path/to/trace_manifest.json",
+  "trace_incomplete": false,
+  "trace_error": null
 }
 ```
 
-The response is another `TaskResponse`: it either dispatches the next task or
-stops. Posting `/finished` is therefore both acknowledgement and the next
-scheduling poll.
+The response is another `TaskResponse`, so `/finished` is both completion
+acknowledgement and the next scheduling poll.
 
-For a task dispatched under the complete v2 worker handshake, completion must
-echo the exact worker owner, repository identity, and SHA-256 of the immutable
-`assignment.json`. Every modern task also has a unique `attempt_id`; a late
-completion from a superseded attempt cannot complete a new retry with the same
-session/workflow/iteration coordinates.
+For protocol v3, completion must echo the exact worker owner, repository ID,
+assignment SHA-256, session, workflow, iteration, and attempt ID. A late result
+from a superseded attempt cannot complete a retry with otherwise identical
+coordinates.
 
-For a matching active task, the coordinator records:
+The coordinator records the mechanical result, optional usage/duration,
+harness run, relocatable trace reference, assignment hash, and hashes of the
+exact request and returned response. The worker-written absolute
+`trace_manifest_path` must equal the canonical session/attempt-derived trace;
+it cannot redirect finalization.
 
-- `success`, result/error, and `failure_kind` in history;
-- optional coordinator-model usage and worker-measured duration in the durable
-  ledger;
-- the team-harness run ID, logical `trace_manifest_ref`, accepted assignment
-  hash, and SHA-256 hashes of the exact `/finished` request and
-  exact returned response. Only legacy history retains the worker's absolute
-  `trace_manifest_path`; a crash-abandonment entry records the assignment hash
-  but has no finished request/response hashes;
-- any structurally valid eval/control transition produced by the workflow.
+`success: true` has the narrow D3 meaning: team-harness returned without an
+execution error. It does not assert that implementation work is correct,
+accepted, merged, or complete, and it does not infer semantic failure from a
+spawned process exit code. In protocol v3, the contract's durable orchestrator
+decides `goal_met` through `control.json` after weighing optional eval and other
+evidence.
 
-The coordinator created the canonical active trace when it dispatched this
-task; the worker records the exact run `TaskResponse` there as
-`protocol/task_response.json`. A supplied `trace_manifest_path` must be that
-absolute session/attempt-derived manifest. Missing or different paths mark
-capture incomplete and cannot redirect finalization.
+For protocol v3, `_record_finished_task()` also:
 
-`success` has the deliberately narrow D3 meaning: team-harness completed
-without raising an execution error. It does not mean the work is correct and
-does not consult spawned-agent exit codes for semantic acceptance. Eval and
-control artifacts decide whether a session goal is met.
+- scans current-attempt receipts when the workflow is a declared check runner,
+  accepting valid provenance into compact seals and emitting diagnostics for
+  invalid observations without changing mechanical success; and
+- observes the rolling handoff's identity/revision/hash, again as diagnostics
+  rather than a semantic gate.
 
-`usage` covers team-harness coordinator turns found in the returned
-`run_json_path`; agent CLI subprocess usage is not measurable. Missing usage
-means unknown, not zero. `turns_without_usage > 0` also makes the total only a
-measured subtotal. `failure_kind` is `transient`, `deterministic`, or `unknown`
-for worker-reported failures; coordinator crash recovery records `crash`.
-
-Stale and replay rules are:
-
-- A mismatch in session, workflow, iteration, or modern attempt ID does not
-  mutate the live task.
-- The live task can be replayed only to its recorded owner. A stale completion
-  from another identified worker returns HTTP 409.
-- If no task is active, `/finished` advances exactly as `/register` would.
-- A stale call may receive the current scheduler response, but it never appends
-  history, creates or updates a finalization intent, records a finished
-  exchange, or seals the stale attempt.
-- A task persisted before attempt IDs or owner binding retains only its legacy
-  comparison behavior; tolerance belongs to that old task, never to a new one.
+Stale/replay rules are strict: a coordinate or owner mismatch does not mutate
+the live task, and a stale call cannot append history, create a trace
+finalization intent, or seal the stale attempt. If no task is active,
+`/finished` advances as `/register` would.
 
 The worker writes `result.json` and `pending_finished_request.json` before the
-HTTP call. It removes the pending handoff only after acknowledgement. This is
-why a worker crash between local completion and `/finished` can be recovered
-without rerunning the harness.
-
-For an exact matching completion, the coordinator writes a trace-finalization
-intent before committing state, then records the exact observed response and
-seals. Startup acts only when history proves that completion or abandonment
-committed; an interrupted response is marked unavailable rather than invented.
-Trace failure is logged and does not roll back semantic state. The full
-artifact ordering and repair rules are in
-[`session-layout.md`](./session-layout.md#caller-owned-attempt-traces).
+HTTP call, removing the latter only after acknowledgement. This closes the
+worker-crash window between local completion and coordinator acceptance.
 
 ## File protocols consumed during `/finished`
 
-The following are not HTTP bodies. They are durable workflow outputs that the
-coordinator reads while recording a matching completion. The assignment
-contains their absolute paths; portable cross-file links use logical
-`session:/`, `parent:/`, `root:/`, or `trace:` references.
+These records are not HTTP bodies. Workflows publish them at assignment-provided
+absolute paths. Durable links use confined logical references such as
+`session:/`, `root:/`, `parent:/`, `session:<id>:/`, and `trace:`.
 
-### Recursive child request v2
+### Recursive child request
 
-A workflow requests a depth-first child by atomically publishing a unique JSON
-file under its assigned `child_requests/pending/` directory:
+Protocol-v3 recursive sessions continue to use child-request schema v2:
 
 ```json
 {
   "schema_version": 2,
-  "request_id": "feature-auth-1",
+  "request_id": "foundation-phase",
   "workflow_set": "inner_outer_eval",
   "origin": {
     "parent_attempt_id": "a1b2c3d4e5f6",
-    "parent_work_item_id": "FEATURE-4",
+    "parent_work_item_id": "PHASE-0",
     "supersedes_request_id": null
   },
   "assignment": {
-    "goal": "Implement the selected authentication slice.",
-    "completion_criteria": ["The child-scoped outcome passes evaluation"],
+    "goal": "Make the development foundations ready and evidenced.",
+    "completion_criteria": ["The phase outcome is complete and reviewable"],
     "stop_criteria": ["A genuinely terminal blocker is established"],
     "constraints": [],
-    "deliverables": ["code and verification evidence"],
-    "required_evidence": ["eval, git, and delivery receipts"]
+    "deliverables": ["implementation and verification evidence"],
+    "required_evidence": ["appropriate Git, review, test, and delivery refs"]
   },
   "inputs": [
     {
-      "ref": "session:/project_state/dispatch_inputs/feature-auth-1.json",
+      "ref": "session:/project_state/dispatch_inputs/foundation-phase.json",
       "sha256": "sha256:<64 hex characters>"
     }
   ]
 }
 ```
 
-The packaged PM dispatcher creates that per-request snapshot before hashing
-and publishing the request. It never declares mutable `work_items.md` as an
-input: the dispatcher must update that ledger after publication, while the
-coordinator validates the declared input bytes after the attempt returns.
+The coordinator validates the schema, current origin attempt, requested
+workflow set, reference confinement, and hashes. It copies a valid body into
+`child_requests/accepted/`, binds it into `children.json`, and freezes exact
+request/input bytes in the child's own `inputs/` and `goal_contract.json`.
+`request_id` makes dispatch idempotent and cannot be reused with contradictory
+bytes.
 
-The coordinator checks the schema, requested workflow set, input reference
-confinement, and input hashes. A dispatchable body is copied unchanged to
-`child_requests/accepted/<request_id>.json`, hashed, indexed in
-`children.json`, and copied again into the child's immutable
-`inputs/accepted_request.json`. Every declared parent `inputs[]` reference is
-resolved and hash-checked from the parent's scope, then its exact bytes are
-copied to the child's `inputs/artifacts/`. The child goal contract and all of
-its attempts use only those child-local references, hashes, and worker-local
-absolute paths; `session.json.origin` retains the parent source-to-copy mapping
-for provenance. Later parent edits therefore cannot change or wedge an accepted
-child assignment. The pending file is then removed. `request_id` supplies
-idempotency across retries; it cannot be reused with a different accepted body.
+Invalid requests move to `child_requests/rejected/` with their original hash
+and reason. This is a repairable autonomous disposition, not a human approval
+step. The stock PM dispatcher publishes one planner-selected high-level
+milestone outcome; it does not pre-decompose the child's leaf plan.
 
-An invalid or undispatchable v2 pending request is moved to
-`child_requests/rejected/` and gets a separate rejection receipt containing
-the reason and original hash. This is a terminal disposition of that request,
-not a human approval gate. A later workflow may autonomously publish a repaired
-request with a new identity.
+### Advisory eval receipt and acceptance seal
 
-### Eval receipt and goal-check projection
-
-The canonical evaluation artifact is a compact receipt under
-`eval_receipts/`. Its own schema is currently version 1 even when the enclosing
-session protocol is v2:
+The canonical receipt schema remains v1 inside a protocol-v3 session. It binds
+the evaluated root/session/goal/Git subject, exact producing
+workflow/iteration/attempt/harness run, check definitions, judge settings,
+per-check results, verdict, canonical report, raw report references/hashes, and
+creation time. A compact example is:
 
 ```json
 {
@@ -415,7 +398,7 @@ session protocol is v2:
   },
   "producer": {
     "workflow_id": "eval_runner",
-    "iteration": 4,
+    "iteration": 3,
     "attempt_id": "fedcba654321",
     "harness_run_id": "run-456"
   },
@@ -426,129 +409,199 @@ session protocol is v2:
       "kind": "harness_judge"
     }
   ],
-  "judge": {"provider": "codex", "model": "gpt-5.5", "reasoning_effort": "high"},
+  "judge": {
+    "provider": "<judge family>",
+    "model": "<judge model>",
+    "reasoning_effort": "<effective effort>"
+  },
   "check_results": [
-    {"check_id": "goal-outcome", "passed": true, "reason": "Evidence passes."}
+    {"check_id": "goal-outcome", "passed": false, "reason": "Gap found."}
   ],
-  "verdict": {"goal_met": true, "reason": "All declared checks passed."},
+  "verdict": {"goal_met": false, "reason": "The gap remains."},
   "canonical_report_ref": "session:/eval_receipts/eval-a1b2c3d4e5f6.report.md",
   "canonical_report_sha256": "sha256:<64 hex characters>",
-  "raw_report_refs": [
-    "trace:trace-fedcba654321:/eval/report.json"
-  ],
+  "raw_report_refs": ["trace:trace-fedcba654321:/eval/report.json"],
   "raw_report_sha256s": {
     "trace:trace-fedcba654321:/eval/report.json": "sha256:<64 hex characters>"
   },
-  "created_at": "2026-07-15T12:00:00Z"
+  "created_at": "2026-07-17T10:00:00Z"
 }
 ```
 
-An eval-emitting workflow also writes a small iteration-local
-`goal_check.json` whose verdict and reason exactly project that receipt:
+When the exact producing attempt completes, the coordinator accepts a receipt
+only if its producer role is in the frozen `evaluation.check_runner_roles` and
+all subject, harness, check-definition, report, judge, hash, and evaluated-Git
+provenance validates. It then writes an engine sidecar:
 
 ```json
 {
-  "schema_version": 2,
-  "goal_met": true,
-  "reason": "All declared checks passed.",
-  "eval_receipt_ref": "session:/eval_receipts/eval-a1b2c3d4e5f6.json"
+  "schema_version": 1,
+  "receipt_ref": "session:/eval_receipts/eval-a1b2c3d4e5f6.json",
+  "receipt_sha256": "sha256:<64 hex characters>",
+  "subject": {"root_session_id": "root-session-id", "session_id": "current-session-id", "goal_hash": "sha256:<64 hex characters>", "git_commit": "0123456789abcdef", "dirty_tree_digest": "sha256:<64 hex characters>"},
+  "producer": {"workflow_id": "eval_runner", "iteration": 3, "attempt_id": "fedcba654321", "harness_run_id": "run-456"},
+  "evaluated_git": {"git_commit": "0123456789abcdef", "dirty_tree_digest": "sha256:<64 hex characters>"},
+  "accepted_at": "2026-07-17T10:01:00Z"
 }
 ```
 
-Every receipt, passing or failing, must have exactly one `raw_report_refs`
-entry: the producing attempt's canonical `eval/report.json`.
-`raw_report_sha256s` has that same single key, and both the canonical and raw
-artifacts must match their full SHA-256 values. Each check's
-`definition_sha256` is eval-banana's canonical, versioned definition digest
-copied from that report, not a raw hash of the YAML file. The coordinator
-independently recomputes the value with eval-banana before accepting the
-receipt.
-`CoordinatorService._read_goal_check_signal()` and
-`_validate_eval_receipt_artifacts()` also check the exact current
-producer/attempt/iteration, root/session/goal identity, every regular
-`*.yaml`/`*.yml` check discovered recursively below `eval_checks/`,
-definition-byte hashes, and agreement between receipt and projection. Symlinks
-and non-files are rejected. Receipt JSON/schema failures retain up to eight
-field-qualified validation messages in failed history and terminal-control
-rejection evidence so the responsible workflow can repair the exact field. A
-passing report must additionally record the exact absolute target
-`project_root`, the producing attempt's absolute canonical `output_dir`,
-`run_passed: true`, `pass_threshold: 1.0`, exactly the receipt's check IDs with
-every status `passed` and exit code zero, and per-check
-`details.agent_type`/`details.model`/`details.reasoning_effort` matching the
-receipt's judge. At terminal acceptance the coordinator recaptures live Git
-state and requires its HEAD and `loopy-git-status-diff-v1-sha256` digest to
-match the receipt. The digest binds filtered porcelain records plus Git's
-staged and unstaged binary diffs. It intentionally relies on Git's observable
-boundary rather than independently parsing and re-hashing the complete index.
+The sidecar lives at `eval_receipts/accepted/<eval_id>.json`; its trust-root
+copy lives in `state.json`. A later orchestrator attempt can cite the receipt
+without requiring gitignored raw trace bytes to remain present. The receipt's
+verdict may pass or fail: acceptance establishes provenance, not semantic
+agreement.
 
-These checks establish provenance and all-pass mechanics. The coordinator does
-not re-evaluate the LLM judge's semantic reasons or require stock deterministic
-checks (D3/D4/D8).
+Missing, malformed, or non-passing advisory eval output is recorded in an
+`eval_observation` event. It does not flip `IterationResult.success`, consume a
+generic workflow failure budget, create `goal_check_broken`, or block
+orchestrator completion. `goal_check.json` is optional/legacy in v3.
 
-A valid `goal_check.json` is not a stop switch.
+### Protocol-v3 terminal control
 
-### Terminal control v2
-
-A packaged v2 workflow set accepts `goal_met` only from its declared
-`goal_control_role` and only when it cites the matching passing eval receipt:
+Successful control comes from the frozen orchestration owner (`outer` in
+`inner_outer_eval`, `planner` in `pm_planner_dispatcher`):
 
 ```json
 {
-  "schema_version": 2,
-  "control_id": "control-fedcba654321",
+  "schema_version": 3,
+  "control_id": "control-a1b2c3d4e5f6",
   "state": "stopped",
-  "reason": "The session-scoped eval passed.",
+  "reason": "Why this layer's own goal is complete.",
   "stop_reason": "goal_met",
   "producer": {
     "session_id": "current-session-id",
-    "workflow_id": "eval_runner",
-    "attempt_id": "fedcba654321"
+    "workflow_id": "outer",
+    "attempt_id": "a1b2c3d4e5f6"
   },
-  "eval_receipt_ref": "session:/eval_receipts/eval-a1b2c3d4e5f6.json",
-  "attempted_routes": [],
-  "evidence_refs": [],
-  "created_at": "2026-07-15T12:00:00Z"
+  "evidence_refs": ["session:/delivery_receipts/pr-42.json"],
+  "eval_receipt_refs": [
+    "session:/eval_receipts/eval-a1b2c3d4e5f6.json"
+  ],
+  "handoff_ref": "session:/project_state/handoff.json",
+  "created_at": "2026-07-17T10:02:00Z"
 }
 ```
 
-The D5 last-resort `unresolvable_error` form instead requires a producer role
-listed by the workflow contract, at least one attempted autonomous route, and
-no eval receipt. It may include logical evidence references.
+`evidence_refs`, `eval_receipt_refs`, and `handoff_ref` are optional; lists may
+be empty. The engine requires exact current producer identity and completion
+authority. Any cited evidence must resolve to a file. Any cited eval receipt
+must match an engine acceptance seal, this session/root/goal, and a declared
+runner role. A cited handoff must be the canonical layer handoff with matching
+session/goal and declared owner when it has a producer.
 
-Both terminal forms must identify the exact current session/workflow/attempt
-whose matching `/finished` is being recorded. Control written by an earlier
-attempt, another layer, or a spawned agent is rejected. A spawned agent reports
-to its harness coordinator; the current accountable workflow publishes the
-session-owned record.
+No eval receipt, passing verdict, same-attempt eval, or `goal_check.json` is
+required. The orchestrator owns the semantic disposition, including how it
+weighs conflicting observations.
 
-Invalid terminal v2 control is not accepted as a stop. The coordinator moves
-the original to `control_rejected/`, writes a reasoned record in
-`protocol_failures/`, restores a running control record, and lets later work
-repair the protocol. Repeated invalid control is bounded by
-`goal_check_consecutive_failures_cap`, which is currently shared by the eval
-projection and terminal-control protocol. There is no
-paused/waiting-for-human control state.
+The D5 last-resort blocker keeps exact identity but does not cite eval or
+handoff records:
 
-## Legacy compatibility boundary
+```json
+{
+  "schema_version": 3,
+  "control_id": "control-terminal-blocker-a1b2c3d4e5f6",
+  "state": "stopped",
+  "reason": "The specific unavoidable blocker and why a human is required.",
+  "stop_reason": "unresolvable_error",
+  "producer": {
+    "session_id": "current-session-id",
+    "workflow_id": "inner",
+    "attempt_id": "a1b2c3d4e5f6"
+  },
+  "attempted_routes": ["The autonomous recovery route already tried"],
+  "evidence_refs": ["session:/project_state/decisions/blocker.md"],
+  "created_at": "2026-07-17T10:02:00Z"
+}
+```
 
-Resume keeps old work usable without weakening new work:
+The producer must be in `terminal_blocker_reporting_roles`; attempted routes
+must be non-empty. There is no `paused` or `waiting_for_human` state.
 
-- Missing `LoopState.schema_version` means v1. Fresh state explicitly writes
-  v2 and a revision.
-- A v1 session may use legacy child requests shaped as
-  `{"schema_version":1,"workflow_set":"...","goal":"..."}` in the flat
-  `child_requests/` directory, terminal control v1, and goal-check v1.
-- The child-request reader observes both the legacy flat inbox and v2
-  `pending/`. Flat rejected requests retain the historical `.rejected` naming;
-  new pending requests use the `rejected/` archive.
-- A v1 task has no immutable workflow snapshot/assignment requirement and may
-  use `harness_outputs/` rather than the caller-owned trace path.
-- A packaged v2 workflow contract does not accept v1 terminal control,
-  goal-check output, or child requests. Such artifacts are repairable protocol
-  failures, not implicit downgrades.
+Invalid v3 terminal control is not accepted as a stop. The original bytes move
+to `control_rejected/`, `protocol_failures/` records its hash, producer, and
+reasons, and `control.json` becomes a running repair placeholder. Consecutive
+invalid control records are bounded by the configured control-failure counter.
+An invalid cited receipt is a false control claim; an uncited malformed
+advisory observation is only an eval diagnostic.
 
-Compatibility code is concentrated in
-`CoordinatorService._workflow_contract_for_state()`, the dual child-request
-reader in `_dispatch_child_session_if_requested()`, and the optional/additive
-fields in `models.py`.
+### `session_outcome.json` and child link
+
+After any v3 terminal transition, the coordinator writes the same engine-owned
+result shape for root and child sessions. Control-owned outcomes include the
+accepted control hash; engine-owned lifecycle stops use `control: null`:
+
+```json
+{
+  "schema_version": 1,
+  "session_id": "current-session-id",
+  "root_session_id": "root-session-id",
+  "goal_sha256": "sha256:<64 hex characters>",
+  "lifecycle": "terminal",
+  "terminal_status": "goal_met",
+  "stop_reason": "goal_met",
+  "terminal_state_revision": 13,
+  "control": {
+    "ref": "session:/control.json",
+    "sha256": "sha256:<64 hex characters>"
+  },
+  "handoff": {
+    "status": "valid",
+    "ref": "session:/project_state/handoff.json",
+    "sha256": "sha256:<64 hex characters>",
+    "revision": 7
+  },
+  "fallback_summary": null,
+  "evidence_refs": [],
+  "delivery_refs": [],
+  "eval_refs": [],
+  "trace_seal_refs": [],
+  "created_at": "2026-07-17T10:02:01Z"
+}
+```
+
+Handoff status may also be `missing`, `invalid`, or `non_monotonic`. In those
+cases `fallback_summary` copies the authenticated control reason, or the
+factual engine stop reason when `control` is null; it does not invent a
+semantic summary. A weak handoff is completeness information, not a control
+veto. Delivery evidence is projected across the whole session history, not
+only the terminal attempt.
+
+The terminal status, revision, timestamp, accepted control bytes, and accepted
+handoff bytes are frozen in engine-owned `state.json`. Regeneration restores
+those exact bytes rather than trusting later file edits. Only the list of
+trace-seal references may expand as already-accepted attempts finish trace
+finalization.
+
+A v3 parent's `child_outcomes/<request_id>.json` is a small link:
+
+```json
+{
+  "schema_version": 2,
+  "request_id": "foundation-phase",
+  "child_session_id": "child-session-id",
+  "session_outcome_ref": "session:child-session-id:/session_outcome.json",
+  "session_outcome_sha256": "sha256:<64 hex characters>"
+}
+```
+
+The parent independently decides acceptance, rework, or reroute. A child
+outcome never sets ancestor `goal_met`.
+
+## Frozen v1/v2 compatibility
+
+The current implementation still resumes historical sessions under their
+frozen behavior:
+
+- v1 may register with process identity alone and may use flat child requests,
+  terminal control v1, goal-check v1, and legacy output paths;
+- v2 requires worker protocol 2 plus the seven carried-forward capabilities,
+  repository binding, immutable assignment/snapshot, identity-bound terminal
+  control, and its historical same-attempt passing receipt plus matching
+  `goal_check.json` for `goal_met`; and
+- v2 control uses singular `eval_receipt_ref`, while v3 uses plural
+  `eval_receipt_refs`.
+
+An explicit custom contract omitting `session_protocol_version` remains pinned
+to v2; a workflow set with no contract derives conservative v1. Compatibility
+is selected from durable session state, never by accepting a lower worker
+version for a v3 tree.

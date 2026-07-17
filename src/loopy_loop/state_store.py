@@ -155,7 +155,53 @@ def _validate_committed_shape(state: LoopState, *, repo_root: Path) -> None:
         raise StateInvariantError(
             "v2 state has no engine-owned workflow contract trust root"
         )
+    if state.workflow_contract.session_protocol_version >= 3:
+        if state.workflow_roster is None or state.harness_capability_roster is None:
+            raise StateInvariantError("v3 state has no engine-owned context rosters")
+        if state.workflow_roster.session_id != state.active_session_id:
+            raise StateInvariantError("v3 workflow roster session does not match state")
+        if state.workflow_roster.completion_role != (
+            state.workflow_contract.completion_role
+        ):
+            raise StateInvariantError(
+                "v3 workflow roster completion role contradicts its contract"
+            )
+        if state.harness_capability_roster.root_session_id != (
+            state.root_session_id or state.active_session_id
+        ):
+            raise StateInvariantError(
+                "v3 capability roster root session does not match state"
+            )
     terminal = state.status in TERMINAL_STATUSES
+    if state.workflow_contract.session_protocol_version >= 3:
+        observation = state.latest_handoff_observation
+        if observation is not None and observation.status == "valid":
+            snapshot = state.accepted_handoff_snapshot
+            if (
+                snapshot is None
+                or observation.sha256 != snapshot.sha256
+                or observation.revision != snapshot.handoff.revision
+            ):
+                raise StateInvariantError(
+                    "v3 valid handoff observation lacks its accepted snapshot"
+                )
+        if terminal:
+            if (
+                state.terminal_state_revision is None
+                or state.terminal_state_revision
+                not in {state.state_revision, state.state_revision + 1}
+                or state.terminal_at is None
+            ):
+                raise StateInvariantError(
+                    "v3 terminal state lacks its frozen transition identity"
+                )
+            if (
+                state.stop_reason in {"goal_met", "unresolvable_error"}
+                and state.accepted_terminal_control is None
+            ):
+                raise StateInvariantError(
+                    "v3 control-owned terminal state lacks accepted control bytes"
+                )
     if terminal and (
         state.current_task is not None or state.active_child_session_id is not None
     ):
@@ -190,8 +236,10 @@ def _validate_committed_shape(state: LoopState, *, repo_root: Path) -> None:
         raise StateInvariantError("v2 current task has no safe attempt identity")
     if not task.repository_id or not task.repository_id.strip():
         raise StateInvariantError("v2 current task has no repository identity")
-    if task.completion_contract_version != 2:
-        raise StateInvariantError("v2 current task must use completion contract v2")
+    if task.completion_contract_version < 2:
+        raise StateInvariantError(
+            "versioned current task must use completion contract v2 or newer"
+        )
     if task.assignment_sha256 is None or not _SHA256_PATTERN.fullmatch(
         task.assignment_sha256
     ):

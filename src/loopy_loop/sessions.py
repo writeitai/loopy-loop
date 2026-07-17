@@ -25,8 +25,17 @@ PARENT_FILENAME = "parent.json"
 GOAL_FILENAME = "goal.md"
 GOAL_CONTRACT_FILENAME = "goal_contract.json"
 WORKFLOW_CONTRACT_FILENAME = "workflow_contract.json"
+WORKFLOW_ROSTER_FILENAME = "workflow_roster.json"
+HARNESS_CAPABILITY_ROSTER_FILENAME = "harness_capability_roster.json"
+SESSION_OUTCOME_FILENAME = "session_outcome.json"
 EVENTS_FILENAME = "events.jsonl"
 PROJECT_STATE_DIRNAME = "project_state"
+PLAN_FILENAME = "plan.md"
+TASKS_DIRNAME = "tasks"
+CURRENT_STATE_FILENAME = "current_state.md"
+DECISIONS_DIRNAME = "decisions"
+EVAL_STATE_FILENAME = "eval_state.md"
+HANDOFF_FILENAME = "handoff.json"
 EVAL_CHECKS_DIRNAME = "eval_checks"
 EVAL_READINESS_DIRNAME = "eval_readiness"
 EVAL_RECEIPTS_DIRNAME = "eval_receipts"
@@ -53,6 +62,7 @@ CONTROL_FILENAME = "control.json"
 GOAL_CHECK_FILENAME = "goal_check.json"
 ASSIGNMENT_FILENAME = "assignment.json"
 WORKFLOW_SNAPSHOT_DIRNAME = "workflow_snapshot"
+SCHEDULER_VIEW_FILENAME = "scheduler_view.json"
 TRACE_REF_FILENAME = "trace_ref.json"
 
 
@@ -98,7 +108,25 @@ def write_bytes_atomic(*, path: Path, content: bytes) -> None:
 
 
 def write_json_atomic(*, path: Path, payload: object) -> None:
+    """Crash-safely serialize one JSON document."""
+
     write_text_atomic(path=path, content=json.dumps(payload, indent=2))
+
+
+def _write_json_if_absent_or_equal(*, path: Path, payload: object) -> None:
+    """Create an immutable JSON artifact or verify its existing value."""
+
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"immutable JSON artifact is unreadable: {path}") from exc
+        if existing != payload:
+            raise ValueError(
+                f"immutable JSON artifact contradicts existing value: {path}"
+            )
+        return
+    write_json_atomic(path=path, payload=payload)
 
 
 def append_jsonl_record(*, path: Path, payload: object) -> None:
@@ -140,9 +168,25 @@ def create_session_dir(
     frozen_input_files: dict[str, bytes] | None = None,
     origin: dict[str, object] | None = None,
     workflow_contract: dict[str, object] | None = None,
+    workflow_roster_payload: dict[str, object] | None = None,
+    harness_capability_roster_payload: dict[str, object] | None = None,
+    session_protocol_version: int | None = None,
     schema_version: int = 1,
 ) -> Path:
-    """Create or idempotently materialize a durable session directory."""
+    """Create or idempotently materialize a durable session directory.
+
+    ``schema_version`` selects the engine's persisted state shape, while
+    ``session_protocol_version`` selects the agent-facing contract. When the
+    latter is omitted, historical callers retain their matching v1/v2 layout.
+    """
+
+    effective_protocol_version = (
+        schema_version if session_protocol_version is None else session_protocol_version
+    )
+    if effective_protocol_version not in {1, 2, 3}:
+        raise ValueError("session_protocol_version must be one of 1, 2, or 3")
+    if effective_protocol_version >= 2 and schema_version < 2:
+        raise ValueError("protocol v2/v3 sessions require state schema v2")
 
     created_at = utc_now().isoformat().replace("+00:00", "Z")
     publish_from_staging = False
@@ -237,6 +281,25 @@ def create_session_dir(
             write_json_atomic(path=contract_path, payload=workflow_contract)
         if schema_version >= 2:
             workflow_contract_hash = file_sha256(path=contract_path)
+    if workflow_roster_payload is not None:
+        _write_json_if_absent_or_equal(
+            path=session_dir / WORKFLOW_ROSTER_FILENAME, payload=workflow_roster_payload
+        )
+    if harness_capability_roster_payload is not None:
+        capability_roster_session_id = (
+            session_id if parent_session_id is None else str(root_session_id)
+        )
+        _write_json_if_absent_or_equal(
+            path=(
+                session_dir
+                if capability_roster_session_id == session_id
+                else session_dir_path(
+                    repo_root=repo_root, session_id=capability_roster_session_id
+                )
+            )
+            / HARNESS_CAPABILITY_ROSTER_FILENAME,
+            payload=harness_capability_roster_payload,
+        )
 
     metadata_path = session_dir / SESSION_METADATA_FILENAME
     if not metadata_path.exists():
@@ -320,9 +383,16 @@ def create_session_dir(
     finished = finished_path(repo_root=repo_root, session_id=session_id)
     if not finished.exists():
         write_text_atomic(path=finished, content="# Finished Work\n")
+    if effective_protocol_version == 3:
+        _create_v3_semantic_spine(
+            repo_root=repo_root,
+            session_id=session_id,
+            goal=goal,
+            goal_hash=goal_hash,
+            created_at=created_at,
+        )
     for durable_dir in (
         eval_checks_dir_path(repo_root=repo_root, session_id=session_id),
-        eval_readiness_dir_path(repo_root=repo_root, session_id=session_id),
         eval_receipts_dir_path(repo_root=repo_root, session_id=session_id),
         child_outcomes_dir_path(repo_root=repo_root, session_id=session_id),
         parent_acceptance_dir_path(repo_root=repo_root, session_id=session_id),
@@ -333,6 +403,10 @@ def create_session_dir(
         trace_seals_dir_path(repo_root=repo_root, session_id=session_id),
     ):
         durable_dir.mkdir(parents=True, exist_ok=True)
+    if effective_protocol_version < 3:
+        eval_readiness_dir_path(repo_root=repo_root, session_id=session_id).mkdir(
+            parents=True, exist_ok=True
+        )
     harness_outputs_dir_path(repo_root=repo_root, session_id=session_id).mkdir(
         parents=True, exist_ok=True
     )
@@ -342,7 +416,84 @@ def create_session_dir(
     return session_dir
 
 
+def _create_v3_semantic_spine(
+    *, repo_root: Path, session_id: str, goal: str, goal_hash: str, created_at: str
+) -> None:
+    """Materialize the compact protocol-v3 state skeleton without interpreting it."""
+
+    tasks_dir_path(repo_root=repo_root, session_id=session_id).mkdir(
+        parents=True, exist_ok=True
+    )
+    decisions_dir_path(repo_root=repo_root, session_id=session_id).mkdir(
+        parents=True, exist_ok=True
+    )
+    goal_summary = " ".join(goal.strip().splitlines()) or goal_hash
+    plan = layer_plan_path(repo_root=repo_root, session_id=session_id)
+    if not plan.exists():
+        write_text_atomic(
+            path=plan,
+            content=(
+                "# Layer Plan\n\n"
+                "- Revision: 0\n"
+                f"- Layer goal: {goal_summary}\n"
+                "- Current milestone: none\n\n"
+                "## Outcomes\n\n"
+                "| ID | Outcome | Status | Dependencies | Evidence |\n"
+                "| --- | --- | --- | --- | --- |\n\n"
+                "## Active selection\n\n"
+                "No leaf or child outcome is selected yet.\n\n"
+                "## Risks, assumptions, and replanning triggers\n\n"
+                "None recorded yet.\n"
+            ),
+        )
+    current_state = current_state_path(repo_root=repo_root, session_id=session_id)
+    if not current_state.exists():
+        write_text_atomic(
+            path=current_state,
+            content=(
+                "# Current State\n\n"
+                "- Current outcome: none selected\n"
+                "- Active leaf or child: none\n"
+                "- Blockers: none recorded\n"
+                "- Risks: none recorded\n"
+                "- Next decision: initialize the layer plan\n"
+            ),
+        )
+    eval_state = eval_state_path(repo_root=repo_root, session_id=session_id)
+    if not eval_state.exists():
+        write_text_atomic(
+            path=eval_state,
+            content=(
+                "# Evaluation State\n\n"
+                "No evaluation has been created or run for this layer.\n"
+            ),
+        )
+    handoff = handoff_path(repo_root=repo_root, session_id=session_id)
+    if not handoff.exists():
+        write_json_atomic(
+            path=handoff,
+            payload={
+                "schema_version": 1,
+                "session_id": session_id,
+                "goal_sha256": goal_hash,
+                "revision": 0,
+                "producer": None,
+                "summary": "No orchestrator handoff has been published yet.",
+                "accepted_outcomes": [],
+                "open_work": [],
+                "risks": [],
+                "decision_refs": [],
+                "evidence_refs": [],
+                "delivery_refs": [],
+                "eval_refs": [],
+                "updated_at": created_at,
+            },
+        )
+
+
 def sessions_root_path(*, repo_root: Path) -> Path:
+    """Return the root containing all durable session trees."""
+
     return repo_root / LOOPY_DIRNAME / SESSIONS_DIRNAME
 
 
@@ -451,6 +602,33 @@ def workflow_contract_path(*, repo_root: Path, session_id: str) -> Path:
     )
 
 
+def workflow_roster_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the session-frozen scheduled-role roster path."""
+
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id)
+        / WORKFLOW_ROSTER_FILENAME
+    )
+
+
+def harness_capability_roster_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the tree-root harness capability roster path."""
+
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id)
+        / HARNESS_CAPABILITY_ROSTER_FILENAME
+    )
+
+
+def session_outcome_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the topology-neutral terminal session outcome path."""
+
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id)
+        / SESSION_OUTCOME_FILENAME
+    )
+
+
 def latest_top_level_state_path(*, repo_root: Path) -> Path | None:
     """Return the newest state owned by a valid top-level session identity.
 
@@ -537,10 +715,72 @@ def iterations_dir_path(*, repo_root: Path, session_id: str) -> Path:
 
 
 def project_state_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the compact semantic-state directory for one layer."""
+
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / PROJECT_STATE_DIRNAME
     )
+
+
+def layer_plan_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the layer orchestrator's canonical plan path."""
+
+    return (
+        project_state_dir_path(repo_root=repo_root, session_id=session_id)
+        / PLAN_FILENAME
+    )
+
+
+def tasks_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the stable per-task semantic ledger directory."""
+
+    return (
+        project_state_dir_path(repo_root=repo_root, session_id=session_id)
+        / TASKS_DIRNAME
+    )
+
+
+def current_state_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the layer's compact resumption-state path."""
+
+    return (
+        project_state_dir_path(repo_root=repo_root, session_id=session_id)
+        / CURRENT_STATE_FILENAME
+    )
+
+
+def decisions_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the directory for durable layer decisions."""
+
+    return (
+        project_state_dir_path(repo_root=repo_root, session_id=session_id)
+        / DECISIONS_DIRNAME
+    )
+
+
+def eval_state_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the layer's optional evaluation-evidence index path."""
+
+    return (
+        project_state_dir_path(repo_root=repo_root, session_id=session_id)
+        / EVAL_STATE_FILENAME
+    )
+
+
+def handoff_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the rolling semantic handoff path for one layer."""
+
+    return (
+        project_state_dir_path(repo_root=repo_root, session_id=session_id)
+        / HANDOFF_FILENAME
+    )
+
+
+def inputs_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the session-local immutable and append-only input directory."""
+
+    return session_dir_path(repo_root=repo_root, session_id=session_id) / INPUTS_DIRNAME
 
 
 def eval_checks_dir_path(*, repo_root: Path, session_id: str) -> Path:
@@ -724,6 +964,28 @@ def assignment_path(
             attempt_id=attempt_id,
         )
         / ASSIGNMENT_FILENAME
+    )
+
+
+def scheduler_view_path(
+    *,
+    repo_root: Path,
+    session_id: str,
+    iteration: int,
+    workflow_id: str,
+    attempt_id: str,
+) -> Path:
+    """Return the attempt-frozen conditional scheduler-view path."""
+
+    return (
+        workflow_snapshot_dir_path(
+            repo_root=repo_root,
+            session_id=session_id,
+            iteration=iteration,
+            workflow_id=workflow_id,
+            attempt_id=attempt_id,
+        )
+        / SCHEDULER_VIEW_FILENAME
     )
 
 
