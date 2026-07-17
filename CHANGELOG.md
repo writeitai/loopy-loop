@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.7.1
+
+- Fixed v2 eval-receipt validation to use eval-banana's canonical
+  check-definition digest instead of a raw YAML file hash. Receipts now bind
+  exactly the digest emitted in `report.json`, while loopy-loop independently
+  recomputes it through eval-banana's public API before accepting a result.
+  Requires eval-banana 0.3.5, which also preserves every check's exact judge
+  prompt and collision-safe result, stream, and deterministic-evidence
+  artifacts under the caller-owned attempt trace.
+  An in-flight 0.7.0 attempt that authored a legacy raw-YAML digest is rejected
+  once and must rerun its eval so the receipt carries the canonical digest.
+- Updated stock eval-runner guidance to copy `check_definition_sha256` from
+  eval-banana's report rather than manually hashing YAML with a different
+  protocol.
+- Fixed the stock PM dispatcher contract so a child request hashes an
+  immutable per-request selection snapshot under `project_state/dispatch_inputs/`.
+  The mutable work-item ledger is updated only after request publication and
+  is never itself a declared child input, preventing an otherwise inevitable
+  post-attempt input-hash rejection.
+
 ## 0.7.0
 
 - Added the recursive v2 session-layer contract: immutable scoped goals and

@@ -40,6 +40,8 @@ def _workflow_prompt(*, template: str, workflow_set: str, workflow: str) -> str:
 
 
 def test_packaged_workflow_contracts_name_every_role_and_owner() -> None:
+    """Packaged v2 contracts name every scheduled and artifact-owning role."""
+
     delivery = run_preflight(repo_root=_template_root("inner_outer_eval"))
     parent = run_preflight(repo_root=_template_root("pm_planner_dispatcher"))
 
@@ -64,6 +66,12 @@ def test_packaged_workflow_contracts_name_every_role_and_owner() -> None:
     assert parent.workflow_contract.eval.runner_role == "eval_runner"
     assert parent.workflow_contract.eval.goal_control_role == "eval_runner"
     assert parent.workflow_contract.task_acceptance_role == "planner"
+    dispatch_inputs = next(
+        item
+        for item in parent.workflow_contract.state
+        if item["path"] == "project_state/dispatch_inputs/"
+    )
+    assert dispatch_inputs["accountable_roles"] == ["dispatcher"]
 
 
 def test_explicit_contract_without_protocol_version_defaults_to_v2(
@@ -161,6 +169,8 @@ def test_only_eval_runners_publish_successful_terminal_control() -> None:
 
 
 def test_dispatcher_teaches_v2_pending_child_contract() -> None:
+    """The stock dispatcher publishes v2 requests from immutable input bytes."""
+
     prompt = _workflow_prompt(
         template="pm_planner_dispatcher",
         workflow_set="pm_planner_dispatcher",
@@ -176,6 +186,16 @@ def test_dispatcher_teaches_v2_pending_child_contract() -> None:
     assert '"completion_criteria"' in prompt
     assert '"required_evidence"' in prompt
     assert "Do not copy this parent session's broader" in prompt_words
+    assert "project_state/dispatch_inputs/<request_id>.json" in prompt
+    assert (
+        '"ref": "parent:/project_state/dispatch_inputs/'
+        'stable-unique-request-id.json"' in prompt
+    )
+    assert "Never declare mutable `project_state/work_items.md`" in prompt
+    assert (
+        "immutable snapshot, snapshot hash, request rename, then mutable "
+        "ledger update" in prompt_words
+    )
 
 
 def test_eval_reviewer_examples_match_eval_banana_schema(tmp_path: Path) -> None:
@@ -205,6 +225,8 @@ def test_eval_reviewer_examples_match_eval_banana_schema(tmp_path: Path) -> None
 
 
 def test_eval_runners_pin_judge_and_use_trace_output() -> None:
+    """Packaged runners pin the judge and reuse eval-banana's reported digest."""
+
     validate_command = (
         "eval-banana validate --no-project-config --cwd <repo_root> "
         "--check-dir <eval_checks> "
@@ -219,6 +241,7 @@ def test_eval_runners_pin_judge_and_use_trace_output() -> None:
         prompt = _workflow_prompt(
             template=template, workflow_set=template, workflow="eval_runner"
         )
+        prompt_words = " ".join(prompt.split())
         assert validate_command in prompt
         assert command in prompt
         assert "loopy capture-git-receipt" in prompt
@@ -226,6 +249,8 @@ def test_eval_runners_pin_judge_and_use_trace_output() -> None:
         assert '"reasoning_effort": "high"' in prompt
         assert '"schema_version": 2' in prompt
         assert '"eval_receipt_ref"' in prompt
+        assert "copy the exact `check_definition_sha256`" in prompt_words
+        assert "Do not manually hash" in prompt_words
 
 
 def test_packaged_cadence_runs_eval_after_three_role_successes(

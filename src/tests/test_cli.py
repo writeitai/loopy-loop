@@ -14,6 +14,8 @@ from tests.protocol_helpers import v2_register_body
 
 
 def test_init_scaffolds_expected_files(repo_root: Any, monkeypatch: Any) -> None:
+    """Default init writes a runnable, evidence-bound v2 workflow scaffold."""
+
     monkeypatch.chdir(repo_root)
     runner = CliRunner()
 
@@ -30,6 +32,8 @@ def test_init_scaffolds_expected_files(repo_root: Any, monkeypatch: Any) -> None
     assert "eval-banana run --no-project-config" in default_prompt
     assert "trace:<trace_manifest_id>:/eval/report.json" in default_prompt
     assert "loopy capture-git-receipt" in default_prompt
+    assert "Copy each definition digest from that report" in default_prompt
+    assert "never manually\nhash the YAML" in default_prompt
     root_config = repo_root.joinpath("loopy_loop_config.yaml").read_text(
         encoding="utf-8"
     )

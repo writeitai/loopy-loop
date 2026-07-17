@@ -365,12 +365,17 @@ file under its assigned `child_requests/pending/` directory:
   },
   "inputs": [
     {
-      "ref": "session:/project_state/work-items/FEATURE-4.json",
+      "ref": "session:/project_state/dispatch_inputs/feature-auth-1.json",
       "sha256": "sha256:<64 hex characters>"
     }
   ]
 }
 ```
+
+The packaged PM dispatcher creates that per-request snapshot before hashing
+and publishing the request. It never declares mutable `work_items.md` as an
+input: the dispatcher must update that ledger after publication, while the
+coordinator validates the declared input bytes after the attempt returns.
 
 The coordinator checks the schema, requested workflow set, input reference
 confinement, and input hashes. A dispatchable body is copied unchanged to
@@ -453,7 +458,11 @@ An eval-emitting workflow also writes a small iteration-local
 Every receipt, passing or failing, must have exactly one `raw_report_refs`
 entry: the producing attempt's canonical `eval/report.json`.
 `raw_report_sha256s` has that same single key, and both the canonical and raw
-artifacts must match their full SHA-256 values.
+artifacts must match their full SHA-256 values. Each check's
+`definition_sha256` is eval-banana's canonical, versioned definition digest
+copied from that report, not a raw hash of the YAML file. The coordinator
+independently recomputes the value with eval-banana before accepting the
+receipt.
 `CoordinatorService._read_goal_check_signal()` and
 `_validate_eval_receipt_artifacts()` also check the exact current
 producer/attempt/iteration, root/session/goal identity, every regular

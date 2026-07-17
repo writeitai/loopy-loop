@@ -12,6 +12,7 @@ from typing import Any
 from typing import TypeVar
 import uuid
 
+from eval_banana.runner import compute_check_definition_sha256
 from fastapi import FastAPI
 from fastapi import HTTPException
 from filelock import Timeout as FileLockTimeout
@@ -4885,15 +4886,27 @@ class CoordinatorService:
                 reasons.append(
                     f"eval check {check.check_id!r} does not resolve uniquely"
                 )
-            elif file_sha256(path=matches[0]) != check.definition_sha256:
-                reasons.append(
-                    f"eval check {check.check_id!r} definition hash does not match"
-                )
             elif definition_types[matches[0]] != check.kind:
                 reasons.append(
                     f"eval check {check.check_id!r} kind does not match its "
                     "definition type"
                 )
+            else:
+                try:
+                    definition_sha256 = compute_check_definition_sha256(
+                        source_path=matches[0]
+                    )
+                except (OSError, ValueError) as exc:
+                    reasons.append(
+                        f"authored eval check {matches[0].name!r} cannot be "
+                        f"canonically hashed by eval-banana: {exc}"
+                    )
+                else:
+                    if definition_sha256 != check.definition_sha256:
+                        reasons.append(
+                            f"eval check {check.check_id!r} definition hash does "
+                            "not match"
+                        )
         eval_receipts_dir = (
             session_dir_path(repo_root=self.repo_root, session_id=session_id)
             / "eval_receipts"

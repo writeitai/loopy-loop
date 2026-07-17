@@ -73,16 +73,16 @@ wheels = [
 
 [[package]]
 name = "eval-banana"
-version = "0.3.2"
+version = "0.3.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "pydantic" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d5/8f/a323536fa9eb12322c556f8c7170d6e75caecd2b60f775c105c90c9856e0/eval_banana-0.3.2.tar.gz", hash = "sha256:6c694713189b2e5f904642c380dd3ce7ccb985fbd4432472bc0cd6af2b8a989b", size = 2765571 }
+sdist = { url = "https://files.pythonhosted.org/packages/35/7a/37b7290947c2c8431ec4654f10d676d347414264c09826785a90c694a8c0/eval_banana-0.3.5.tar.gz", hash = "sha256:84a86d5a8ecc802200631cb48e9bc228131a91c70b3d42c407bafec246d1c44d", size = 2771312 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/be/8c/d416ecc414058a781abc1063965fcadbdc85727b1dc7ee5c464370961c9f/eval_banana-0.3.2-py3-none-any.whl", hash = "sha256:d4fd7a320ea2a86bfbb6cff6056b1144b48e9355c38fc18ac896b555ecc5df36", size = 36811 },
+    { url = "https://files.pythonhosted.org/packages/b2/26/1345603725ad4368903f6cf683452e17cadc7adc73b5f0b767980452d0f1/eval_banana-0.3.5-py3-none-any.whl", hash = "sha256:7ea8041e93175c588a782dd43e7d6c667be12d7f21c6028810861f6bc82a2210", size = 38861 },
 ]
 
 [[package]]
@@ -272,7 +272,7 @@ wheels = [
 
 [[package]]
 name = "loopy-loop"
-version = "0.7.0"
+version = "0.7.1"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -298,7 +298,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
-    { name = "eval-banana", specifier = ">=0.3.2" },
+    { name = "eval-banana", specifier = ">=0.3.5" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "filelock", specifier = ">=3.16" },
     { name = "httpx", specifier = ">=0.28" },

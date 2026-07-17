@@ -172,6 +172,8 @@ Missing tools/checks, validation or runner errors, and any failed check are a
 false verdict, not permission to invent evidence. Read the generated
 `<raw_eval_output>/report.json`; verify threshold 1.0, every declared check,
 each `check_definition_sha256`, status, and each result's observed agent/model.
+Copy each definition digest from that report into the receipt; never manually
+hash the YAML because eval-banana owns the canonical definition-digest protocol.
 Use the required parent harness run id from the automatic harness context.
 Read the generated git-after
 receipt. Atomically write a concise canonical report and EvalReceipt v1 under

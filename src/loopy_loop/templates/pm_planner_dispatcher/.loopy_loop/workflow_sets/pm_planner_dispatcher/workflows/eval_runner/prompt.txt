@@ -31,8 +31,12 @@ is `codex`, `details.model` is `gpt-5.5`,
 `details.reasoning_effort` is `high`, and `exit_code` is zero; record those
 observed values rather than assuming the CLI pins won. Also verify the report's
 absolute `project_root` and `output_dir` equal the assignment's `repo_root` and
-`raw_eval_output`. Hash each exact check definition. Read the compact git-after
-receipt produced by the command and bind its exact `head` and
+`raw_eval_output`. For each check, copy the exact
+`check_definition_sha256` value from eval-banana's generated `report.json`
+into the receipt. Do not manually hash the YAML file: eval-banana owns a
+canonical, versioned definition-digest protocol, and loopy-loop independently
+recomputes that same digest during receipt validation. Read the compact
+git-after receipt produced by the command and bind its exact `head` and
 `dirty_tree_digest`; the worker re-captures that same boundary after return.
 
 Atomically publish a compact `<eval_id>.json` receipt and canonical report
