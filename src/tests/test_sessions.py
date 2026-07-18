@@ -16,10 +16,40 @@ from loopy_loop.sessions import session_goal_path
 from loopy_loop.sessions import updates_from_user_path
 
 
-def test_session_id_format() -> None:
-    session_id = create_session_id(goal_hash="71393ee22450")
+def test_root_session_id_is_ordinal_and_slug(repo_root: Any) -> None:
+    session_id = create_session_id(
+        repo_root=repo_root,
+        goal="Ship the ultimate memory program to disk",
+        parent_session_id=None,
+        request_id=None,
+    )
 
-    assert re.fullmatch(r"\d{8}_\d{6}_71393ee22450_[a-f0-9]{8}", session_id)
+    assert session_id == "001_ship-ultimate-memory-program-disk"
+
+
+def test_root_session_ordinal_increments_and_ignores_legacy(repo_root: Any) -> None:
+    from loopy_loop.sessions import sessions_root_path
+
+    root = sessions_root_path(repo_root=repo_root)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "001_first-goal").mkdir()
+    (root / "20260419_143022_71393ee22450_ab12cd34").mkdir()  # legacy sibling
+    session_id = create_session_id(
+        repo_root=repo_root,
+        goal="A second goal entirely",
+        parent_session_id=None,
+        request_id=None,
+    )
+
+    assert session_id == "002_second-goal-entirely"
+
+
+def test_empty_goal_slug_falls_back(repo_root: Any) -> None:
+    session_id = create_session_id(
+        repo_root=repo_root, goal="the a of to", parent_session_id=None, request_id=None
+    )
+
+    assert re.fullmatch(r"001_[a-z0-9-]+", session_id)
 
 
 def test_create_session_and_iteration_dirs(repo_root: Any) -> None:

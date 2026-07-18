@@ -1,4 +1,5 @@
 .loopy_loop/sessions/
+.loopy_loop/sessions/**/raw/
 .loopy_loop/traces/
 .loopy_loop/trace_finalization_outbox/
 .loopy_loop/repository.json

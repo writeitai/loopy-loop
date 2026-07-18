@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.10.0
+
+The session layout, IDs, and traces redesign (session-layout-and-ids.md;
+principles P4/P5/P6). This changes the on-disk shape of newly created
+protocol-v3 sessions; existing sessions keep their frozen layout and finish
+unchanged. New minor release because the durable on-disk shape and generated
+session IDs change for new runs.
+
+- **Readable session IDs.** A new session directory is now
+  `NNN_<slug>` for a root (repo-scoped ordinal, e.g.
+  `001_ship-the-landing-page`) or `NN_<slug>` for a child (ordinal within its
+  parent, slug from the child request id, e.g. `01_phase-0-foundations`),
+  replacing the `YYYYMMDD_HHMMSS_<goalhash12>_<random8>` blob. The ordinal
+  alone makes the name unique within its scope; there is no random suffix.
+  Timestamp, goal hash, and a uuid are kept as machine fields in
+  `session.json`. IDs are derived exactly once, at creation, and passed as
+  values — never re-derived by parsing a path or re-hashing content. Legacy
+  timestamp-style session directories keep loading and operating; id validation
+  accepts both forms.
+- **Traces folded into the session tree.** A new session writes every
+  per-attempt raw artifact under `sessions/<id>/raw/<NNNN>_<workflow>/` (with
+  the same `git/`, `harness/<run>/`, `protocol/`, `eval/`, `service/`
+  subareas), instead of a parallel top-level `.loopy_loop/traces/` mirror. The
+  attempt is identified by its iteration prefix; the attempt hash stays inside
+  the artifacts. `trace_seals/`, `trace_finalization_outbox/`,
+  `trace_manifest.json`, and the sealing/finalization machinery are retired for
+  new sessions (they only existed to keep the mirror tree honest). An
+  iteration's trace reference is now a plain session-relative path into `raw/`
+  (`trace_ref.json` → `raw/<NNNN>_<workflow>`), not a `trace:<hash>` manifest
+  ref. Raw writers keep atomic file writes for crash safety. Legacy sessions
+  with existing `traces/` trees remain readable.
+- **Self-describing receipt names.** New sessions merge the git and delivery
+  receipt families into one `receipts/` directory; engine-authored git
+  boundary receipts are named `receipts/<NNNN>_<workflow>_git_<phase>.json`
+  (e.g. `0026_outer_git_after.json`) so `ls` output is legible without opening
+  files (P4). Eval receipts keep their own already-self-describing
+  `eval_receipts/` directory (see deferrals). Readers accept the legacy
+  per-family directories for old sessions.
+- **`raw/` is the prunable boundary.** Each new session ships a `.gitignore`
+  ignoring `raw/`, the repo-level and template `.gitignore` add
+  `.loopy_loop/sessions/**/raw/`, and a new
+  `loopy prune-raw [--older-than DAYS] [--session ID] [--legacy-traces]`
+  command deletes raw artifacts (and, with `--legacy-traces`, legacy mirror
+  trees) without ever touching the durable session tree.
+- **Prompt placement rule.** Both stock `preamble.txt` files now tell agents
+  that scratch and verbose output go to the raw scratch dir, while anything
+  another agent or human might cite as evidence — reports, audits, reviews —
+  goes in the durable tree (`project_state/` or the iteration dir), never the
+  prunable raw dir. The rendered header's "scratch dir" line points at the new
+  raw location for new sessions.
+- **Deferred (stretch, noted):** collapsing
+  `harness_capability_roster.json` / `workflow_roster.json` /
+  `workflow_contract.json` / `goal_contract.json` into `session.json` was not
+  done — those files are hash-pinned frozen projections restored before every
+  dispatch and forwarded to team-harness, so folding them would ripple across
+  the frozen-state machinery. Eval receipts were likewise kept in their own
+  directory rather than merged into `receipts/`, because their raw-report
+  provenance binding is load-bearing v3 machinery and their filenames are
+  already self-describing.
+
 ## 0.9.0
 
 - Added child request schema v3: a single free-text `goal` brief with

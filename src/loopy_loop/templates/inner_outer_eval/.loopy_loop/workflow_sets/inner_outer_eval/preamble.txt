@@ -14,6 +14,10 @@
 - Never merge or declare work done on failing checks. Use only the permissions
   and credentials already granted; take no destructive or billable action you
   were not authorized to take.
-- Write long reports, transcripts, and verbose output to files in your scratch
-  dir and return a short result card: outcome, key decisions, files changed, and
-  absolute paths to anything you wrote.
+- Scratch and verbose output — long transcripts, raw dumps, tool logs — go to
+  your iteration's raw scratch dir (the scratch dir named in your header).
+  Anything you or another agent might later cite as evidence — reports, audits,
+  reviews, analyses — goes in the durable tree (project_state/ or your iteration
+  dir), never the raw dir: the raw dir is prunable. Return a short result card:
+  outcome, key decisions, files changed, and absolute paths to anything you
+  wrote.

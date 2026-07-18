@@ -4,6 +4,7 @@ from importlib.resources import files
 from importlib.resources.abc import Traversable
 import json
 from pathlib import Path
+import shutil
 import time
 import uuid
 
@@ -26,9 +27,14 @@ from loopy_loop.git_evidence import capture_git_evidence
 from loopy_loop.models import LoopState
 from loopy_loop.models import utc_now
 from loopy_loop.sessions import append_jsonl_record
+from loopy_loop.sessions import raw_dir_path
+from loopy_loop.sessions import RAW_DIRNAME
 from loopy_loop.sessions import session_dir_path
 from loopy_loop.sessions import SESSION_METADATA_FILENAME
+from loopy_loop.sessions import sessions_root_path
 from loopy_loop.sessions import state_path
+from loopy_loop.sessions import trace_finalization_outbox_dir_path
+from loopy_loop.sessions import traces_root_path
 from loopy_loop.sessions import user_updates_journal_path
 from loopy_loop.sessions import write_json_atomic
 from loopy_loop.state_store import StateStore
@@ -89,6 +95,11 @@ PACKAGED_TEMPLATE_EXTRA_SOURCES: dict[str, list[tuple[str, str]]] = {
 PACKAGED_TEMPLATE_NAMES = list(PACKAGED_TEMPLATE_FILES_BY_NAME)
 GITIGNORE_LINES = [
     ".loopy_loop/sessions/",
+    # New sessions keep prunable raw artifacts under sessions/<id>/raw/; the
+    # line below is what keeps them ignored if sessions/ is ever tracked, and
+    # each new session also ships its own .gitignore for raw/.
+    ".loopy_loop/sessions/**/raw/",
+    # Legacy mirror trees (pre-folded sessions).
     ".loopy_loop/traces/",
     ".loopy_loop/trace_finalization_outbox/",
     ".loopy_loop/repository.json",
@@ -569,6 +580,126 @@ def _deepest_active_session_id(*, repo_root: Path) -> str | None:
             break
         state = child_state
     return state.active_session_id
+
+
+@main.command("prune-raw")
+@click.option(
+    "--older-than",
+    "older_than_days",
+    type=float,
+    default=None,
+    help="Only prune raw artifacts whose iteration dir is older than DAYS days.",
+)
+@click.option(
+    "--session",
+    "session_id",
+    type=str,
+    default=None,
+    help="Only prune the raw dir of this session.",
+)
+@click.option(
+    "--legacy-traces",
+    "legacy_traces",
+    is_flag=True,
+    default=False,
+    help="Also delete legacy .loopy_loop/traces/ mirror trees.",
+)
+def prune_raw(
+    older_than_days: float | None, session_id: str | None, legacy_traces: bool
+) -> None:
+    """Delete prunable raw attempt artifacts; never touch durable state.
+
+    Removes the contents of each session's ``raw/`` directory (and, with
+    ``--legacy-traces``, the historical ``.loopy_loop/traces/`` mirror). The
+    durable session tree — plans, receipts, iterations, handoffs — is never
+    touched.
+    """
+
+    repo_root = Path.cwd().resolve()
+    cutoff: float | None = None
+    if older_than_days is not None:
+        if older_than_days < 0:
+            raise click.ClickException("--older-than must be a non-negative number")
+        cutoff = time.time() - older_than_days * 86400.0
+    removed = 0
+    for raw_dir in _iter_prunable_raw_dirs(repo_root=repo_root, session_id=session_id):
+        for entry in sorted(raw_dir.iterdir()):
+            if entry.is_symlink():
+                continue
+            if cutoff is not None and entry.stat().st_mtime > cutoff:
+                continue
+            _remove_prunable(path=entry)
+            removed += 1
+    legacy_removed = 0
+    if legacy_traces:
+        legacy_removed = _prune_legacy_traces(
+            repo_root=repo_root, session_id=session_id, cutoff=cutoff
+        )
+    message = f"pruned {removed} raw attempt dir(s)"
+    if legacy_traces:
+        message += f"; removed {legacy_removed} legacy trace tree(s)"
+    click.echo(message)
+
+
+def _iter_prunable_raw_dirs(*, repo_root: Path, session_id: str | None):
+    """Yield the ``raw/`` directories that prune-raw is allowed to empty."""
+
+    if session_id is not None:
+        raw_dir = raw_dir_path(repo_root=repo_root, session_id=session_id)
+        if raw_dir.is_dir() and not raw_dir.is_symlink():
+            yield raw_dir
+        return
+    sessions_root = sessions_root_path(repo_root=repo_root)
+    if not sessions_root.exists():
+        return
+    for path in sorted(sessions_root.rglob(RAW_DIRNAME)):
+        if (
+            path.is_dir()
+            and not path.is_symlink()
+            and (path.parent / SESSION_METADATA_FILENAME).is_file()
+        ):
+            yield path
+
+
+def _prune_legacy_traces(
+    *, repo_root: Path, session_id: str | None, cutoff: float | None
+) -> int:
+    """Delete legacy mirror-tree contents; return how many trees were removed."""
+
+    removed = 0
+    traces_root = traces_root_path(repo_root=repo_root)
+    if not traces_root.is_dir():
+        return removed
+    if session_id is None:
+        for entry in sorted(traces_root.iterdir()):
+            if entry.is_symlink():
+                continue
+            if cutoff is not None and entry.stat().st_mtime > cutoff:
+                continue
+            _remove_prunable(path=entry)
+            removed += 1
+        outbox = trace_finalization_outbox_dir_path(repo_root=repo_root)
+        if outbox.is_dir():
+            for entry in sorted(outbox.iterdir()):
+                if not entry.is_symlink():
+                    _remove_prunable(path=entry)
+        return removed
+    for candidate in sorted(traces_root.glob(f"*/sessions/{session_id}")):
+        if candidate.is_dir() and not candidate.is_symlink():
+            if cutoff is not None and candidate.stat().st_mtime > cutoff:
+                continue
+            _remove_prunable(path=candidate)
+            removed += 1
+    return removed
+
+
+def _remove_prunable(*, path: Path) -> None:
+    """Remove one prunable file or directory tree."""
+
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
 
 
 @main.command()

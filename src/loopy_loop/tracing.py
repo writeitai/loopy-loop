@@ -11,7 +11,10 @@ from typing import Any
 
 from loopy_loop.sessions import assignment_path
 from loopy_loop.sessions import attempt_trace_dir_path
+from loopy_loop.sessions import raw_attempt_dir_path
 from loopy_loop.sessions import session_dir_path
+from loopy_loop.sessions import SESSION_LAYOUT_FOLDED
+from loopy_loop.sessions import SESSION_LAYOUT_MIRROR
 from loopy_loop.sessions import trace_ref_path
 from loopy_loop.sessions import trace_seal_receipt_path
 from loopy_loop.sessions import traces_root_path
@@ -36,9 +39,25 @@ def create_attempt_trace(
     workflow_id: str,
     iteration: int,
     attempt_id: str,
+    layout: str = SESSION_LAYOUT_MIRROR,
 ) -> tuple[Path, dict[str, Any]]:
-    """Create or reopen the canonical raw local trace for one exact attempt."""
+    """Create or reopen the raw local trace directory for one exact attempt.
 
+    A ``folded`` session keeps raw artifacts under ``sessions/<id>/raw/<NNNN>_
+    <workflow>/`` with the same subareas (protocol/harness/agents/eval/git/
+    service) but no per-attempt manifest or seal: the iteration prefix
+    identifies the attempt, and the durable session tree is where evidence
+    lives. A ``mirror`` session keeps the historical parallel traces tree.
+    """
+
+    if layout == SESSION_LAYOUT_FOLDED:
+        return _create_folded_attempt_raw(
+            repo_root=repo_root,
+            session_id=session_id,
+            iteration=iteration,
+            workflow_id=workflow_id,
+            attempt_id=attempt_id,
+        )
     trace_root = attempt_trace_dir_path(
         repo_root=repo_root.resolve(),
         root_session_id=root_session_id,
@@ -117,6 +136,47 @@ def create_attempt_trace(
     return trace_root, manifest
 
 
+def _create_folded_attempt_raw(
+    *,
+    repo_root: Path,
+    session_id: str,
+    iteration: int,
+    workflow_id: str,
+    attempt_id: str,
+) -> tuple[Path, dict[str, Any]]:
+    """Create one iteration's raw dir inside the session (no manifest, no seal)."""
+
+    trace_root = raw_attempt_dir_path(
+        repo_root=repo_root.resolve(),
+        session_id=session_id,
+        iteration=iteration,
+        workflow_id=workflow_id,
+    ).resolve()
+    trace_root.mkdir(parents=True, exist_ok=True)
+    for name in ("protocol", "harness", "agents", "eval", "git", "service"):
+        (trace_root / name).mkdir(parents=True, exist_ok=True)
+    session_root = session_dir_path(
+        repo_root=repo_root.resolve(), session_id=session_id
+    ).resolve()
+    relative_raw = trace_root.relative_to(session_root).as_posix()
+    write_json_atomic(
+        path=trace_ref_path(
+            repo_root=repo_root,
+            session_id=session_id,
+            iteration=iteration,
+            workflow_id=workflow_id,
+        ),
+        payload={
+            "schema_version": 2,
+            "layout": SESSION_LAYOUT_FOLDED,
+            "raw_dir": relative_raw,
+            "raw_dir_ref": f"session:/{relative_raw}",
+            "attempt_id": attempt_id,
+        },
+    )
+    return trace_root, {}
+
+
 def trace_write_json(*, trace_root: Path, relative_path: str, payload: Any) -> Path:
     """Persist a JSON payload unchanged under a trace-confined relative path."""
 
@@ -136,9 +196,14 @@ def trace_write_text(*, trace_root: Path, relative_path: str, content: str) -> P
 def update_trace_manifest(
     *, trace_root: Path, updates: dict[str, Any]
 ) -> dict[str, Any]:
-    """Merge coordinator-owned lifecycle or channel facts into an active manifest."""
+    """Merge coordinator-owned lifecycle or channel facts into an active manifest.
+
+    A folded raw dir has no manifest to update, so this is a no-op there.
+    """
 
     path = trace_root / TRACE_MANIFEST_FILENAME
+    if not path.is_file():
+        return {}
     manifest = _read_manifest(path=path)
     _deep_update(target=manifest, updates=updates)
     write_json_atomic(path=path, payload=manifest)
@@ -152,8 +217,14 @@ def import_harness_artifacts(
     session_output_dir: str,
     harness_run_id: str,
 ) -> None:
-    """Validate the caller-owned harness run and project its channel completeness."""
+    """Validate the caller-owned harness run and project its channel completeness.
 
+    A folded raw dir keeps the harness run in place without a manifest to
+    project completeness into, so this is a no-op there.
+    """
+
+    if not (trace_root / TRACE_MANIFEST_FILENAME).is_file():
+        return
     manifest = _read_manifest(path=trace_root / TRACE_MANIFEST_FILENAME)
     identity = manifest.get("identity")
     if not isinstance(identity, dict):
@@ -459,9 +530,16 @@ def seal_attempt_trace(
     incomplete: bool = False,
     repo_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Freeze raw trace bytes into a completeness-aware hashed inventory."""
+    """Freeze raw trace bytes into a completeness-aware hashed inventory.
+
+    A folded raw dir is never sealed: its raw noise is prunable and its
+    evidence lives in the durable session tree, so there is no manifest or seal
+    receipt to write.
+    """
 
     manifest_path = trace_root / TRACE_MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        return {"lifecycle": "unsealed", "inventory": []}
     manifest = _read_manifest(path=manifest_path)
     if manifest.get("lifecycle") in {"sealed", "incomplete"}:
         if repo_root is not None:
