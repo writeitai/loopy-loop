@@ -92,6 +92,7 @@ from loopy_loop.sessions import control_rejected_dir_path
 from loopy_loop.sessions import create_session_dir
 from loopy_loop.sessions import create_session_id
 from loopy_loop.sessions import delivery_receipts_dir_path
+from loopy_loop.sessions import eval_request_path
 from loopy_loop.sessions import file_sha256
 from loopy_loop.sessions import git_receipts_dir_path
 from loopy_loop.sessions import goal_check_path
@@ -348,7 +349,13 @@ def _build_workflow_roster(
             expected_outputs.extend(["eval_checks/", "project_state/eval_state.md"])
         if workflow.id in contract.check_runner_roles:
             authorities.append("eval_check_runner")
-            expected_outputs.extend(["eval_receipts/", "project_state/eval_state.md"])
+            # v3 evaluation is agent-authored advisory evidence
+            # (project_state/eval_results.md, written by the check-runner role);
+            # the engine no longer advertises the retired eval_receipts/ output.
+            # Sessions whose frozen roster predates this keep their own
+            # advertisement, and the receipt-sealing machinery below stays
+            # contract-gated so their receipts are still accepted.
+            expected_outputs.append("project_state/eval_state.md")
         if workflow.id in contract.terminal_blocker_reporting_roles:
             authorities.append("terminal_blocker_reporting")
         run_after = (
@@ -934,6 +941,7 @@ class CoordinatorService:
             workflows=workflows,
             history=state.history,
             iteration_count=state.iteration_count,
+            eval_requested=self._eval_requested(state=state),
         )
         if workflow is None:
             state.stop_reason = "no_eligible_workflow"
@@ -1095,6 +1103,7 @@ class CoordinatorService:
             workflows=self._workflows_for(workflow_set=state.workflow_set),
             history=projected_history,
             iteration_count=task.iteration,
+            eval_requested=self._eval_requested(state=state),
         )
         reasons = (
             [
@@ -3367,6 +3376,18 @@ class CoordinatorService:
     def _workflows_for(self, *, workflow_set: str) -> list[WorkflowDefinition]:
         return self._preflight_for(workflow_set=workflow_set).workflows
 
+    def _eval_requested(self, *, state: LoopState) -> bool:
+        """Return whether the active session has a pending eval request.
+
+        The file-existence predicate behind `run_when_requested`: a workflow so
+        marked is eligible only while the orchestrator's
+        project_state/eval_request.md stands.
+        """
+
+        return eval_request_path(
+            repo_root=self.repo_root, session_id=state.active_session_id
+        ).exists()
+
     def _workflows_by_id_for(
         self, *, workflow_set: str
     ) -> dict[str, WorkflowDefinition]:
@@ -3421,7 +3442,7 @@ class CoordinatorService:
                 )
                 continue
             request_id = _child_request_id(request=request, path=request_path)
-            if request.schema_version == 2:
+            if request.schema_version >= 2:
                 replay_state = self._accepted_request_replay_state(
                     parent_session_id=state.active_session_id,
                     request_id=request_id,
@@ -3456,7 +3477,7 @@ class CoordinatorService:
                 # filename tombstone remains the only available replay key.
                 request_path.unlink(missing_ok=True)
                 continue
-            if request.schema_version == 2:
+            if request.schema_version >= 2:
                 latest = state.history[-1] if state.history else None
                 if (
                     latest is None

@@ -468,3 +468,170 @@ def test_eval_runner_waits_for_eval_reviewer_predecessor(
     assert before_reviewer.id == "eval_reviewer"
     assert after_reviewer is not None
     assert after_reviewer.id == "eval_runner"
+
+
+def _requested_eval_repo(repo_builder: Any):
+    return repo_builder(
+        workflows={
+            "outer": {
+                "prompt": "Plan",
+                "config": {
+                    "enabled": True,
+                    "priority": 10,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "run_on_start": True,
+                    "description": "",
+                },
+            },
+            "eval_runner": {
+                "prompt": "Run evals",
+                "config": {
+                    "enabled": True,
+                    "priority": 100,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "run_when_requested": True,
+                    "emits_goal_check": True,
+                    "description": "",
+                },
+            },
+        }
+    )
+
+
+def test_run_when_requested_gates_on_pending_request(
+    repo_builder: Any, history_entry_factory: Any
+) -> None:
+    repo_root = _requested_eval_repo(repo_builder)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
+    history = [history_entry_factory(iteration=1, workflow_id="outer", success=True)]
+
+    without_request = choose_next_workflow(
+        workflows=workflows, history=history, iteration_count=2, eval_requested=False
+    )
+    with_request = choose_next_workflow(
+        workflows=workflows, history=history, iteration_count=2, eval_requested=True
+    )
+
+    # Higher-priority eval_runner is invisible until a request is pending, then
+    # it wins the tie-break — the gate composes with priority.
+    assert without_request is not None
+    assert without_request.id == "outer"
+    assert with_request is not None
+    assert with_request.id == "eval_runner"
+
+
+def test_run_when_requested_default_is_off(repo_builder: Any) -> None:
+    repo_root = _requested_eval_repo(repo_builder)
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
+
+    # Default eval_requested=False keeps requested-only workflows out.
+    chosen = choose_next_workflow(workflows=workflows, history=[], iteration_count=0)
+
+    assert chosen is not None
+    assert chosen.id == "outer"
+
+
+def test_run_when_requested_run_on_start_authors_initial_checkset(
+    repo_builder: Any, history_entry_factory: Any
+) -> None:
+    repo_root = repo_builder(
+        workflows={
+            "outer": {
+                "prompt": "Plan",
+                "config": {
+                    "enabled": True,
+                    "priority": 10,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "run_on_start": True,
+                    "description": "",
+                },
+            },
+            "eval_reviewer": {
+                "prompt": "Author checks",
+                "config": {
+                    "enabled": True,
+                    "priority": 100,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "run_on_start": True,
+                    "run_when_requested": True,
+                    "description": "",
+                },
+            },
+        }
+    )
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
+
+    # At start (no successful history), run_on_start bypasses the requested gate
+    # so the initial check-set is authored even without a pending request (C3).
+    at_start = choose_next_workflow(
+        workflows=workflows, history=[], iteration_count=0, eval_requested=False
+    )
+
+    # After a success, the run_on_start window has closed; eval_reviewer is now
+    # eligible only on request.
+    history = [history_entry_factory(iteration=1, workflow_id="outer", success=True)]
+    after_success_no_request = choose_next_workflow(
+        workflows=workflows, history=history, iteration_count=2, eval_requested=False
+    )
+    after_success_with_request = choose_next_workflow(
+        workflows=workflows, history=history, iteration_count=2, eval_requested=True
+    )
+
+    assert at_start is not None
+    assert at_start.id == "eval_reviewer"
+    assert after_success_no_request is not None
+    assert after_success_no_request.id == "outer"
+    assert after_success_with_request is not None
+    assert after_success_with_request.id == "eval_reviewer"
+
+
+def test_run_when_requested_still_composes_with_must_follow(
+    repo_builder: Any, history_entry_factory: Any
+) -> None:
+    repo_root = repo_builder(
+        workflows={
+            "outer": {
+                "prompt": "Plan",
+                "config": {
+                    "enabled": True,
+                    "priority": 10,
+                    "run_every": 1,
+                    "must_follow": None,
+                    "not_before_iteration": 0,
+                    "run_on_start": True,
+                    "description": "",
+                },
+            },
+            "eval_runner": {
+                "prompt": "Run evals",
+                "config": {
+                    "enabled": True,
+                    "priority": 100,
+                    "run_every": 1,
+                    "must_follow": "outer",
+                    "not_before_iteration": 0,
+                    "run_when_requested": True,
+                    "emits_goal_check": True,
+                    "description": "",
+                },
+            },
+        }
+    )
+    workflows = load_workflow_definitions(repo_root=repo_root, workflow_set="main")
+
+    # A pending request cannot bypass must_follow: eval_runner requires a most
+    # recent successful outer, absent here.
+    gated_by_predecessor = choose_next_workflow(
+        workflows=workflows, history=[], iteration_count=0, eval_requested=True
+    )
+
+    assert gated_by_predecessor is not None
+    assert gated_by_predecessor.id == "outer"

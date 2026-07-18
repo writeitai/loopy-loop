@@ -30,6 +30,7 @@ LOOPY_DIRNAME = ".loopy_loop"
 WORKFLOWS_DIRNAME = "workflows"
 WORKFLOW_SETS_DIRNAME = "workflow_sets"
 WORKFLOW_SET_CONTRACT_FILENAME = "contract.yaml"
+WORKFLOW_SET_PREAMBLE_FILENAME = "preamble.txt"
 GOAL_HASH_LENGTH = 12
 DEFAULT_GOAL_CHECK_FAILURE_CAP = 3
 DEFAULT_WORKFLOW_FAILURE_CAP = 5
@@ -48,6 +49,7 @@ DEFAULT_WORKFLOW_DESCRIPTION = ""
 DEFAULT_WORKFLOW_PRIORITY = 0
 DEFAULT_WORKFLOW_RUN_ON_START = False
 DEFAULT_WORKFLOW_EMITS_GOAL_CHECK = False
+DEFAULT_WORKFLOW_RUN_WHEN_REQUESTED = False
 CANONICAL_MODEL_TIER_DESCRIPTIONS: dict[str, str] = {
     "frontier": (
         "maximum-capability work: the hardest planning, architecture, "
@@ -228,6 +230,26 @@ class RootConfig(BaseModel):
     team_harness_system_prompt_extension: str = Field(
         default=DEFAULT_SYSTEM_PROMPT_EXTENSION,
         description="Additional system prompt text appended for every harness run.",
+    )
+    team_harness_compact_above_tokens: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Optional coordinator-context compaction threshold passed to "
+            "team-harness as compact_above_tokens. Leave null to use the "
+            "installed team-harness default; ignored gracefully when the "
+            "installed team-harness does not accept it. Belongs in the wire "
+            "snapshot like the other team_harness_* fields."
+        ),
+    )
+    team_harness_prompt_cache: str | None = Field(
+        default=None,
+        description=(
+            "Optional provider prompt-cache mode passed to team-harness as "
+            "prompt_cache. Leave null to use the installed team-harness "
+            "default; ignored gracefully when the installed team-harness does "
+            "not accept it. Belongs in the wire snapshot."
+        ),
     )
     recovery_policy: Literal["drain", "reap"] = Field(
         default="drain",
@@ -430,6 +452,15 @@ class WorkflowConfig(BaseModel):
     emits_goal_check: bool = Field(
         default=DEFAULT_WORKFLOW_EMITS_GOAL_CHECK,
         description="Whether this workflow is expected to write goal_check.json.",
+    )
+    run_when_requested: bool = Field(
+        default=DEFAULT_WORKFLOW_RUN_WHEN_REQUESTED,
+        description=(
+            "Gate this workflow on an explicit orchestrator request: when true "
+            "it is eligible only while project_state/eval_request.md exists in "
+            "the session. Composes with the other gates (must_follow, priority, "
+            "enabled) and can stand in for run_after_successes on that workflow."
+        ),
     )
 
 
@@ -762,6 +793,30 @@ def workflow_set_contract_path(*, repo_root: Path, workflow_set: str) -> Path:
         workflow_set_dir_path(repo_root=repo_root, workflow_set=workflow_set)
         / WORKFLOW_SET_CONTRACT_FILENAME
     )
+
+
+def workflow_set_preamble_path(*, repo_root: Path, workflow_set: str) -> Path:
+    """Return the shared-ground-rules preamble path for a workflow set."""
+
+    return (
+        workflow_set_dir_path(repo_root=repo_root, workflow_set=workflow_set)
+        / WORKFLOW_SET_PREAMBLE_FILENAME
+    )
+
+
+def load_workflow_set_preamble(*, repo_root: Path, workflow_set: str) -> str | None:
+    """Return the workflow set's shared preamble text, or None when absent.
+
+    The renderer includes this once per iteration under "Shared ground rules:"
+    so per-role prompts never repeat the workflow set's shared rules. Stock
+    preamble files are authored by the workflow-set templates; this reader is
+    the inclusion mechanism only.
+    """
+
+    path = workflow_set_preamble_path(repo_root=repo_root, workflow_set=workflow_set)
+    if not path.is_file():
+        return None
+    return path.read_text(encoding="utf-8")
 
 
 def load_workflow_set_contract(

@@ -24,7 +24,9 @@ def test_inner_outer_eval_template_preflight() -> None:
     assert preflight.root_config.team_harness_provider == "codex"
     assert preflight.workflow_contract.completion_role == "outer"
     assert preflight.workflow_contract.check_author_roles == ["eval_reviewer", "outer"]
-    assert preflight.workflow_contract.check_runner_roles == ["eval_runner", "outer"]
+    # eval_runner records advisory results in eval_results.md (receipts retired),
+    # so it is no longer a contract check-runner role the engine seals receipts for.
+    assert preflight.workflow_contract.check_runner_roles == ["outer"]
     orchestration = preflight.workflow_contract.orchestration
     assert orchestration is not None
     assert orchestration.task_acceptance_owner == "outer"

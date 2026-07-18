@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -179,24 +180,40 @@ def test_worker_reads_prompt_from_disk(
 
     run_worker_loop(repo_root=repo_root, coordinator_url="http://coord")
 
-    assert "loopy-loop assignment" in captured["prompt"]
-    assert "Disk prompt body" in captured["prompt"]
-    assert "Workflow body:" in captured["prompt"]
-    assert "Goal:" in captured["prompt"]
-    assert "Completion criteria:" in captured["prompt"]
-    assert "Stop criteria:" in captured["prompt"]
-    assert "Workflow set: main" in captured["prompt"]
-    assert "Session directory:" in captured["prompt"]
-    assert "Session goal path:" in captured["prompt"]
-    assert "Session project_state directory:" in captured["prompt"]
-    assert "Session eval_checks directory:" in captured["prompt"]
-    assert "Session updates_from_user path:" in captured["prompt"]
-    assert "Session child_requests directory:" in captured["prompt"]
-    assert "Session control path:" in captured["prompt"]
-    assert "Session finished ledger path:" in captured["prompt"]
-    assert "Session harness outputs directory:" in captured["prompt"]
-    # Assignment ID should NOT appear.
-    assert "Assignment ID" not in captured["prompt"]
+    prompt = captured["prompt"]
+    # Diet header contract (single-goal-assignments.md §3).
+    assert prompt.startswith("loopy-loop assignment — iteration 0001, role: planner")
+    assert "Disk prompt body" in prompt
+    assert "Workflow body:" in prompt
+    assert "Goal:" in prompt
+    assert "Completion criteria:" in prompt
+    assert "Stop criteria:" in prompt
+    assert "You are inside a durable looping session. Key paths:" in prompt
+    assert "- session dir:" in prompt
+    assert "- project_state/" in prompt
+    assert "- child_requests/pending/" in prompt
+    assert "- control.json" in prompt
+    assert "- scratch dir (this iteration):" in prompt
+    assert "- paths.json:" in prompt
+    # The old inlined path enumeration and envelope dump are gone.
+    assert "Session directory:" not in prompt
+    assert "Absolute paths from the assignment envelope:" not in prompt
+    assert "Assignment ID" not in prompt
+    # The full machine path map now lives in a sibling paths.json.
+    paths_file = (
+        repo_root
+        / ".loopy_loop"
+        / "sessions"
+        / "goal_20260419_143022_ab12cd34"
+        / "iterations"
+        / "0001_planner"
+        / "paths.json"
+    )
+    assert paths_file.is_file()
+    paths = json.loads(paths_file.read_text(encoding="utf-8"))
+    assert paths["schema_version"] == 1
+    assert paths["session_paths"]["project_state"].endswith("project_state")
+    assert paths["previous_worker_sessions"] is None
 
 
 def test_worker_includes_goal_check_path_for_emitting_workflow(
@@ -238,9 +255,20 @@ def test_worker_includes_goal_check_path_for_emitting_workflow(
     )
     _run_task(repo_root=repo_root, task=task)
 
-    assert "goal_check.json output path:" in captured["prompt"]
-    assert "0003_eval_runner/goal_check.json" in captured["prompt"]
-    assert "Iteration harness output root:" in captured["prompt"]
+    # goal_check output and the iteration scratch root move to paths.json.
+    assert "goal_check.json output path:" not in captured["prompt"]
+    paths_file = (
+        repo_root
+        / ".loopy_loop"
+        / "sessions"
+        / "goal_20260419_143022_ab12cd34"
+        / "iterations"
+        / "0003_eval_runner"
+        / "paths.json"
+    )
+    paths = json.loads(paths_file.read_text(encoding="utf-8"))
+    assert paths["goal_check_output"].endswith("0003_eval_runner/goal_check.json")
+    assert "harness_outputs/0003_eval_runner" in paths["scratch_dir"]
     assert "harness_outputs/0003_eval_runner" in captured["prompt"]
 
 
@@ -263,20 +291,140 @@ def test_render_prompt_includes_parent_session_for_child(
         parent_session_id=parent_session_id,
     )
 
+    iteration_dir = child_dir / "iterations" / "0001_inner"
     prompt = _render_prompt(
         config_snapshot=snapshot_factory(),
         session_id=child_session_id,
         workflow_set="inner_outer_eval",
         iteration=1,
         workflow_id="inner",
-        iteration_dir=child_dir / "iterations" / "0001_inner",
+        iteration_dir=iteration_dir,
         harness_output_root=child_dir / "harness_outputs" / "0001_inner",
         workflow_prompt="Do child work.",
         repo_root=repo_root,
     )
 
-    assert "Parent session directory:" in prompt
-    assert parent_session_id in prompt
+    # The parent session directory moves from the header into paths.json.
+    assert "Parent session directory:" not in prompt
+    paths = json.loads((iteration_dir / "paths.json").read_text(encoding="utf-8"))
+    assert paths["parent_session_dir"] is not None
+    assert parent_session_id in paths["parent_session_dir"]
+
+
+def _render_synthetic_workflow_set(
+    *,
+    repo_root: Path,
+    snapshot_factory: Any,
+    goal: str,
+    preamble: str | None,
+    completion_criteria: list[str] | None = None,
+    stop_criteria: list[str] | None = None,
+) -> str:
+    session_id = "goal_20260419_143022_ab12cd34"
+    session_dir = create_session_dir(
+        repo_root=repo_root,
+        session_id=session_id,
+        goal_hash="ab12cd34ef56",
+        workflow_set="synthetic",
+    )
+    if preamble is not None:
+        preamble_path = (
+            repo_root / ".loopy_loop" / "workflow_sets" / "synthetic" / "preamble.txt"
+        )
+        preamble_path.parent.mkdir(parents=True, exist_ok=True)
+        preamble_path.write_text(preamble, encoding="utf-8")
+    snapshot = snapshot_factory(
+        goal=goal,
+        completion_criteria=completion_criteria
+        if completion_criteria is not None
+        else [],
+        stop_criteria=stop_criteria if stop_criteria is not None else [],
+    )
+    return _render_prompt(
+        config_snapshot=snapshot,
+        session_id=session_id,
+        workflow_set="synthetic",
+        iteration=26,
+        workflow_id="outer",
+        iteration_dir=session_dir / "iterations" / "0026_outer",
+        harness_output_root=session_dir / "harness_outputs" / "0026_outer",
+        workflow_prompt="Do the synthetic role work.",
+        repo_root=repo_root,
+    )
+
+
+def test_render_header_matches_diet_shape(
+    repo_root: Any, snapshot_factory: Any
+) -> None:
+    prompt = _render_synthetic_workflow_set(
+        repo_root=repo_root,
+        snapshot_factory=snapshot_factory,
+        goal="Deliver the thing.",
+        preamble=None,
+    )
+
+    assert prompt.startswith(
+        "loopy-loop assignment — iteration 0026, role: outer, "
+        "session: goal_20260419_143022_ab12cd34\n\nGoal:\nDeliver the thing.\n"
+    )
+    # Empty criteria lists omit their sections entirely.
+    assert "Completion criteria:" not in prompt
+    assert "Stop criteria:" not in prompt
+    assert "You are inside a durable looping session. Key paths:" in prompt
+    for label in (
+        "- session dir:",
+        "- project_state/",
+        "- child_requests/pending/",
+        "- control.json",
+        "- scratch dir (this iteration):",
+        "- paths.json:",
+    ):
+        assert label in prompt
+    # No shared preamble → no ground-rules section.
+    assert "Shared ground rules:" not in prompt
+    assert prompt.rstrip().endswith("Workflow body:\nDo the synthetic role work.")
+
+
+def test_render_includes_preamble_when_present(
+    repo_root: Any, snapshot_factory: Any
+) -> None:
+    prompt = _render_synthetic_workflow_set(
+        repo_root=repo_root,
+        snapshot_factory=snapshot_factory,
+        goal="Deliver the thing.",
+        preamble="Write atomically. Never force-push.",
+        completion_criteria=["It works"],
+        stop_criteria=["A blocker is recorded"],
+    )
+
+    assert "Completion criteria:\n- It works" in prompt
+    assert "Stop criteria:\n- A blocker is recorded" in prompt
+    assert "Shared ground rules:\nWrite atomically. Never force-push." in prompt
+    # The preamble is included before the workflow body.
+    assert prompt.index("Shared ground rules:") < prompt.index("Workflow body:")
+
+
+def test_render_header_budget_excludes_goal_and_preamble(
+    repo_root: Any, snapshot_factory: Any
+) -> None:
+    goal = "G" * 20_000
+    preamble = "P" * 20_000
+    prompt = _render_synthetic_workflow_set(
+        repo_root=repo_root,
+        snapshot_factory=snapshot_factory,
+        goal=goal,
+        preamble=preamble,
+        completion_criteria=["It works"],
+        stop_criteria=["A blocker is recorded"],
+    )
+
+    before_body = prompt.split("\n\nWorkflow body:", 1)[0]
+    scaffold_bytes = (
+        len(before_body.encode("utf-8"))
+        - len(goal.encode("utf-8"))
+        - len(preamble.encode("utf-8"))
+    )
+    assert scaffold_bytes <= 2048, scaffold_bytes
 
 
 def test_worker_uses_config_snapshot_not_disk(

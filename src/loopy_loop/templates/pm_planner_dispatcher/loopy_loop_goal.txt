@@ -1,5 +1,5 @@
-REPLACE THIS TEXT with the target project, feature, or release goal.
+REPLACE THIS TEXT with the product outcome to deliver.
 
-State observable completion criteria and required deliverables here. The
-planner/dispatcher workflow is only the mechanism used to pursue this goal;
-success means the target outcome itself has been evaluated and achieved.
+Describe what should be built and how you will know it is done — the observable
+result someone could check for themselves. Write it as a product brief that
+states the destination, not how the work gets organized to get there.

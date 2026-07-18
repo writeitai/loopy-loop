@@ -8,10 +8,12 @@ from eval_banana.loader import load_check_definition
 from eval_banana.models import HarnessJudgeCheckDefinition
 
 from loopy_loop.config import load_workflow_definitions
+from loopy_loop.config import load_workflow_set_preamble
 from loopy_loop.config import run_preflight
 from loopy_loop.scheduler import choose_next_workflow
 
 TEMPLATES_ROOT = Path(__file__).resolve().parents[1] / "loopy_loop" / "templates"
+TEMPLATE_SETS = ("inner_outer_eval", "pm_planner_dispatcher")
 RUNTIME_IGNORE_RULES = {
     ".loopy_loop/sessions/",
     ".loopy_loop/traces/",
@@ -25,6 +27,14 @@ RUNTIME_IGNORE_RULES = {
 
 def _template_root(name: str) -> Path:
     return TEMPLATES_ROOT / name
+
+
+def _prompt_paths(template: str) -> list[Path]:
+    return sorted(
+        _template_root(template).glob(
+            ".loopy_loop/workflow_sets/*/workflows/*/prompt.txt"
+        )
+    )
 
 
 def _workflow_prompt(*, template: str, workflow_set: str, workflow: str) -> str:
@@ -61,10 +71,10 @@ def test_packaged_workflow_contracts_name_every_role_and_owner() -> None:
         "eval_reviewer",
         "outer",
     ]
-    assert delivery.workflow_contract.evaluation.check_runner_roles == [
-        "eval_runner",
-        "outer",
-    ]
+    # Under B (receipts retired), eval_runner records advisory results in
+    # project_state/eval_results.md rather than sealed eval_receipts/, so it is
+    # no longer a contract check-runner role that the engine seals receipts for.
+    assert delivery.workflow_contract.evaluation.check_runner_roles == ["outer"]
     delivery_plan = next(
         item
         for item in delivery.workflow_contract.state
@@ -98,13 +108,12 @@ def test_packaged_workflow_contracts_name_every_role_and_owner() -> None:
     assert parent.workflow_contract.evaluation.advisory is True
     assert parent.workflow_contract.evaluation.check_author_roles == ["planner"]
     assert parent.workflow_contract.evaluation.check_runner_roles == ["planner"]
-    dispatch_inputs = next(
-        item
+    # The retired dispatch-snapshot state path is gone: a v3 child request is one
+    # authored goal, not an immutable snapshot the dispatcher must hash and pin.
+    assert all(
+        item["path"] != "project_state/dispatch_inputs/"
         for item in parent.workflow_contract.state
-        if item["path"] == "project_state/dispatch_inputs/"
     )
-    assert dispatch_inputs["owner_role"] == "dispatcher"
-    assert dispatch_inputs["contributor_roles"] == []
 
 
 def test_explicit_contract_without_protocol_version_defaults_to_v2(
@@ -145,69 +154,81 @@ child_interface: recursive
     assert derived.workflow_contract.session_protocol_version == 1
 
 
-def test_packaged_prompt_contract_uses_absolute_assignment_paths() -> None:
+def test_role_prompts_fit_one_screen() -> None:
+    """Every stock role prompt stays within the P8 one-screen budget."""
+
+    for template in TEMPLATE_SETS:
+        paths = _prompt_paths(template)
+        assert paths
+        for path in paths:
+            line_count = len(path.read_text(encoding="utf-8").splitlines())
+            assert line_count <= 80, f"{path} has {line_count} lines"
+
+
+def test_prompts_drop_retired_ceremony_and_model_mandates() -> None:
+    """Prompts and the shared preamble carry no retired ceremony or vendor names."""
+
     banned = (
         "questions.md",
         "waiting-for-human",
         "waiting_for_human",
         "target_paths",
         "/_feature_planning",
-        "<session directory>/eval_results",
         "create an agent team",
+        "assignment envelope",
+        "absolute_paths",
+        "dispatch_inputs",
+        "required_evidence",
+        "think ultra",
+        "ultra deeply",
+        "using codex",
+        "with gemini",
+        "gpt-",
+        "claude-opus",
+        "claude-sonnet",
+        "claude-haiku",
+        "gemini-",
+        '"schema_version": 2',
     )
-    for template in ("inner_outer_eval", "pm_planner_dispatcher"):
-        prompt_paths = sorted(
-            _template_root(template).glob(
-                ".loopy_loop/workflow_sets/*/workflows/*/prompt.txt"
-            )
+    for template in TEMPLATE_SETS:
+        texts = [path.read_text(encoding="utf-8") for path in _prompt_paths(template)]
+        preamble = load_workflow_set_preamble(
+            repo_root=_template_root(template), workflow_set=template
         )
-        assert prompt_paths
-        for path in prompt_paths:
-            prompt = path.read_text(encoding="utf-8")
-            lowered = prompt.lower()
-            assert "assignment envelope" in lowered, path
-            assert "absolute" in lowered, path
-            for text in banned:
-                assert text not in lowered, f"{text!r} in {path}"
+        assert preamble, f"{template} ships a shared preamble"
+        texts.append(preamble)
+        for text in texts:
+            lowered = text.lower()
+            for needle in banned:
+                assert needle.lower() not in lowered, f"{needle!r} in {template}"
 
 
-def test_inner_prompt_keeps_delegation_dynamic() -> None:
-    prompt = _workflow_prompt(
-        template="inner_outer_eval", workflow_set="inner_outer_eval", workflow="inner"
-    ).lower()
-    prompt_words = " ".join(prompt.split())
+def test_shared_rules_live_once_in_the_preamble() -> None:
+    """Cross-role rules are single-sourced in the preamble, not per prompt."""
 
-    assert "dynamic delegation" in prompt
-    assert "decide at runtime whether delegation helps" in prompt_words
-    assert "it is valid to do the work directly" in prompt_words
-    assert "delegated_role" in prompt
-    assert "delegated_task_id" in prompt
-    assert "expected_outputs" in prompt
-    assert "state_responsibility" in prompt
-
-
-def test_inner_executes_outer_selection_without_bootstrapping_plan() -> None:
-    """Inner reports a missing selection instead of taking outer's authority."""
-
-    prompt = _workflow_prompt(
-        template="inner_outer_eval", workflow_set="inner_outer_eval", workflow="inner"
-    ).lower()
-    prompt_words = " ".join(prompt.split())
-
-    assert "execute exactly the one active leaf selected by outer" in prompt_words
-    assert "do not choose a different leaf" in prompt_words
-    assert "bootstrap or rewrite the layer plan" in prompt_words
-    assert "report that precise gap" in prompt_words
+    for template in TEMPLATE_SETS:
+        preamble = load_workflow_set_preamble(
+            repo_root=_template_root(template), workflow_set=template
+        )
+        assert preamble is not None
+        lowered = preamble.lower()
+        assert "capability roster in paths.json" in lowered
+        assert "previous_worker_sessions" in lowered
+        assert "result card" in lowered
+        assert "renaming it into place atomically" in lowered
+        assert "failing checks" in lowered
+        for path in _prompt_paths(template):
+            prompt = path.read_text(encoding="utf-8").lower()
+            assert "previous_worker_sessions" not in prompt, path
+            assert "result card" not in prompt, path
 
 
 def test_only_layer_orchestrators_publish_successful_terminal_control() -> None:
     """Successful control belongs to outer/planner, never an eval role."""
 
     writers: set[tuple[str, str]] = set()
-    for template in ("inner_outer_eval", "pm_planner_dispatcher"):
-        for path in _template_root(template).glob(
-            ".loopy_loop/workflow_sets/*/workflows/*/prompt.txt"
-        ):
+    for template in TEMPLATE_SETS:
+        for path in _prompt_paths(template):
             if '"stop_reason": "goal_met"' in path.read_text(encoding="utf-8"):
                 writers.add((template, path.parent.name))
 
@@ -217,43 +238,64 @@ def test_only_layer_orchestrators_publish_successful_terminal_control() -> None:
     }
 
 
-def test_dispatcher_teaches_v2_pending_child_contract() -> None:
-    """Dispatcher transports a milestone in the unchanged v2 child request."""
+def test_dispatcher_teaches_v3_child_request() -> None:
+    """Dispatcher transports the milestone as one authored v3 goal text."""
 
     prompt = _workflow_prompt(
         template="pm_planner_dispatcher",
         workflow_set="pm_planner_dispatcher",
         workflow="dispatcher",
     )
-    prompt_words = " ".join(prompt.split())
+    words = " ".join(prompt.split())
 
-    assert "canonical `pending` directory" in prompt_words
-    assert '"schema_version": 2' in prompt
+    assert "child_requests/pending/" in prompt
+    assert '"schema_version": 3' in prompt
     assert '"request_id"' in prompt
+    assert '"workflow_set"' in prompt
+    assert '"goal"' in prompt
     assert '"origin"' in prompt
-    assert '"assignment"' in prompt
-    assert '"completion_criteria"' in prompt
-    assert '"required_evidence"' in prompt
-    assert "do not narrow it to an exact leaf" in prompt_words.lower()
-    assert "child outer role owns its own plan and leaf decomposition" in prompt_words
-    assert "project_state/dispatch_inputs/<request_id>.json" in prompt
-    assert (
-        '"ref": "parent:/project_state/dispatch_inputs/'
-        'stable-unique-request-id.json"' in prompt
+    assert '"supersedes_request_id"' in prompt
+    # v3 is one authored brief, not the retired field arrays / hashed snapshots.
+    assert "completion_criteria" not in prompt
+    assert "required_evidence" not in prompt
+    assert "dispatch_inputs" not in prompt
+    assert "sha256" not in prompt.lower()
+    assert "self-contained brief" in words
+    assert "the child owns its own plan" in words
+    assert "request_id, not the filename, is the idempotency key" in words
+
+
+def test_inner_executes_outer_selection_without_bootstrapping_plan() -> None:
+    """Inner reports a missing selection instead of taking outer's authority."""
+
+    prompt = _workflow_prompt(
+        template="inner_outer_eval", workflow_set="inner_outer_eval", workflow="inner"
     )
-    assert (
-        "never declare a mutable plan or task record as a child input"
-        in prompt_words.lower()
+    words = " ".join(prompt.split())
+
+    assert "Execute exactly the one active task outer selected" in words
+    assert "Do not choose a different task" in words
+    assert "bootstrap or rewrite the layer plan" in words
+    assert "report that precise gap" in words
+
+
+def test_inner_keeps_delegation_a_judgment_call() -> None:
+    """Delegation stays inner's judgment; mechanics live in the preamble only."""
+
+    prompt = _workflow_prompt(
+        template="inner_outer_eval", workflow_set="inner_outer_eval", workflow="inner"
     )
-    assert (
-        "immutable snapshot, snapshot hash, request rename, then factual ledger link"
-        in prompt_words
-    )
-    assert "child eval receipt" not in prompt
+    words = " ".join(prompt.split())
+
+    assert "is your judgment" in words
+    assert "it is equally valid to do the work directly" in words
+    # The spawn-metadata recipe is retired; delegation is single-sourced.
+    assert "delegated_role" not in prompt
+    assert "delegated_task_id" not in prompt
 
 
 def test_eval_reviewer_examples_match_eval_banana_schema(tmp_path: Path) -> None:
-    """The one-layer optional reviewer teaches the real judge-check schema."""
+    """The optional reviewer still teaches the real judge-check schema."""
 
     prompt = _workflow_prompt(
         template="inner_outer_eval",
@@ -265,7 +307,7 @@ def test_eval_reviewer_examples_match_eval_banana_schema(tmp_path: Path) -> None
         "--check-dir <eval_checks> "
         "--harness-agent <selected_harness_family>"
     ) in prompt
-    assert "Omit a\nper-check `model`" in prompt
+    assert "Omit a per-check\n`model`" in prompt
     match = re.search(r"```yaml\n(.*?)\n```", prompt, flags=re.DOTALL)
     assert match is not None
     check_path = tmp_path / "inner_outer_eval.yaml"
@@ -278,77 +320,117 @@ def test_eval_reviewer_examples_match_eval_banana_schema(tmp_path: Path) -> None
     assert check.model is None
 
 
-def test_eval_runner_selects_judge_from_roster_and_publishes_advisory_receipt() -> None:
-    """The optional runner records effective selection and never controls stop."""
+def test_eval_reviewer_lifts_the_deterministic_check_ban() -> None:
+    """C2: objective facts go to deterministic checks; judge checks for meaning."""
+
+    prompt = _workflow_prompt(
+        template="inner_outer_eval",
+        workflow_set="inner_outer_eval",
+        workflow="eval_reviewer",
+    )
+    words = " ".join(prompt.split())
+
+    assert "Judge checks evaluate semantics and quality" in words
+    assert "belong in deterministic checks" in words
+    assert "the repo's own test and lint suites" in words
+    assert "Keep judge checks for what actually needs judgment" in words
+    # The old blanket ban is gone.
+    assert "do not invent deterministic checks" not in words.lower()
+
+
+def test_eval_runner_is_advisory_and_reads_report_md() -> None:
+    """The optional runner records advisory evidence and never controls stop."""
 
     prompt = _workflow_prompt(
         template="inner_outer_eval",
         workflow_set="inner_outer_eval",
         workflow="eval_runner",
     )
-    prompt_words = " ".join(prompt.split())
+    words = " ".join(prompt.split())
 
-    assert "harness_capability_roster" in prompt
+    assert "eval-banana validate" in prompt
+    assert "eval-banana run" in prompt
     assert "--harness-agent <judge_family>" in prompt
     assert "--harness-model <judge_model>" in prompt
     assert "--harness-reasoning-effort <judge_effort>" in prompt
-    assert "loopy capture-git-receipt" in prompt
-    assert "trace:<trace_manifest_id>:/eval/report.json" in prompt
-    assert "copy those canonical definition digests" in prompt_words.lower()
-    assert "do not manually hash" in prompt_words.lower()
-    assert "do not write `goal_check.json` or" in prompt_words.lower()
+    assert "Read report.md" in prompt
+    assert "not report.json" in prompt
+    assert "project_state/eval_results.md" in prompt
+    assert "project_state/eval_request.md" in prompt
+    # Advisory only: no completion authority, no retired receipt ceremony.
     assert '"stop_reason": "goal_met"' not in prompt
+    assert "goal_check.json" not in prompt
+    assert "you never publish control" in words
 
 
-def test_packaged_cadence_runs_eval_after_three_role_successes(
+def test_packaged_schedule_authors_checks_on_start_then_evals_on_request(
     history_entry_factory: Any,
 ) -> None:
-    expected = {
-        "inner_outer_eval": [
-            "eval_reviewer",
-            "outer",
-            "inner",
-            "outer",
-            "inner",
-            "outer",
-            "inner",
-            "eval_reviewer",
-            "eval_runner",
-            "outer",
-        ],
-        "pm_planner_dispatcher": [
-            "planner",
-            "dispatcher",
-            "planner",
-            "dispatcher",
-            "planner",
-            "dispatcher",
-            "planner",
-            "dispatcher",
-            "planner",
-        ],
-    }
-    for template, sequence in expected.items():
-        workflows = load_workflow_definitions(
-            repo_root=_template_root(template), workflow_set=template
+    """eval_reviewer authors on start; thereafter eval fires only when asked."""
+
+    workflows = load_workflow_definitions(
+        repo_root=_template_root("inner_outer_eval"), workflow_set="inner_outer_eval"
+    )
+
+    def _run(*, history: list[Any], iteration_count: int, eval_requested: bool) -> str:
+        chosen = choose_next_workflow(
+            workflows=workflows,
+            history=history,
+            iteration_count=iteration_count,
+            eval_requested=eval_requested,
         )
-        history = []
-        actual: list[str] = []
-        for iteration_count in range(len(sequence)):
-            chosen = choose_next_workflow(
-                workflows=workflows, history=history, iteration_count=iteration_count
+        assert chosen is not None
+        return chosen.id
+
+    # No request standing: eval_reviewer authors the initial check-set on start
+    # (run_on_start), then outer/inner carry the work and no eval role recurs.
+    history: list[Any] = []
+    seen: list[str] = []
+    for iteration_count in range(8):
+        chosen_id = _run(
+            history=history, iteration_count=iteration_count, eval_requested=False
+        )
+        seen.append(chosen_id)
+        history.append(
+            history_entry_factory(
+                iteration=iteration_count + 1,
+                workflow_id=chosen_id,
+                workflow_set="inner_outer_eval",
+                success=True,
             )
-            assert chosen is not None
-            actual.append(chosen.id)
-            history.append(
-                history_entry_factory(
-                    iteration=iteration_count + 1,
-                    workflow_id=chosen.id,
-                    workflow_set=template,
-                    success=True,
-                )
-            )
-        assert actual == sequence
+        )
+    assert seen[0] == "eval_reviewer"
+    assert "eval_reviewer" not in seen[1:]
+    assert "eval_runner" not in seen
+    assert set(seen[1:]) == {"outer", "inner"}
+
+    # Once real work has run, a pending request re-authors then runs the checks:
+    # eval_reviewer (refresh) is followed by eval_runner (must_follow).
+    requested_history = [
+        history_entry_factory(
+            iteration=index + 1,
+            workflow_id=workflow_id,
+            workflow_set="inner_outer_eval",
+            success=True,
+        )
+        for index, workflow_id in enumerate(["eval_reviewer", "outer", "inner"])
+    ]
+    assert (
+        _run(history=requested_history, iteration_count=3, eval_requested=True)
+        == "eval_reviewer"
+    )
+    requested_history.append(
+        history_entry_factory(
+            iteration=4,
+            workflow_id="eval_reviewer",
+            workflow_set="inner_outer_eval",
+            success=True,
+        )
+    )
+    assert (
+        _run(history=requested_history, iteration_count=4, eval_requested=True)
+        == "eval_runner"
+    )
 
 
 def test_pm_template_has_no_scheduled_eval_workflows() -> None:
@@ -360,54 +442,10 @@ def test_pm_template_has_no_scheduled_eval_workflows() -> None:
     assert {path.name for path in workflows_root.iterdir()} == {"planner", "dispatcher"}
 
 
-def test_stock_prompts_use_roster_families_and_semantic_tiers() -> None:
-    """Role prompts stay provider-neutral while teaching collaboration defaults."""
-
-    banned = (
-        "--harness-agent codex",
-        "--harness-agent claude",
-        "--harness-agent gemini",
-        "gpt-",
-        "claude-opus",
-        "claude-sonnet",
-        "claude-haiku",
-        "gemini-",
-    )
-    for template in ("inner_outer_eval", "pm_planner_dispatcher"):
-        for prompt_path in _template_root(template).glob(
-            ".loopy_loop/workflow_sets/*/workflows/*/prompt.txt"
-        ):
-            prompt = prompt_path.read_text(encoding="utf-8").lower()
-            assert "harness_capability_roster" in prompt
-            for text in banned:
-                assert text not in prompt, f"{text!r} in {prompt_path}"
-
-
-def test_eval_check_authoring_prefers_parallel_cross_family_review_without_gate() -> (
-    None
-):
-    """Strong eval collaboration is explicit guidance, never a quorum."""
-
-    prompt = _workflow_prompt(
-        template="inner_outer_eval",
-        workflow_set="inner_outer_eval",
-        workflow="eval_reviewer",
-    ).lower()
-    prompt_words = " ".join(prompt.split())
-
-    assert "different enabled harness families" in prompt_words
-    assert "analyze goal coverage and likely failure modes in parallel" in prompt_words
-    assert "different-family reviewers" in prompt_words
-    assert (
-        "not an agent count, family quorum, publication gate, or completion gate"
-        in prompt_words
-    )
-
-
 def test_template_tier_examples_name_all_four_canonical_tiers() -> None:
     """Both starter configs expose the complete semantic tier vocabulary."""
 
-    for template in ("inner_outer_eval", "pm_planner_dispatcher"):
+    for template in TEMPLATE_SETS:
         config = (
             _template_root(template)
             .joinpath("loopy_loop_config.yaml")
@@ -419,7 +457,7 @@ def test_template_tier_examples_name_all_four_canonical_tiers() -> None:
 
 
 def test_template_gitignores_cover_runtime_state_and_trace_roots() -> None:
-    for template in ("inner_outer_eval", "pm_planner_dispatcher"):
+    for template in TEMPLATE_SETS:
         rules = set(
             _template_root(template)
             .joinpath(".gitignore")
@@ -427,6 +465,20 @@ def test_template_gitignores_cover_runtime_state_and_trace_roots() -> None:
             .splitlines()
         )
         assert RUNTIME_IGNORE_RULES <= rules
+
+
+def test_root_goal_files_carry_no_loop_mechanics_vocabulary() -> None:
+    """Root goals read like a product owner wrote them (single-goal §2)."""
+
+    banned = re.compile(r"\b(loop|iteration|workflow|session|cadence)\b", re.IGNORECASE)
+    for template in TEMPLATE_SETS:
+        goal = (
+            _template_root(template)
+            .joinpath("loopy_loop_goal.txt")
+            .read_text(encoding="utf-8")
+        )
+        match = banned.search(goal)
+        assert match is None, f"{template} goal uses {match and match.group(0)!r}"
 
 
 def test_pm_goal_scaffold_requires_a_target_outcome() -> None:
@@ -437,5 +489,5 @@ def test_pm_goal_scaffold_requires_a_target_outcome() -> None:
     )
 
     assert goal.startswith("REPLACE THIS TEXT")
-    assert "observable completion criteria" in goal.lower()
-    assert "mechanism" in goal.lower()
+    assert "observable" in goal.lower()
+    assert "product" in goal.lower()

@@ -351,3 +351,47 @@ def test_v3_assignment_names_layer_and_parent_paths(repo_root: Path) -> None:
         ).resolve()
     )
     assert not (child_root / "harness_capability_roster.json").exists()
+
+
+def test_v3_roster_retires_eval_receipts_but_keeps_eval_state(tmp_path: Path) -> None:
+    """A v3 check-runner role no longer advertises the retired eval_receipts/
+    output; it still owns project_state/eval_state.md. The receipt-sealing
+    machinery stays available for frozen older sessions (contract-gated)."""
+
+    from loopy_loop.config import PreflightResult
+    from loopy_loop.config import RootConfig
+    from loopy_loop.config import WorkflowDefinition
+    from loopy_loop.coordinator_app import _build_workflow_roster
+    from loopy_loop.models import WorkflowSetContract
+
+    contract_payload = _v3_contract()
+    contract = WorkflowSetContract.model_validate(contract_payload)
+    workflows = [
+        WorkflowDefinition(
+            workflow_set="synthetic",
+            id=role_id,
+            directory=tmp_path / role_id,
+            prompt_path=tmp_path / role_id / "prompt.txt",
+            config_path=tmp_path / role_id / "config.yaml",
+        )
+        for role_id in ("outer", "inner")
+    ]
+    preflight = PreflightResult(
+        root_config=RootConfig(
+            goal="Build a thing", workflow_set="synthetic", max_turns=10
+        ),
+        workflow_set="synthetic",
+        workflows=workflows,
+        workflow_contract=contract,
+        workflow_contract_text=json.dumps(contract_payload, sort_keys=True),
+        workflow_contract_sha256="sha256:" + "d" * 64,
+    )
+
+    roster = _build_workflow_roster(
+        session_id="goal_20260718_synthetic", preflight=preflight, created_at=utc_now()
+    )
+    outer = next(role for role in roster.roles if role.workflow_id == "outer")
+
+    assert "eval_check_runner" in outer.authorities
+    assert "project_state/eval_state.md" in outer.expected_outputs
+    assert "eval_receipts/" not in outer.expected_outputs

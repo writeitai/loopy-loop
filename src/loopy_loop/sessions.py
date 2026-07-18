@@ -60,6 +60,9 @@ HARNESS_RUN_ID_FILENAME = "harness_run_id.txt"
 PENDING_FINISHED_REQUEST_FILENAME = "pending_finished_request.json"
 CONTROL_FILENAME = "control.json"
 GOAL_CHECK_FILENAME = "goal_check.json"
+EVAL_REQUEST_FILENAME = "eval_request.md"
+PATHS_FILENAME = "paths.json"
+WORKER_SESSIONS_FILENAME = "worker_sessions.json"
 ASSIGNMENT_FILENAME = "assignment.json"
 WORKFLOW_SNAPSHOT_DIRNAME = "workflow_snapshot"
 SCHEDULER_VIEW_FILENAME = "scheduler_view.json"
@@ -720,6 +723,20 @@ def project_state_dir_path(*, repo_root: Path, session_id: str) -> Path:
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / PROJECT_STATE_DIRNAME
+    )
+
+
+def eval_request_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the orchestrator's requested-eval marker path for a session.
+
+    Its mere existence is the coordination contract for `run_when_requested`
+    scheduling: the orchestrator writes it to request an eval iteration and the
+    eval role archives it once served.
+    """
+
+    return (
+        project_state_dir_path(repo_root=repo_root, session_id=session_id)
+        / EVAL_REQUEST_FILENAME
     )
 
 

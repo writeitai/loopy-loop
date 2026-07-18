@@ -9,6 +9,7 @@ def choose_next_workflow(
     workflows: list[WorkflowDefinition],
     history: list[HistoryEntry],
     iteration_count: int,
+    eval_requested: bool = False,
 ) -> WorkflowDefinition | None:
     eligible: list[tuple[int, int, WorkflowDefinition]] = []
     last_successful_workflow_id = _last_successful_workflow_id(history=history)
@@ -26,6 +27,7 @@ def choose_next_workflow(
             has_successful_history=has_successful_history,
             has_successful_non_goal_check=has_successful_non_goal_check,
             ignore_run_every=False,
+            eval_requested=eval_requested,
         ):
             continue
         eligible.append(
@@ -49,6 +51,7 @@ def choose_next_workflow(
             last_successful_workflow_id=last_successful_workflow_id,
             has_successful_history=has_successful_history,
             has_successful_non_goal_check=has_successful_non_goal_check,
+            eval_requested=eval_requested,
         )
     return max(eligible, key=lambda item: (item[0], item[1], item[2].id))[2]
 
@@ -62,8 +65,19 @@ def _workflow_eligible(
     has_successful_history: bool,
     has_successful_non_goal_check: bool,
     ignore_run_every: bool,
+    eval_requested: bool,
 ) -> bool:
     if not workflow.enabled:
+        return False
+    # run_on_start unlocks a workflow's first scheduling pass (before any
+    # successful history) for the request- and success-count gates alike, so a
+    # workflow can "run on start and thereafter only when requested" (C3).
+    is_run_on_start = workflow.run_on_start and not has_successful_history
+    # A requested-eval workflow is eligible only while the orchestrator's
+    # pending request stands (project_state/eval_request.md present), except on
+    # its run_on_start pass. This is a hard mechanical gate composed with the
+    # others, not a semantic veto.
+    if workflow.run_when_requested and not eval_requested and not is_run_on_start:
         return False
     if iteration_count < workflow.not_before_iteration:
         return False
@@ -74,7 +88,6 @@ def _workflow_eligible(
         and workflow.must_follow != last_successful_workflow_id
     ):
         return False
-    is_run_on_start = workflow.run_on_start and not has_successful_history
     if (
         workflow.run_after_successes is not None
         and not is_run_on_start
@@ -99,6 +112,7 @@ def _failed_workflow_retry(
     last_successful_workflow_id: str | None,
     has_successful_history: bool,
     has_successful_non_goal_check: bool,
+    eval_requested: bool,
 ) -> WorkflowDefinition | None:
     """Retry the latest failed workflow only when normal scheduling is stuck.
 
@@ -127,6 +141,7 @@ def _failed_workflow_retry(
         has_successful_history=has_successful_history,
         has_successful_non_goal_check=has_successful_non_goal_check,
         ignore_run_every=True,
+        eval_requested=eval_requested,
     ):
         return None
     return workflow

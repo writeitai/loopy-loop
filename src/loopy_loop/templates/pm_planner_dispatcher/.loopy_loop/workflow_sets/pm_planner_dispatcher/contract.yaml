@@ -16,9 +16,6 @@ state:
   - path: project_state/current_state.md
     owner_role: planner
     contributor_roles: []
-  - path: project_state/dispatch_inputs/
-    owner_role: dispatcher
-    contributor_roles: []
   - path: project_state/decisions/
     owner_role: planner
     contributor_roles: []

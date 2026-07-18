@@ -192,6 +192,19 @@ def _build_harness_kwargs(
                 "team_harness_max_retries, team_harness_retry_base_delay_s, "
                 "and team_harness_retry_max_delay_s from loopy_loop_config.yaml."
             )
+    # Best-effort context-economy knobs (A2/A1): forwarded only when the
+    # installed team-harness advertises them. Unlike the retry/agent-override
+    # controls above, a team-harness without these parameters is tolerated
+    # silently — they are optimizations, not correctness requirements.
+    context_economy_kwargs = {
+        "compact_above_tokens": config_snapshot.team_harness_compact_above_tokens,
+        "prompt_cache": config_snapshot.team_harness_prompt_cache,
+    }
+    for name, value in context_economy_kwargs.items():
+        if value is not None and _supports_kwargs(
+            harness_factory=harness_factory, names=[name]
+        ):
+            kwargs[name] = value
     agent_override_kwargs = {
         "agent_models": config_snapshot.team_harness_agent_models,
         "agent_reasoning_efforts": config_snapshot.team_harness_agent_reasoning_efforts,

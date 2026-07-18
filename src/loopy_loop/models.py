@@ -123,6 +123,8 @@ class RootConfigSnapshot(BaseModel):
     team_harness_api_base: str = Field(...)
     team_harness_api_key_env: str = Field(...)
     team_harness_system_prompt_extension: str = Field(...)
+    team_harness_compact_above_tokens: int | None = Field(default=None)
+    team_harness_prompt_cache: str | None = Field(default=None)
 
 
 class WorkerIdentity(BaseModel):
@@ -832,8 +834,8 @@ class ChildSessionRequest(BaseModel):
     def validate_schema_version(cls, value: int) -> int:
         """Accept supported child-request schema versions."""
 
-        if value not in {1, 2}:
-            raise ValueError("schema_version must equal 1 or 2")
+        if value not in {1, 2, 3}:
+            raise ValueError("schema_version must equal 1, 2, or 3")
         return value
 
     @model_validator(mode="after")
@@ -843,19 +845,36 @@ class ChildSessionRequest(BaseModel):
         if self.schema_version == 1:
             if self.goal is None or not self.goal.strip():
                 raise ValueError("v1 child request requires goal")
-        else:
-            if self.request_id is None or not self.request_id.strip():
-                raise ValueError("v2 child request requires request_id")
-            if not SAFE_DURABLE_ID_PATTERN.fullmatch(self.request_id):
-                raise ValueError("v2 child request_id is not filesystem-safe")
-            if self.origin is None or self.assignment is None:
-                raise ValueError("v2 child request requires origin and assignment")
-            if not self.origin.parent_attempt_id or not (
-                self.origin.parent_attempt_id.strip()
-            ):
-                raise ValueError("v2 child request requires origin.parent_attempt_id")
+            return self
+        # v2 and v3 share the durable request identity and origin binding.
+        if self.request_id is None or not self.request_id.strip():
+            raise ValueError("v2+ child request requires request_id")
+        if not SAFE_DURABLE_ID_PATTERN.fullmatch(self.request_id):
+            raise ValueError("v2+ child request_id is not filesystem-safe")
+        if self.origin is None:
+            raise ValueError("v2+ child request requires origin")
+        if not self.origin.parent_attempt_id or not (
+            self.origin.parent_attempt_id.strip()
+        ):
+            raise ValueError("v2+ child request requires origin.parent_attempt_id")
+        if self.schema_version == 2:
+            if self.assignment is None:
+                raise ValueError("v2 child request requires assignment")
             if not self.assignment.goal.strip():
                 raise ValueError("v2 child assignment goal must not be empty")
+            return self
+        # v3: the brief is one free-text goal. There are no typed criteria/
+        # constraints/deliverables/required_evidence arrays and no hashed
+        # inputs snapshot; downstream code treats those as absent for v3.
+        if self.goal is None or not self.goal.strip():
+            raise ValueError("v3 child request requires goal")
+        if self.assignment is not None:
+            raise ValueError(
+                "v3 child request must not carry an assignment contract; "
+                "write the brief as the top-level goal"
+            )
+        if self.inputs:
+            raise ValueError("v3 child request must not carry hashed inputs")
         return self
 
     @property

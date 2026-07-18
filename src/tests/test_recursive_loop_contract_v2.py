@@ -162,6 +162,41 @@ def _write_v2_child_request(
     return path
 
 
+def _write_v3_child_request(
+    *,
+    repo_root: Path,
+    parent_task: dict[str, Any],
+    request_id: str,
+    workflow_set: str,
+    goal: str,
+) -> Path:
+    """Write a single-goal v3 child request (no assignment arrays, no inputs)."""
+
+    path = (
+        child_requests_pending_dir_path(
+            repo_root=repo_root, session_id=str(parent_task["session_id"])
+        )
+        / f"{request_id}.json"
+    )
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "request_id": request_id,
+                "workflow_set": workflow_set,
+                "goal": goal,
+                "origin": {
+                    "parent_attempt_id": parent_task["attempt_id"],
+                    "parent_work_item_id": f"work-{request_id}",
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _finish(
     client: TestClient, task: dict[str, Any], *, success: bool = True
 ) -> dict[str, Any]:
@@ -582,7 +617,13 @@ def test_assignment_and_exact_prompt_are_durable_before_harness_call(
             / "prompt.txt"
         )
         assert prompt_file.read_text(encoding="utf-8") == kwargs["rendered_prompt"]
-        assert str(assignment_file) in kwargs["rendered_prompt"]
+        # The diet header references the frozen envelope through paths.json
+        # rather than inlining it (single-goal-assignments.md §3).
+        paths = json.loads(
+            (prompt_file.parent / "paths.json").read_text(encoding="utf-8")
+        )
+        assert paths["assignment_envelope"] == str(assignment_file)
+        assert Path(paths["envelope_paths"]["session_root"]).is_absolute()
         caller = kwargs["caller_context"]
         assert caller["parent_assignment_path"] == str(assignment_file)
         assert Path(str(caller["trace_root"])).is_absolute()
@@ -3220,3 +3261,84 @@ def test_eval_receipt_cannot_substitute_a_noncanonical_raw_report_path(
     )
 
     assert any("canonical attempt eval/report.json" in reason for reason in reasons)
+
+
+def test_v3_single_goal_child_request_dispatches_with_verbatim_goal(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A v3 child request carries one free-text goal; the child's goal contract
+    is that text verbatim with the v2 typed arrays and inputs empty."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    _write_workflow_set(
+        repo_root=repo_root, workflow_set="child_set", workflow_id="child_work"
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+
+    root_task = client.post("/register", json=_register_v2(repo_root)).json()
+    assert root_task["action"] == "run"
+
+    child_goal = (
+        "Build the isolated component. Start from plan/phases/phase-0.md; treat "
+        "it as the scope contract. Record evidence in project_state/ledger.md."
+    )
+    _write_v3_child_request(
+        repo_root=repo_root,
+        parent_task=root_task,
+        request_id="v3-single-goal",
+        workflow_set="child_set",
+        goal=child_goal,
+    )
+    child_task = _finish(client, root_task)
+
+    assert child_task["action"] == "run"
+    assert child_task["workflow_set"] == "child_set"
+    child_id = child_task["session_id"]
+
+    child_goal_file = (
+        session_dir_path(repo_root=repo_root, session_id=child_id) / "goal.md"
+    )
+    assert child_goal_file.read_text(encoding="utf-8").rstrip("\n") == child_goal
+
+    child_contract = json.loads(
+        goal_contract_path(repo_root=repo_root, session_id=child_id).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert child_contract["goal"] == child_goal
+    assert child_contract["completion_criteria"] == []
+    assert child_contract["stop_criteria"] == []
+    assert child_contract["constraints"] == []
+    assert child_contract["deliverables"] == []
+    assert child_contract["required_evidence"] == []
+    assert child_contract["inputs"] == []
+
+    child_manifest = json.loads(
+        session_dir_path(repo_root=repo_root, session_id=child_id)
+        .joinpath("session.json")
+        .read_text(encoding="utf-8")
+    )
+    assert child_manifest["origin"]["request_id"] == "v3-single-goal"
+    assert child_manifest["parent_session_id"] == root_task["session_id"]
+
+
+def test_v3_child_request_rejects_embedded_assignment_arrays() -> None:
+    """v3 requests must not smuggle the v2 typed assignment; validation rejects
+    it so the single-goal contract stays crisp."""
+
+    from pydantic import ValidationError
+
+    from loopy_loop.models import ChildSessionRequest
+
+    with pytest.raises(ValidationError, match="must not carry an assignment"):
+        ChildSessionRequest.model_validate(
+            {
+                "schema_version": 3,
+                "request_id": "bad-v3",
+                "workflow_set": "child_set",
+                "goal": "Do the thing",
+                "origin": {"parent_attempt_id": "attempt-1"},
+                "assignment": {"goal": "Do the thing"},
+            }
+        )

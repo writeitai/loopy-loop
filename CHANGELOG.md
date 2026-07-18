@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.9.0
+
+- Added child request schema v3: a single free-text `goal` brief with
+  `request_id` and `origin`, and no `completion_criteria`/`stop_criteria`/
+  `constraints`/`deliverables`/`required_evidence` arrays, no hashed `inputs`,
+  and no `dispatch_inputs` snapshot. The child's `goal.md` and goal contract are
+  the goal text verbatim; the dropped v2 arrays are treated as empty downstream.
+  Schema v2 is still accepted unchanged so in-flight sessions finish.
+- Put the rendered iteration prompt on a diet (single-goal-assignments.md §3).
+  The header is now a fixed shape — goal, optional completion/stop criteria
+  sections (omitted when empty), and a short key-paths block — followed by the
+  workflow body. The ~50-path enumeration and the inlined frozen roster/
+  scheduler/capability JSON are gone; the complete machine path map, rosters,
+  scheduler view, and workflow contract are referenced by files through a new
+  per-iteration `paths.json`. Header scaffolding (excluding goal and preamble)
+  is CI-bounded to 2 KB.
+- Added a shared workflow-set preamble hook: when
+  `workflow_sets/<set>/preamble.txt` exists, the renderer includes it once under
+  "Shared ground rules:" so per-role prompts never repeat shared rules.
+- `paths.json` records `previous_worker_sessions`, the previous iteration's
+  team-harness `worker_sessions.json` path (or null), enabling selective
+  worker-session reuse across iterations (context-and-eval-economy A4).
+- Added `run_when_requested` per-workflow scheduling: a workflow so marked is
+  eligible only while `project_state/eval_request.md` exists in the session. It
+  composes with the existing `must_follow`/`priority`/`enabled` gates and can
+  replace `run_after_successes` for orchestrator-requested evaluation
+  (context-and-eval-economy C3). `run_on_start` still unlocks the first
+  scheduling pass, so a workflow can run on start and thereafter only on
+  request.
+- Added optional root-config `team_harness_compact_above_tokens` and
+  `team_harness_prompt_cache`, carried in the wire snapshot and forwarded to the
+  Team Harness factory when the installed version accepts them (ignored
+  gracefully otherwise).
+- Retired the eval-receipt output from the v3 stock flow. A protocol-v3
+  check-runner role's frozen roster no longer advertises the `eval_receipts/`
+  output; advisory evaluation is now agent-authored
+  (`project_state/eval_results.md`, purely agent-owned — no engine coupling).
+  The receipt-sealing/validation machinery stays intact and contract-gated on
+  `check_runner_roles`, so sessions whose frozen contract still names a
+  receipt-producing check-runner keep working through their lifetime, and any
+  role that still emits a provenance-valid receipt still has it accepted as
+  advisory evidence. Completion authority is unchanged (the durable
+  orchestrator owns `goal_met`; eval never gated it — D11).
+
 ## 0.8.0
 
 - Added the protocol-v3 orchestration contract. Each layer now has an
