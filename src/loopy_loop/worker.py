@@ -23,6 +23,7 @@ from loopy_loop.assignments import verify_workflow_snapshot
 from loopy_loop.assignments import write_attempt_assignment
 from loopy_loop.config import ConfigError
 from loopy_loop.config import load_workflow_config
+from loopy_loop.config import load_workflow_set_preamble
 from loopy_loop.config import workflow_set_workflows_dir_path
 from loopy_loop.git_evidence import capture_git_evidence
 from loopy_loop.git_evidence import GitEvidenceError
@@ -55,15 +56,19 @@ from loopy_loop.sessions import git_receipts_dir_path
 from loopy_loop.sessions import GOAL_CHECK_FILENAME
 from loopy_loop.sessions import harness_outputs_dir_path
 from loopy_loop.sessions import iteration_harness_output_root
+from loopy_loop.sessions import PATHS_FILENAME
 from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.sessions import project_state_dir_path
 from loopy_loop.sessions import session_dir_path
 from loopy_loop.sessions import session_goal_path
+from loopy_loop.sessions import traces_root_path
 from loopy_loop.sessions import updates_from_user_path
 from loopy_loop.sessions import user_updates_journal_path
+from loopy_loop.sessions import WORKER_SESSIONS_FILENAME
 from loopy_loop.sessions import write_json_atomic
 from loopy_loop.tracing import create_attempt_trace
 from loopy_loop.tracing import import_harness_artifacts
+from loopy_loop.tracing import TRACE_MANIFEST_FILENAME
 from loopy_loop.tracing import trace_write_json
 from loopy_loop.tracing import trace_write_text
 from loopy_loop.tracing import update_trace_manifest
@@ -775,7 +780,14 @@ def _render_prompt(
     assignment: AttemptAssignment | None = None,
     assignment_file: Path | None = None,
 ) -> str:
-    """Render the workflow prompt with authoritative role and path context."""
+    """Render the diet iteration header plus the workflow body.
+
+    The header before "Workflow body:" is a coordination contract the workflow
+    templates are written against (single-goal-assignments.md §3): one goal, the
+    optional criteria sections, and a short key-paths block. The full machine
+    path map, frozen rosters, scheduler view, and prior worker-session manifest
+    move into a sibling paths.json referenced from the header — never inlined.
+    """
 
     root = repo_root or Path.cwd()
     session_dir = session_dir_path(repo_root=root, session_id=session_id)
@@ -784,87 +796,227 @@ def _render_prompt(
         if assignment is not None
         else f"legacy-{iteration}-{workflow_id}"
     )
+    # Preserve the append-only user-input delivery mechanism (its journaling
+    # side effect and the surfacing of not-yet-acknowledged inputs); this is
+    # runtime context, distinct from the fixed header scaffolding.
     semantic_context = _semantic_prompt_context(
         repo_root=root, session_id=session_id, attempt_id=attempt_id
     )
-    lines = [
-        "loopy-loop assignment",
-        "",
-        f"Goal: {config_snapshot.goal}",
-        "Completion criteria:",
-        *[f"- {item}" for item in config_snapshot.completion_criteria],
-        "Stop criteria:",
-        *[f"- {item}" for item in config_snapshot.stop_criteria],
-        "",
-        f"Session ID: {session_id}",
-        f"Workflow set: {workflow_set}",
-        f"Iteration: {iteration}",
-        f"Workflow ID: {workflow_id}",
-        f"Session directory: {session_dir}",
-        f"Session goal path: {session_goal_path(repo_root=root, session_id=session_id)}",
-        "Session project_state directory: "
-        f"{project_state_dir_path(repo_root=root, session_id=session_id)}",
-        "Session eval_checks directory: "
-        f"{eval_checks_dir_path(repo_root=root, session_id=session_id)}",
-        "Session updates_from_user path: "
-        f"{updates_from_user_path(repo_root=root, session_id=session_id)}",
-        "Session child_requests directory: "
-        f"{child_requests_dir_path(repo_root=root, session_id=session_id)}",
-        f"Session control path: {control_path(repo_root=root, session_id=session_id)}",
-        "Session finished ledger path: "
-        f"{finished_path(repo_root=root, session_id=session_id)}",
-        "Session harness outputs directory: "
-        f"{harness_outputs_dir_path(repo_root=root, session_id=session_id)}",
-        f"Iteration directory: {iteration_dir}",
-        f"Iteration harness output root: {harness_output_root}",
+    paths_json_path = (iteration_dir / PATHS_FILENAME).resolve()
+    _write_iteration_paths(
+        path=paths_json_path,
+        repo_root=root,
+        session_id=session_id,
+        workflow_set=workflow_set,
+        workflow_id=workflow_id,
+        iteration=iteration,
+        iteration_dir=iteration_dir,
+        session_dir=session_dir,
+        harness_output_root=harness_output_root,
+        emits_goal_check=emits_goal_check,
+        assignment=assignment,
+        assignment_file=assignment_file,
+    )
+    preamble = load_workflow_set_preamble(repo_root=root, workflow_set=workflow_set)
+
+    header_line = (
+        f"loopy-loop assignment — iteration {iteration:04d}, "
+        f"role: {workflow_id}, session: {session_id}"
+    )
+    key_paths = [
+        "You are inside a durable looping session. Key paths:",
+        f"- session dir: {session_dir.resolve()}   (paths below are relative to it)",
+        "- project_state/            durable working state for your role",
+        "- child_requests/pending/   publish child requests here",
+        "- control.json              terminal control",
+        f"- scratch dir (this iteration): {harness_output_root.resolve()}",
+        f"- paths.json: {paths_json_path}    "
+        "full path map, rosters, scheduler view — read if needed",
     ]
-    if assignment is not None and assignment_file is not None:
-        lines.extend(
-            [
-                "",
-                "Authoritative attempt contract:",
-                f"- Assignment envelope: {assignment_file.resolve()}",
-                f"- Actor kind: {assignment.actor.get('kind', '')}",
-                f"- Workflow role: {assignment.actor.get('workflow_role', '')}",
-                f"- Layer kind: {assignment.actor.get('layer_kind', '')}",
-                f"- Responsibility: {assignment.actor.get('responsibility', '')}",
-                "- Own-session responsibility: "
-                f"{assignment.ownership.get('own_session', '')}",
-                "- Parent-session responsibility: "
-                f"{assignment.ownership.get('parent_session', '')}",
-                "- Engine-state responsibility: "
-                f"{assignment.ownership.get('engine_state', '')}",
-                "",
-                "Absolute paths from the assignment envelope:",
-                *[
-                    f"- {name}: {path}"
-                    for name, path in sorted(assignment.absolute_paths.items())
-                ],
-                "",
-                "Treat the assignment envelope as authoritative. Use these absolute "
-                "paths; do not rediscover session state by searching the checkout.",
-            ]
-        )
-        if assignment.context:
-            lines.extend(
-                [
-                    "",
-                    "Frozen workflow, scheduler, and capability context:",
-                    json.dumps(
-                        assignment.context, indent=2, sort_keys=True, ensure_ascii=False
-                    ),
-                ]
-            )
-    if session_dir.parent.name == "children":
-        lines.append(f"Parent session directory: {session_dir.parent.parent}")
-    if workflow_id == "goal_check" or emits_goal_check:
-        lines.append(
-            f"goal_check.json output path: {iteration_dir / GOAL_CHECK_FILENAME}"
-        )
+    criteria: list[str] = []
+    if config_snapshot.completion_criteria:
+        criteria.append("Completion criteria:")
+        criteria.extend(f"- {item}" for item in config_snapshot.completion_criteria)
+    if config_snapshot.stop_criteria:
+        criteria.append("Stop criteria:")
+        criteria.extend(f"- {item}" for item in config_snapshot.stop_criteria)
+
+    blocks: list[list[str]] = [[header_line], ["Goal:", config_snapshot.goal]]
+    if criteria:
+        blocks.append(criteria)
+    blocks.append(key_paths)
+    if preamble is not None and preamble.strip():
+        blocks.append(["Shared ground rules:", preamble.rstrip()])
     if semantic_context:
-        lines.extend(["", "Current layer inputs and receipts:", semantic_context])
-    lines.extend(["", "Workflow body:", workflow_prompt])
-    return "\n".join(lines).rstrip() + "\n"
+        blocks.append(["Current layer inputs and receipts:", semantic_context])
+    blocks.append(["Workflow body:", workflow_prompt])
+    rendered = "\n\n".join("\n".join(block) for block in blocks)
+    return rendered.rstrip() + "\n"
+
+
+def _write_iteration_paths(
+    *,
+    path: Path,
+    repo_root: Path,
+    session_id: str,
+    workflow_set: str,
+    workflow_id: str,
+    iteration: int,
+    iteration_dir: Path,
+    session_dir: Path,
+    harness_output_root: Path,
+    emits_goal_check: bool,
+    assignment: AttemptAssignment | None,
+    assignment_file: Path | None,
+) -> None:
+    """Write the full machine path map the diet header references by name.
+
+    Holds every absolute path the old header inlined plus the complete v3
+    assignment path map (rosters, scheduler view, workflow contract as files),
+    and previous_worker_sessions: the prior iteration's team-harness
+    worker_sessions.json for selective session reuse (context-and-eval-economy
+    A4), or null when none exists.
+    """
+
+    goal_check_output = (
+        str((iteration_dir / GOAL_CHECK_FILENAME).resolve())
+        if (workflow_id == "goal_check" or emits_goal_check)
+        else None
+    )
+    parent_session_dir = (
+        str(session_dir.parent.parent.resolve())
+        if session_dir.parent.name == "children"
+        else None
+    )
+    root_session_id = (
+        str(assignment.identity.get("root_session_id"))
+        if assignment is not None and assignment.identity.get("root_session_id")
+        else None
+    )
+    previous_worker_sessions = (
+        _previous_worker_sessions_path(
+            repo_root=repo_root,
+            root_session_id=root_session_id,
+            session_id=session_id,
+            iteration=iteration,
+        )
+        if root_session_id is not None
+        else None
+    )
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "workflow_set": workflow_set,
+        "workflow_id": workflow_id,
+        "iteration": iteration,
+        "session_dir": str(session_dir.resolve()),
+        "iteration_dir": str(iteration_dir.resolve()),
+        "scratch_dir": str(harness_output_root.resolve()),
+        "assignment_envelope": (
+            str(assignment_file.resolve()) if assignment_file is not None else None
+        ),
+        "goal_check_output": goal_check_output,
+        "parent_session_dir": parent_session_dir,
+        "previous_worker_sessions": (
+            str(previous_worker_sessions)
+            if previous_worker_sessions is not None
+            else None
+        ),
+        "session_paths": {
+            "goal": str(
+                session_goal_path(repo_root=repo_root, session_id=session_id).resolve()
+            ),
+            "project_state": str(
+                project_state_dir_path(
+                    repo_root=repo_root, session_id=session_id
+                ).resolve()
+            ),
+            "eval_checks": str(
+                eval_checks_dir_path(
+                    repo_root=repo_root, session_id=session_id
+                ).resolve()
+            ),
+            "updates_from_user": str(
+                updates_from_user_path(
+                    repo_root=repo_root, session_id=session_id
+                ).resolve()
+            ),
+            "user_inputs_journal": str(
+                user_updates_journal_path(
+                    repo_root=repo_root, session_id=session_id
+                ).resolve()
+            ),
+            "child_requests": str(
+                child_requests_dir_path(
+                    repo_root=repo_root, session_id=session_id
+                ).resolve()
+            ),
+            "control": str(
+                control_path(repo_root=repo_root, session_id=session_id).resolve()
+            ),
+            "finished_ledger": str(
+                finished_path(repo_root=repo_root, session_id=session_id).resolve()
+            ),
+            "harness_outputs": str(
+                harness_outputs_dir_path(
+                    repo_root=repo_root, session_id=session_id
+                ).resolve()
+            ),
+        },
+        "envelope_paths": (
+            dict(assignment.absolute_paths) if assignment is not None else None
+        ),
+    }
+    write_json_atomic(path=path, payload=payload)
+
+
+def _previous_worker_sessions_path(
+    *, repo_root: Path, root_session_id: str, session_id: str, iteration: int
+) -> Path | None:
+    """Return the newest prior iteration's team-harness worker_sessions.json.
+
+    Scans this session's attempt traces, reads each trace manifest's iteration,
+    and returns the worker_sessions.json belonging to the highest iteration
+    strictly below the current one. None when no earlier attempt produced it.
+    """
+
+    attempts_root = (
+        traces_root_path(repo_root=repo_root)
+        / root_session_id
+        / "sessions"
+        / session_id
+        / "attempts"
+    )
+    if not attempts_root.is_dir():
+        return None
+    best_iteration = -1
+    best_path: Path | None = None
+    for attempt_dir in sorted(attempts_root.iterdir()):
+        if not attempt_dir.is_dir():
+            continue
+        try:
+            manifest = json.loads(
+                (attempt_dir / TRACE_MANIFEST_FILENAME).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            continue
+        identity = manifest.get("identity") if isinstance(manifest, dict) else None
+        attempt_iteration = (
+            identity.get("iteration") if isinstance(identity, dict) else None
+        )
+        if not isinstance(attempt_iteration, int) or attempt_iteration >= iteration:
+            continue
+        if attempt_iteration <= best_iteration:
+            continue
+        sessions_file = next(
+            iter(sorted((attempt_dir / "harness").rglob(WORKER_SESSIONS_FILENAME))),
+            None,
+        )
+        if sessions_file is None:
+            continue
+        best_iteration = attempt_iteration
+        best_path = sessions_file.resolve()
+    return best_path
 
 
 def _read_session_metadata(*, repo_root: Path, session_id: str) -> dict[str, object]:

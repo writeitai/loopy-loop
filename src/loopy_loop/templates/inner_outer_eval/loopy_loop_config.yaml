@@ -2,6 +2,13 @@ goal_file: loopy_loop_goal.txt
 workflow_set: inner_outer_eval
 max_turns: 160
 goal_check_consecutive_failures_cap: 3
+completion_criteria:
+  - At least four playable characters, each with a passive and four abilities
+    bound to Q, W, E, R with cooldowns.
+  - Two to four players compete on one shared map in a single browser match.
+  - Walls are destructible and explosions chain through adjacent bombs.
+  - Destroyed walls spawn pickups that change a player's state when collected.
+  - A match resolves to a single last-player-standing winner.
 team_harness_provider: "codex"
 team_harness_model: "gpt-5.5"
 team_harness_agents:
@@ -43,24 +50,13 @@ team_harness_agent_reasoning_efforts:
 team_harness_api_base: "https://openrouter.ai/api/v1"
 team_harness_api_key_env: "OPENROUTER_API_KEY"
 team_harness_system_prompt_extension: |
-  Shared loopy-loop protocol:
-  - Read the per-attempt assignment first. Its role, layer identity, scoped
-    goal, ownership, and absolute paths are authoritative.
-  - Engine state and session topology are coordinator-owned. Workflow roles
-    own only the semantic artifacts named by their assignment and contract.
-  - Read the frozen workflow roster, conditional scheduler view, and harness
-    capability roster before planning delegation or duplicating scheduled work.
-  - Directly spawned agents are temporary delegates inside the current
-    attempt. Give each a focused role/task/evidence contract; the harness
-    coordinator remains accountable for integration and loop-layer decisions.
-  - For consequential independent work, prefer parallel analyses from
-    different enabled harness families and review a stable artifact with a
-    different family when useful. Keep one integration owner. The four
-    semantic tiers are frontier, strong, standard, and economy. These are
-    judgment defaults, not quotas or completion gates.
-  - A genuinely terminal blocker is the only human escape hatch. After all
-    autonomous routes are exhausted, atomically publish control v3 with state
-    stopped, stop_reason unresolvable_error, a unique control_id, the exact
-    session/workflow/attempt producer, non-empty attempted_routes, evidence_refs,
-    a specific reason, and an RFC3339 created_at. Ordinary uncertainty or
-    repairable failure must remain work, not a stop.
+  Model tiers, strongest to lightest: frontier, strong, standard, economy. They
+  are judgment defaults for choosing a delegate's capability, not quotas or
+  completion gates.
+
+  A genuinely terminal blocker is the only human escape hatch. After all
+  autonomous routes are exhausted, atomically publish control v3 with state
+  stopped, stop_reason unresolvable_error, a unique control_id, the exact
+  session/workflow/attempt producer, non-empty attempted_routes, evidence_refs,
+  a specific reason, and an RFC3339 created_at. Ordinary uncertainty or
+  repairable failure must remain work, not a stop.

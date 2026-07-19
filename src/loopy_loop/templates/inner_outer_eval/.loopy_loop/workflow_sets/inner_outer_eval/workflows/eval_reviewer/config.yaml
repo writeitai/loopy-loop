@@ -4,9 +4,7 @@ run_every: 1
 must_follow: null
 not_before_iteration: 0
 run_on_start: true
-run_after_successes:
-  workflow_id: inner
-  every: 3
+run_when_requested: true
 description: |
-  Optionally create or refresh outcome-focused checks for outer to use as
-  advisory evidence.
+  Author or refresh the session's checks when an eval is requested, as advisory
+  evidence for outer.

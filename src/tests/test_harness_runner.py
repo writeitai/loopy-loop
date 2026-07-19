@@ -169,6 +169,78 @@ def test_harness_runner_rejects_retry_controls_for_old_harness(
         )
 
 
+def test_harness_runner_passes_context_economy_knobs(
+    repo_root: Any, snapshot_factory: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    captured: dict[str, Any] = {}
+
+    class FakeHarness:
+        def __init__(
+            self, *, compact_above_tokens: int, prompt_cache: str, **kwargs: Any
+        ) -> None:
+            captured["compact_above_tokens"] = compact_above_tokens
+            captured["prompt_cache"] = prompt_cache
+
+        async def run(self, task: str) -> TeamHarnessResult:
+            return TeamHarnessResult(text="done", agents=[], run_id="run-123")
+
+    run_harness_iteration(
+        repo_root=repo_root,
+        config_snapshot=snapshot_factory(
+            team_harness_compact_above_tokens=80000,
+            team_harness_prompt_cache="ephemeral",
+        ),
+        rendered_prompt="rendered prompt",
+        harness_factory=FakeHarness,
+    )
+
+    assert captured["compact_above_tokens"] == 80000
+    assert captured["prompt_cache"] == "ephemeral"
+
+
+def test_harness_runner_skips_context_economy_knobs_for_old_harness(
+    repo_root: Any, snapshot_factory: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    captured: dict[str, Any] = {}
+
+    class OldHarness:
+        def __init__(
+            self,
+            *,
+            provider: str,
+            model: str,
+            api_base: str,
+            api_key: str,
+            agents: list[str],
+            agent_models: dict[str, str],
+            agent_reasoning_efforts: dict[str, str],
+            system_prompt: str,
+            cwd: str,
+            console_mode: str,
+        ) -> None:
+            captured["ran"] = True
+
+        async def run(self, task: str) -> TeamHarnessResult:
+            return TeamHarnessResult(text="done", agents=[], run_id="run-123")
+
+    # Unlike retry/agent overrides, unsupported context-economy knobs are
+    # tolerated silently (they are optimizations, not correctness).
+    result = run_harness_iteration(
+        repo_root=repo_root,
+        config_snapshot=snapshot_factory(
+            team_harness_compact_above_tokens=80000,
+            team_harness_prompt_cache="ephemeral",
+        ),
+        rendered_prompt="rendered prompt",
+        harness_factory=OldHarness,
+    )
+
+    assert captured.get("ran") is True
+    assert result.success is True
+
+
 def test_harness_runner_passes_none_api_key_for_codex_provider(
     repo_root: Any, snapshot_factory: Any, monkeypatch: Any
 ) -> None:

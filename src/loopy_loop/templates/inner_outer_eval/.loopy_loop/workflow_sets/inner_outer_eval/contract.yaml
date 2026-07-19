@@ -35,9 +35,9 @@ state:
   - path: eval_checks/
     owner_role: eval_reviewer
     contributor_roles: [outer]
-  - path: eval_receipts/
+  - path: project_state/eval_results.md
     owner_role: eval_runner
-    contributor_roles: [outer]
+    contributor_roles: []
 orchestration:
   completion_role: outer
   plan_owner: outer
@@ -46,6 +46,6 @@ orchestration:
 evaluation:
   advisory: true
   check_author_roles: [eval_reviewer, outer]
-  check_runner_roles: [eval_runner, outer]
+  check_runner_roles: [outer]
 terminal_blocker_reporting_roles: [outer, inner, eval_reviewer, eval_runner]
 child_interface: none

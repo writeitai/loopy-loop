@@ -164,6 +164,73 @@ def test_load_root_config_accepts_team_harness_retry_controls(
     assert root_config.team_harness_retry_max_delay_s == 60.0
 
 
+def test_load_root_config_accepts_context_economy_knobs(repo_builder: Any) -> None:
+    repo_root = repo_builder(
+        root_config={
+            "team_harness_compact_above_tokens": 80000,
+            "team_harness_prompt_cache": "ephemeral",
+        }
+    )
+
+    root_config = load_root_config(repo_root=repo_root)
+
+    assert root_config.team_harness_compact_above_tokens == 80000
+    assert root_config.team_harness_prompt_cache == "ephemeral"
+
+
+def test_context_economy_knobs_default_to_none(repo_builder: Any) -> None:
+    root_config = load_root_config(repo_root=repo_builder())
+
+    assert root_config.team_harness_compact_above_tokens is None
+    assert root_config.team_harness_prompt_cache is None
+
+
+def test_context_economy_knobs_are_in_wire_snapshot(repo_builder: Any) -> None:
+    from loopy_loop.coordinator_app import _COORDINATOR_ONLY_FIELDS
+    from loopy_loop.models import RootConfigSnapshot
+
+    repo_root = repo_builder(
+        root_config={
+            "team_harness_compact_above_tokens": 80000,
+            "team_harness_prompt_cache": "ephemeral",
+        }
+    )
+    root_config = load_root_config(repo_root=repo_root)
+
+    snapshot = RootConfigSnapshot.model_validate(
+        root_config.model_dump(exclude=_COORDINATOR_ONLY_FIELDS)
+    )
+
+    assert snapshot.team_harness_compact_above_tokens == 80000
+    assert snapshot.team_harness_prompt_cache == "ephemeral"
+
+
+def test_run_when_requested_parses_and_defaults_off(repo_builder: Any) -> None:
+    repo_root = repo_builder(
+        workflows={
+            "outer": {"prompt": "Plan", "config": {"enabled": True, "description": ""}},
+            "eval_runner": {
+                "prompt": "Run evals",
+                "config": {
+                    "enabled": True,
+                    "run_when_requested": True,
+                    "description": "",
+                },
+            },
+        }
+    )
+
+    workflows = {
+        workflow.id: workflow
+        for workflow in load_workflow_definitions(
+            repo_root=repo_root, workflow_set="main"
+        )
+    }
+
+    assert workflows["eval_runner"].run_when_requested is True
+    assert workflows["outer"].run_when_requested is False
+
+
 def test_load_root_config_rejects_invalid_retry_delay_bounds(repo_builder: Any) -> None:
     repo_root = repo_builder(
         root_config={

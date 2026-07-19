@@ -129,10 +129,13 @@ def test_init_inner_outer_eval_template_scaffolds_expected_files(
     assert repo_root.joinpath(
         ".loopy_loop/workflow_sets/inner_outer_eval/contract.yaml"
     ).exists()
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/inner_outer_eval/preamble.txt"
+    ).exists()
     assert not repo_root.joinpath(
         ".loopy_loop/workflow_sets/main/workflows/goal_check/prompt.txt"
     ).exists()
-    assert "harness coordinator for the `outer` workflow role" in repo_root.joinpath(
+    assert "You are the outer coordinator" in repo_root.joinpath(
         ".loopy_loop/workflow_sets/inner_outer_eval/workflows/outer/prompt.txt"
     ).read_text(encoding="utf-8")
     assert 'gemini: "gemini-3.5-flash"' in repo_root.joinpath(
@@ -214,10 +217,17 @@ def test_init_pm_planner_dispatcher_template_scaffolds_expected_files(
     assert repo_root.joinpath(
         ".loopy_loop/workflow_sets/pm_planner_dispatcher/contract.yaml"
     ).exists()
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/pm_planner_dispatcher/preamble.txt"
+    ).exists()
+    # The child inner_outer_eval set ships its preamble too (extra sources).
+    assert repo_root.joinpath(
+        ".loopy_loop/workflow_sets/inner_outer_eval/preamble.txt"
+    ).exists()
     assert "workflow_set: pm_planner_dispatcher" in repo_root.joinpath(
         "loopy_loop_config.yaml"
     ).read_text(encoding="utf-8")
-    assert '"schema_version": 2' in repo_root.joinpath(
+    assert '"schema_version": 3' in repo_root.joinpath(
         ".loopy_loop/workflow_sets/pm_planner_dispatcher/workflows/dispatcher/prompt.txt"
     ).read_text(encoding="utf-8")
 
