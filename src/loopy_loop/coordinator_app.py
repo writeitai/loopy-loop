@@ -30,7 +30,6 @@ from loopy_loop.assignments import write_attempt_assignment
 from loopy_loop.config import build_harness_capability_roster
 from loopy_loop.config import ConfigError
 from loopy_loop.config import derive_full_goal_hash
-from loopy_loop.config import derive_goal_hash
 from loopy_loop.config import estimate_cost_usd
 from loopy_loop.config import PreflightResult
 from loopy_loop.config import run_preflight
@@ -94,15 +93,21 @@ from loopy_loop.sessions import create_session_id
 from loopy_loop.sessions import delivery_receipts_dir_path
 from loopy_loop.sessions import eval_request_path
 from loopy_loop.sessions import file_sha256
+from loopy_loop.sessions import git_receipt_path
+from loopy_loop.sessions import git_receipt_ref
 from loopy_loop.sessions import git_receipts_dir_path
 from loopy_loop.sessions import goal_check_path
 from loopy_loop.sessions import goal_contract_path
 from loopy_loop.sessions import handoff_path
 from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.sessions import protocol_failures_dir_path
+from loopy_loop.sessions import raw_attempt_dir_path
 from loopy_loop.sessions import result_path
 from loopy_loop.sessions import scheduler_view_path
 from loopy_loop.sessions import session_dir_path
+from loopy_loop.sessions import session_layout
+from loopy_loop.sessions import SESSION_LAYOUT_FOLDED
+from loopy_loop.sessions import SESSION_LAYOUT_MIRROR
 from loopy_loop.sessions import session_outcome_path
 from loopy_loop.sessions import state_path
 from loopy_loop.sessions import trace_finalization_outbox_dir_path
@@ -1026,6 +1031,9 @@ class CoordinatorService:
                 workflow_id=workflow.id,
                 iteration=iteration,
                 attempt_id=task.attempt_id or "legacy",
+                layout=session_layout(
+                    repo_root=self.repo_root, session_id=state.active_session_id
+                ),
             )
             assignment_file = assignment_path(
                 repo_root=self.repo_root,
@@ -1041,8 +1049,15 @@ class CoordinatorService:
                 task=task,
                 descriptor=task.workflow_snapshot,
                 trace_root=trace_root,
-                git_before_ref=(
-                    f"session:/git_receipts/git-before-{task.attempt_id}.json"
+                git_before_ref=git_receipt_ref(
+                    session_id=None,
+                    iteration=iteration,
+                    workflow_id=workflow.id,
+                    attempt_id=task.attempt_id,
+                    phase="before",
+                    layout=session_layout(
+                        repo_root=self.repo_root, session_id=state.active_session_id
+                    ),
                 ),
             )
             write_attempt_assignment(path=assignment_file, assignment=assignment)
@@ -1726,6 +1741,11 @@ class CoordinatorService:
         """
         if not request.attempt_id or not request.assignment_sha256:
             return False
+        if (
+            session_layout(repo_root=self.repo_root, session_id=request.session_id)
+            == SESSION_LAYOUT_FOLDED
+        ):
+            return self._finalize_completion_raw(request=request, response=response)
         try:
             if not self._completion_is_committed(request=request, response=response):
                 raise TraceError(
@@ -1886,6 +1906,56 @@ class CoordinatorService:
                 )
             return False
 
+    def _finalize_completion_raw(
+        self, *, request: FinishedRequest, response: TaskResponse | None
+    ) -> bool:
+        """Record a folded session's completion exchange in its raw dir.
+
+        A folded session is never sealed. The completion is already durable in
+        the iteration's result.json and recovery journal; this only mirrors the
+        service exchange into the prunable raw dir for observability, best
+        effort. Failure here cannot change the accepted D3 result.
+        """
+
+        if not self._completion_is_committed(request=request, response=response):
+            return False
+        try:
+            raw_root = raw_attempt_dir_path(
+                repo_root=self.repo_root,
+                session_id=request.session_id,
+                iteration=request.iteration,
+                workflow_id=request.workflow_id,
+            )
+            trace_write_json(
+                trace_root=raw_root,
+                relative_path="service/finished_exchange.json",
+                payload={
+                    "schema_version": 1,
+                    "request": request.model_dump(mode="json"),
+                    "response": (
+                        response.model_dump(mode="json")
+                        if response is not None
+                        else None
+                    ),
+                    "response_status": (
+                        "complete" if response is not None else "unavailable"
+                    ),
+                },
+            )
+            if response is not None:
+                trace_write_json(
+                    trace_root=raw_root,
+                    relative_path="protocol/finished_response.json",
+                    payload=response.model_dump(mode="json"),
+                )
+        except Exception:
+            logger.warning(
+                "failed to record folded completion raw for attempt %s",
+                request.attempt_id,
+                exc_info=True,
+            )
+        return True
+
     @staticmethod
     def _verify_finished_exchange(
         *, trace_root: Path, request: FinishedRequest, response: TaskResponse | None
@@ -1926,9 +1996,19 @@ class CoordinatorService:
             )
 
     def _trace_finalization_path(self, *, request: FinishedRequest) -> Path | None:
-        """Return the durable finalization-intent path for a v2 completion."""
+        """Return the durable finalization-intent path for a v2 completion.
+
+        Folded sessions have no seal to finalize: their raw artifacts are
+        written in place and never sealed, so there is no crash-recovery
+        outbox intent for them.
+        """
 
         if not request.attempt_id or not request.assignment_sha256:
+            return None
+        if (
+            session_layout(repo_root=self.repo_root, session_id=request.session_id)
+            == SESSION_LAYOUT_FOLDED
+        ):
             return None
         outbox = trace_finalization_outbox_dir_path(repo_root=self.repo_root)
         return outbox / f"{request.session_id}--{request.attempt_id}--finished.json"
@@ -2044,6 +2124,13 @@ class CoordinatorService:
         """Journal crash-trace finalization before the state transition commits."""
 
         if task.attempt_id is None or task.assignment_sha256 is None:
+            return
+        if (
+            session_layout(repo_root=self.repo_root, session_id=task.session_id)
+            == SESSION_LAYOUT_FOLDED
+        ):
+            # Folded sessions never seal; a crashed attempt's raw dir is left
+            # in place and the durable recovery journal records the crash.
             return
         path = trace_finalization_outbox_dir_path(repo_root=self.repo_root) / (
             f"{task.session_id}--{task.attempt_id}--abandoned.json"
@@ -3278,9 +3365,15 @@ class CoordinatorService:
     def _write_fresh_state(self) -> None:
         """Create a new root session with frozen v2 identity contracts."""
 
-        session_id = create_session_id(goal_hash=self.preflight.root_config.goal_hash)
-        goal_hash = derive_full_goal_hash(goal=self.preflight.root_config.goal)
         protocol_version = self.preflight.workflow_contract.session_protocol_version
+        session_id = create_session_id(
+            repo_root=self.repo_root,
+            goal=self.preflight.root_config.goal,
+            parent_session_id=None,
+            request_id=None,
+        )
+        goal_hash = derive_full_goal_hash(goal=self.preflight.root_config.goal)
+        layout = _layout_for_protocol(protocol_version=protocol_version)
         created_at = utc_now()
         workflow_roster = (
             _build_workflow_roster(
@@ -3325,6 +3418,7 @@ class CoordinatorService:
             ),
             session_protocol_version=protocol_version,
             schema_version=2,
+            layout=layout,
         )
         self.state_store = StateStore(
             repo_root=self.repo_root,
@@ -3521,14 +3615,18 @@ class CoordinatorService:
                 )
                 continue
             goal = request.effective_goal
-            session_id_hash = derive_goal_hash(goal=goal)
             goal_hash = derive_full_goal_hash(goal=goal)
             child_session_id = self._reusable_failed_dispatch_child_id(
                 parent_session_id=state.active_session_id,
                 request_id=request_id,
                 workflow_set=request.workflow_set,
                 goal_hash=goal_hash,
-            ) or create_session_id(goal_hash=session_id_hash)
+            ) or create_session_id(
+                repo_root=self.repo_root,
+                goal=goal,
+                parent_session_id=state.active_session_id,
+                request_id=request_id,
+            )
             try:
                 accepted_path = self._archive_accepted_request(
                     parent_session_id=state.active_session_id,
@@ -3654,6 +3752,7 @@ class CoordinatorService:
                 ),
                 session_protocol_version=child_protocol_version,
                 schema_version=state.schema_version,
+                layout=_layout_for_protocol(protocol_version=child_protocol_version),
             )
             # The child inherits the PARENT's frozen execution config — only
             # goal, goal_hash, and workflow_set change (P0.3's "children
@@ -5888,15 +5987,42 @@ class CoordinatorService:
                 reasons.append("canonical eval report hash does not match")
         except LogicalReferenceError:
             reasons.append("canonical eval report reference is invalid")
-        expected_trace_root = attempt_trace_dir_path(
-            repo_root=self.repo_root,
-            root_session_id=receipt.subject.root_session_id,
-            session_id=receipt.subject.session_id,
-            attempt_id=receipt.producer.attempt_id,
-        ).resolve()
-        expected_raw_ref = (
-            f"trace:trace-{receipt.producer.attempt_id}:/eval/report.json"
-        )
+        layout = session_layout(repo_root=self.repo_root, session_id=session_id)
+        if layout == SESSION_LAYOUT_FOLDED:
+            # Folded: the raw report lives at the producer iteration's raw dir
+            # and is bound to the exact producer by that deterministic path.
+            # There is no per-attempt manifest, so identity is proven by the
+            # path itself rather than by a manifest identity block.
+            expected_raw_report = (
+                raw_attempt_dir_path(
+                    repo_root=self.repo_root,
+                    session_id=receipt.subject.session_id,
+                    iteration=receipt.producer.iteration,
+                    workflow_id=receipt.producer.workflow_id,
+                )
+                / "eval"
+                / "report.json"
+            ).resolve()
+            session_root = session_dir_path(
+                repo_root=self.repo_root, session_id=receipt.subject.session_id
+            ).resolve()
+            expected_raw_ref = (
+                "session:/" + expected_raw_report.relative_to(session_root).as_posix()
+            )
+        else:
+            expected_raw_report = (
+                attempt_trace_dir_path(
+                    repo_root=self.repo_root,
+                    root_session_id=receipt.subject.root_session_id,
+                    session_id=receipt.subject.session_id,
+                    attempt_id=receipt.producer.attempt_id,
+                ).resolve()
+                / "eval"
+                / "report.json"
+            )
+            expected_raw_ref = (
+                f"trace:trace-{receipt.producer.attempt_id}:/eval/report.json"
+            )
         if receipt.raw_report_refs != [expected_raw_ref]:
             reasons.append(
                 "eval receipt must reference only the canonical attempt "
@@ -5909,7 +6035,7 @@ class CoordinatorService:
                 )
                 if not raw_report.is_file():
                     reasons.append("raw eval report does not exist")
-                elif raw_report != expected_trace_root / "eval" / "report.json":
+                elif raw_report != expected_raw_report:
                     reasons.append(
                         "raw eval report is not the producer attempt's canonical "
                         "eval/report.json"
@@ -5918,10 +6044,12 @@ class CoordinatorService:
                     reference
                 ):
                     reasons.append("raw eval report hash does not match")
+                elif layout == SESSION_LAYOUT_FOLDED:
+                    raw_paths.append(raw_report)
                 else:
                     try:
                         manifest = json.loads(
-                            expected_trace_root.joinpath(
+                            expected_raw_report.parent.parent.joinpath(
                                 "trace_manifest.json"
                             ).read_text(encoding="utf-8")
                         )
@@ -5965,9 +6093,13 @@ class CoordinatorService:
                 reasons.append("passing eval receipt must record its git commit")
             if receipt.verdict.goal_met and receipt.subject.dirty_tree_digest is None:
                 reasons.append("passing eval receipt must record its dirty tree digest")
-            git_after_path = (
-                git_receipts_dir_path(repo_root=self.repo_root, session_id=session_id)
-                / f"git-after-{receipt.producer.attempt_id}.json"
+            git_after_path = git_receipt_path(
+                repo_root=self.repo_root,
+                session_id=session_id,
+                iteration=receipt.producer.iteration,
+                workflow_id=receipt.producer.workflow_id,
+                attempt_id=receipt.producer.attempt_id,
+                phase="after",
             )
             try:
                 git_after = json.loads(git_after_path.read_text(encoding="utf-8"))
@@ -6013,11 +6145,7 @@ class CoordinatorService:
                         "eval subject dirty tree digest does not match live repository"
                     )
         if receipt.verdict.goal_met:
-            reports = [
-                path
-                for path in raw_paths
-                if path == expected_trace_root / "eval" / "report.json"
-            ]
+            reports = [path for path in raw_paths if path == expected_raw_report]
             if len(reports) != 1:
                 reasons.append(
                     "passing eval receipt must reference exactly one eval-banana "
@@ -6029,7 +6157,7 @@ class CoordinatorService:
                         path=reports[0],
                         receipt=receipt,
                         repo_root=self.repo_root,
-                        expected_output_dir=expected_trace_root / "eval",
+                        expected_output_dir=expected_raw_report.parent,
                     )
                 )
         return reasons
@@ -6127,6 +6255,17 @@ def _control_repair_placeholder_identity(*, raw: object) -> tuple[bool, str | No
 
 def _new_attempt_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+def _layout_for_protocol(*, protocol_version: int) -> str:
+    """Select the on-disk layout for a freshly created session.
+
+    Protocol-v3 sessions fold their raw artifacts and receipts into the session
+    tree; the historical v1/v2 contracts keep the mirror trace tree and
+    per-family receipt dirs so their frozen behavior is untouched.
+    """
+
+    return SESSION_LAYOUT_FOLDED if protocol_version >= 3 else SESSION_LAYOUT_MIRROR
 
 
 def _build_run_response(

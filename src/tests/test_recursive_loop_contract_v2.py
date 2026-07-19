@@ -36,13 +36,15 @@ from loopy_loop.sessions import control_path
 from loopy_loop.sessions import control_rejected_dir_path
 from loopy_loop.sessions import eval_receipts_dir_path
 from loopy_loop.sessions import file_sha256
-from loopy_loop.sessions import git_receipts_dir_path
+from loopy_loop.sessions import git_receipt_path
 from loopy_loop.sessions import goal_check_path
 from loopy_loop.sessions import goal_contract_path
 from loopy_loop.sessions import iteration_dir_path
 from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.sessions import protocol_failures_dir_path
 from loopy_loop.sessions import session_dir_path
+from loopy_loop.sessions import session_layout
+from loopy_loop.sessions import SESSION_LAYOUT_FOLDED
 from loopy_loop.sessions import state_path
 from loopy_loop.sessions import trace_finalization_outbox_dir_path
 from loopy_loop.sessions import trace_seal_receipt_path
@@ -1806,6 +1808,25 @@ def _setup_eval_task(
     )
 
 
+def _raw_eval_report_ref(
+    *,
+    repo_root: Path,
+    session_id: str,
+    trace_manifest: dict[str, Any],
+    raw_path: Path,
+    layout: str,
+) -> str:
+    """Return the raw eval report reference for the session's layout."""
+
+    if layout == SESSION_LAYOUT_FOLDED:
+        session_root = session_dir_path(
+            repo_root=repo_root, session_id=session_id
+        ).resolve()
+        relative = raw_path.resolve().relative_to(session_root).as_posix()
+        return f"session:/{relative}"
+    return f"trace:{trace_manifest['manifest_id']}:/eval/report.json"
+
+
 def _write_valid_eval_bundle(
     *, repo_root: Path, task: dict[str, Any], state: LoopState
 ) -> tuple[dict[str, Any], str, Path]:
@@ -1827,6 +1848,7 @@ def _write_valid_eval_bundle(
         / "eval-valid.report.md"
     )
     canonical_path.write_text("# Passing evaluation\n", encoding="utf-8")
+    layout = session_layout(repo_root=repo_root, session_id=task["session_id"])
     trace_root, trace_manifest = create_attempt_trace(
         repo_root=repo_root,
         root_session_id=state.root_session_id or state.active_session_id,
@@ -1837,6 +1859,7 @@ def _write_valid_eval_bundle(
         workflow_id=task["workflow_id"],
         iteration=task["iteration"],
         attempt_id=task["attempt_id"],
+        layout=layout,
     )
     raw_path = trace_root / "eval" / "report.json"
     raw_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1873,8 +1896,13 @@ def _write_valid_eval_bundle(
     git_commit = live_git.head
     dirty_tree_digest = live_git.dirty_tree_digest
     assert git_commit is not None
-    git_receipts_dir_path(repo_root=repo_root, session_id=task["session_id"]).joinpath(
-        f"git-after-{task['attempt_id']}.json"
+    git_receipt_path(
+        repo_root=repo_root,
+        session_id=task["session_id"],
+        iteration=task["iteration"],
+        workflow_id=task["workflow_id"],
+        attempt_id=task["attempt_id"],
+        phase="after",
     ).write_text(
         json.dumps(
             {
@@ -1887,7 +1915,13 @@ def _write_valid_eval_bundle(
         ),
         encoding="utf-8",
     )
-    raw_ref = f"trace:{trace_manifest['manifest_id']}:/eval/report.json"
+    raw_ref = _raw_eval_report_ref(
+        repo_root=repo_root,
+        session_id=task["session_id"],
+        trace_manifest=trace_manifest,
+        raw_path=raw_path,
+        layout=layout,
+    )
     payload = {
         "schema_version": 1,
         "eval_id": "eval-valid",
@@ -2114,6 +2148,7 @@ def test_valid_evidence_bound_eval_and_current_attempt_control_close_session(
         / "eval-valid.report.md"
     )
     canonical_path.write_text("# Passing evaluation\n", encoding="utf-8")
+    layout = session_layout(repo_root=repo_root, session_id=task["session_id"])
     trace_root, trace_manifest = create_attempt_trace(
         repo_root=repo_root,
         root_session_id=state.root_session_id or state.active_session_id,
@@ -2124,6 +2159,7 @@ def test_valid_evidence_bound_eval_and_current_attempt_control_close_session(
         workflow_id=task["workflow_id"],
         iteration=task["iteration"],
         attempt_id=task["attempt_id"],
+        layout=layout,
     )
     raw_path = trace_root / "eval" / "report.json"
     raw_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2160,8 +2196,13 @@ def test_valid_evidence_bound_eval_and_current_attempt_control_close_session(
     git_commit = live_git.head
     dirty_tree_digest = live_git.dirty_tree_digest
     assert git_commit is not None
-    git_receipts_dir_path(repo_root=repo_root, session_id=task["session_id"]).joinpath(
-        f"git-after-{task['attempt_id']}.json"
+    git_receipt_path(
+        repo_root=repo_root,
+        session_id=task["session_id"],
+        iteration=task["iteration"],
+        workflow_id=task["workflow_id"],
+        attempt_id=task["attempt_id"],
+        phase="after",
     ).write_text(
         json.dumps(
             {
@@ -2174,7 +2215,13 @@ def test_valid_evidence_bound_eval_and_current_attempt_control_close_session(
         ),
         encoding="utf-8",
     )
-    raw_ref = f"trace:{trace_manifest['manifest_id']}:/eval/report.json"
+    raw_ref = _raw_eval_report_ref(
+        repo_root=repo_root,
+        session_id=task["session_id"],
+        trace_manifest=trace_manifest,
+        raw_path=raw_path,
+        layout=layout,
+    )
     receipt_path = (
         eval_receipts_dir_path(repo_root=repo_root, session_id=task["session_id"])
         / "eval-valid.json"

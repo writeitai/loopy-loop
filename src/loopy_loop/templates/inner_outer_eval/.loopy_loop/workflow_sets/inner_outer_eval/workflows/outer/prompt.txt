@@ -19,8 +19,12 @@ What you own
       table, covered by a test.
     - Start from: the tile model in the board module and the drop table in the
       design notes.
-- project_state/handoff.json stays typed: summary, status, open_work, risks, and
-  refs to durable paths. Rewrite it atomically after any material change.
+- project_state/handoff.json must match the engine's LayerHandoff schema
+  exactly — extra fields are rejected. Fields: schema_version (1), session_id,
+  goal_sha256, revision (bump on every change), producer {workflow_id,
+  attempt_id}, summary, accepted_outcomes, open_work, risks, decision_refs,
+  evidence_refs, delivery_refs, eval_refs, updated_at. Rewrite it atomically
+  after any material change.
 
 Sizing the work
 Each iteration costs a full coordinator run before any work happens. Prefer work
@@ -59,6 +63,10 @@ then atomically publish successful control to control.json:
   "handoff_ref": "session:/project_state/handoff.json",
   "created_at": "RFC3339 timestamp"
 }
+Evidence refs must use the engine's logical-reference grammar `<scope>:/<path>`
+with scopes repo, session, parent, root — e.g. `session:/project_state/evidence/audit.md`,
+`repo:/design/decisions.md`. Bare URLs, git SHAs, and absolute filesystem paths
+are rejected; put those inside a referenced file instead.
 
 Stopping short of the goal is only for a genuinely terminal blocker, after
 autonomous routes are exhausted.

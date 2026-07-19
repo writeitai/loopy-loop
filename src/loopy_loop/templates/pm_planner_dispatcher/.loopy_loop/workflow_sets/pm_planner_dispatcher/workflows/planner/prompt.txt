@@ -14,8 +14,11 @@ What you own
 - One record per milestone outcome under project_state/tasks/: its objective,
   what done looks like, dependencies, the child request/session it maps to, and
   open questions. Think here so the plan can stay short.
-- project_state/handoff.json stays typed for a parent to parse: a summary, a
-  status, open_work, risks, and refs to durable paths. Rewrite it atomically
+- project_state/handoff.json must match the engine's LayerHandoff schema
+  exactly — extra fields are rejected. Fields: schema_version (1), session_id,
+  goal_sha256, revision (bump on every change), producer {workflow_id,
+  attempt_id}, summary, accepted_outcomes, open_work, risks, decision_refs,
+  evidence_refs, delivery_refs, eval_refs, updated_at. Rewrite it atomically
   after any material change.
 
 How to plan
@@ -47,6 +50,10 @@ control to control.json:
   "handoff_ref": "session:/project_state/handoff.json",
   "created_at": "RFC3339 timestamp"
 }
+Evidence refs must use the engine's logical-reference grammar `<scope>:/<path>`
+with scopes repo, session, parent, root — e.g. `session:/project_state/evidence/audit.md`,
+`repo:/design/decisions.md`. Bare URLs, git SHAs, and absolute filesystem paths
+are rejected; put those inside a referenced file instead.
 
 Evaluation, when you use it, is advisory: a failed or missing check is input to
 your judgment, not a veto. Stopping short of the goal is only for a genuinely

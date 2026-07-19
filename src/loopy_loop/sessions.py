@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import uuid
 
@@ -67,6 +68,54 @@ ASSIGNMENT_FILENAME = "assignment.json"
 WORKFLOW_SNAPSHOT_DIRNAME = "workflow_snapshot"
 SCHEDULER_VIEW_FILENAME = "scheduler_view.json"
 TRACE_REF_FILENAME = "trace_ref.json"
+RAW_DIRNAME = "raw"
+RECEIPTS_DIRNAME = "receipts"
+SESSION_GITIGNORE_FILENAME = ".gitignore"
+
+# Layout selects where a session keeps its per-attempt raw artifacts and how
+# its receipts are named. ``folded`` (new sessions) keeps raw noise in a
+# gitignored ``raw/`` subdirectory of the session and merges receipt families
+# into one self-describing ``receipts/`` dir. ``mirror`` (legacy sessions) uses
+# the historical parallel ``.loopy_loop/traces/`` tree, per-attempt trace
+# manifests/seals, and the hash-keyed git_receipts/eval_receipts/
+# delivery_receipts directories. Readers accept both; the field lives in
+# session.json so layout is never re-derived by parsing a path.
+SESSION_LAYOUT_FOLDED = "folded"
+SESSION_LAYOUT_MIRROR = "mirror"
+
+# Short function words dropped when a root session slug is derived from a goal.
+_SLUG_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "to",
+        "of",
+        "for",
+        "and",
+        "or",
+        "in",
+        "on",
+        "with",
+        "by",
+        "at",
+        "from",
+        "into",
+        "as",
+        "is",
+        "are",
+        "be",
+        "this",
+        "that",
+        "your",
+        "you",
+        "it",
+        "its",
+        "we",
+        "our",
+    }
+)
+_SLUG_MAX_LEN = 40
 
 
 def write_text_atomic(*, path: Path, content: str) -> None:
@@ -142,10 +191,74 @@ def append_jsonl_record(*, path: Path, payload: object) -> None:
         os.fsync(handle.fileno())
 
 
-def create_session_id(*, goal_hash: str) -> str:
-    stamp = utc_now().strftime("%Y%m%d_%H%M%S")
-    unique = uuid.uuid4().hex[:8]
-    return f"{stamp}_{goal_hash}_{unique}"
+def _slugify(*, text: str, drop_stopwords: bool, max_len: int = _SLUG_MAX_LEN) -> str:
+    """Return a readable kebab-case slug from free text.
+
+    Roots derive their slug from the first meaningful words of the goal (with
+    common stopwords removed); children derive theirs from the request id
+    verbatim. The result is always non-empty, falling back to ``session``.
+    """
+
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    if drop_stopwords:
+        meaningful = [word for word in words if word not in _SLUG_STOPWORDS]
+        # A goal made entirely of stopwords still deserves a readable slug.
+        words = meaningful or words
+    parts: list[str] = []
+    length = 0
+    for word in words:
+        addition = len(word) + (1 if parts else 0)
+        if parts and length + addition > max_len:
+            break
+        parts.append(word)
+        length += addition
+    slug = "-".join(parts)[:max_len].strip("-")
+    return slug or "session"
+
+
+def _next_scope_ordinal(*, existing_names: list[str], digits: int) -> int:
+    """Return one past the highest ordinal already used in a naming scope.
+
+    Only names matching the new ``NNN_``/``NN_`` shape are considered, so a
+    legacy timestamp directory (eight leading digits) never inflates the count.
+    """
+
+    pattern = re.compile(rf"^(\d{{{digits}}})_")
+    highest = 0
+    for name in existing_names:
+        match = pattern.match(name)
+        if match is not None:
+            highest = max(highest, int(match.group(1)))
+    return highest + 1
+
+
+def create_session_id(
+    *, repo_root: Path, goal: str, parent_session_id: str | None, request_id: str | None
+) -> str:
+    """Derive a readable ``NNN_<slug>`` (root) or ``NN_<slug>`` (child) id.
+
+    The ordinal makes the id unique within its scope without a random suffix;
+    the slug makes it legible. The id is derived exactly once, here, and passed
+    as a value thereafter — never reconstructed by parsing a path or hashing
+    content. Timestamp, goal hash, and a uuid remain machine fields in
+    session.json.
+    """
+
+    if parent_session_id is None:
+        scope_dir = sessions_root_path(repo_root=repo_root)
+        digits = 3
+        slug = _slugify(text=goal, drop_stopwords=True)
+    else:
+        scope_dir = child_sessions_dir_path(
+            repo_root=repo_root, session_id=parent_session_id
+        )
+        digits = 2
+        slug = _slugify(text=request_id or "", drop_stopwords=False)
+    existing = (
+        [entry.name for entry in scope_dir.iterdir()] if scope_dir.exists() else []
+    )
+    ordinal = _next_scope_ordinal(existing_names=existing, digits=digits)
+    return f"{ordinal:0{digits}d}_{slug}"
 
 
 def create_session_dir(
@@ -175,13 +288,22 @@ def create_session_dir(
     harness_capability_roster_payload: dict[str, object] | None = None,
     session_protocol_version: int | None = None,
     schema_version: int = 1,
+    layout: str = SESSION_LAYOUT_MIRROR,
 ) -> Path:
     """Create or idempotently materialize a durable session directory.
 
     ``schema_version`` selects the engine's persisted state shape, while
     ``session_protocol_version`` selects the agent-facing contract. When the
     latter is omitted, historical callers retain their matching v1/v2 layout.
+    ``layout`` selects the on-disk raw/receipt shape: ``folded`` keeps raw
+    artifacts under ``raw/`` and merges receipts into ``receipts/``; ``mirror``
+    uses the historical parallel traces tree and per-family receipt dirs.
     """
+
+    if layout not in {SESSION_LAYOUT_FOLDED, SESSION_LAYOUT_MIRROR}:
+        raise ValueError("layout must be 'folded' or 'mirror'")
+    if layout == SESSION_LAYOUT_FOLDED and schema_version < 2:
+        raise ValueError("folded layout requires state schema v2")
 
     effective_protocol_version = (
         schema_version if session_protocol_version is None else session_protocol_version
@@ -318,6 +440,8 @@ def create_session_dir(
                 "goal_hash": goal_hash,
                 "goal_contract_hash": goal_contract_hash,
                 "workflow_contract_hash": workflow_contract_hash,
+                "layout": layout,
+                "session_uuid": uuid.uuid4().hex,
                 "origin": origin or {},
                 "created_at": created_at,
             }
@@ -394,25 +518,42 @@ def create_session_dir(
             goal_hash=goal_hash,
             created_at=created_at,
         )
-    for durable_dir in (
+    durable_dirs = [
         eval_checks_dir_path(repo_root=repo_root, session_id=session_id),
-        eval_receipts_dir_path(repo_root=repo_root, session_id=session_id),
         child_outcomes_dir_path(repo_root=repo_root, session_id=session_id),
         parent_acceptance_dir_path(repo_root=repo_root, session_id=session_id),
-        git_receipts_dir_path(repo_root=repo_root, session_id=session_id),
-        delivery_receipts_dir_path(repo_root=repo_root, session_id=session_id),
         control_rejected_dir_path(repo_root=repo_root, session_id=session_id),
         protocol_failures_dir_path(repo_root=repo_root, session_id=session_id),
-        trace_seals_dir_path(repo_root=repo_root, session_id=session_id),
-    ):
+    ]
+    if layout == SESSION_LAYOUT_FOLDED:
+        # One session tree: raw noise under a gitignored raw/, and one merged
+        # receipts/ dir for git and delivery receipts. No parallel traces
+        # mirror, no trace_seals, no legacy harness_outputs projection. Eval
+        # receipts keep their own already-self-describing directory.
+        durable_dirs.extend(
+            [
+                eval_receipts_dir_path(repo_root=repo_root, session_id=session_id),
+                receipts_dir_path(repo_root=repo_root, session_id=session_id),
+                raw_dir_path(repo_root=repo_root, session_id=session_id),
+            ]
+        )
+        _write_session_gitignore(repo_root=repo_root, session_id=session_id)
+    else:
+        durable_dirs.extend(
+            [
+                eval_receipts_dir_path(repo_root=repo_root, session_id=session_id),
+                git_receipts_dir_path(repo_root=repo_root, session_id=session_id),
+                delivery_receipts_dir_path(repo_root=repo_root, session_id=session_id),
+                trace_seals_dir_path(repo_root=repo_root, session_id=session_id),
+                harness_outputs_dir_path(repo_root=repo_root, session_id=session_id),
+            ]
+        )
+    for durable_dir in durable_dirs:
         durable_dir.mkdir(parents=True, exist_ok=True)
     if effective_protocol_version < 3:
         eval_readiness_dir_path(repo_root=repo_root, session_id=session_id).mkdir(
             parents=True, exist_ok=True
         )
-    harness_outputs_dir_path(repo_root=repo_root, session_id=session_id).mkdir(
-        parents=True, exist_ok=True
-    )
     iterations_dir_path(repo_root=repo_root, session_id=session_id).mkdir(
         parents=True, exist_ok=True
     )
@@ -525,6 +666,32 @@ def session_dir_path(*, repo_root: Path, session_id: str) -> Path:
             return direct
         raise
     return resolver.current.directory
+
+
+def session_layout(*, repo_root: Path, session_id: str) -> str:
+    """Return a session's on-disk layout (``folded`` or ``mirror``).
+
+    The layout is a durable fact recorded in session.json at creation. A
+    session that predates the field (or whose manifest is unreadable) is
+    interpreted as the historical ``mirror`` layout so legacy trees keep
+    loading. Nothing derives the layout by parsing a directory name.
+    """
+
+    from loopy_loop.references import LogicalReferenceError
+
+    try:
+        session_dir = session_dir_path(repo_root=repo_root, session_id=session_id)
+    except LogicalReferenceError:
+        # A mutated or otherwise invalid topology cannot be a new folded
+        # session this engine created; report the historical mirror layout so
+        # callers reach their normal topology validation instead of failing
+        # inside a layout lookup.
+        return SESSION_LAYOUT_MIRROR
+    manifest = _read_json_mapping(path=session_dir / SESSION_METADATA_FILENAME)
+    value = manifest.get("layout")
+    if value == SESSION_LAYOUT_FOLDED:
+        return SESSION_LAYOUT_FOLDED
+    return SESSION_LAYOUT_MIRROR
 
 
 def state_path(*, repo_root: Path, session_id: str) -> Path:
@@ -816,8 +983,22 @@ def eval_readiness_dir_path(*, repo_root: Path, session_id: str) -> Path:
     )
 
 
+def receipts_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the merged, self-describing receipt directory (folded layout)."""
+
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id) / RECEIPTS_DIRNAME
+    )
+
+
 def eval_receipts_dir_path(*, repo_root: Path, session_id: str) -> Path:
-    """Return the directory for validated evaluation receipts."""
+    """Return the directory for validated evaluation receipts.
+
+    Eval receipts keep their own directory in both layouts: their filenames are
+    already self-describing (eval-id keyed, not hash keyed), and their raw
+    reports are bound to the producing attempt by identity, so there is no
+    reviewability or provenance gain from merging them into ``receipts/``.
+    """
 
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
@@ -846,6 +1027,10 @@ def parent_acceptance_dir_path(*, repo_root: Path, session_id: str) -> Path:
 def git_receipts_dir_path(*, repo_root: Path, session_id: str) -> Path:
     """Return the directory for session-bound Git evidence receipts."""
 
+    if session_layout(repo_root=repo_root, session_id=session_id) == (
+        SESSION_LAYOUT_FOLDED
+    ):
+        return receipts_dir_path(repo_root=repo_root, session_id=session_id)
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / GIT_RECEIPTS_DIRNAME
@@ -855,10 +1040,81 @@ def git_receipts_dir_path(*, repo_root: Path, session_id: str) -> Path:
 def delivery_receipts_dir_path(*, repo_root: Path, session_id: str) -> Path:
     """Return the directory for branch and PR delivery receipts."""
 
+    if session_layout(repo_root=repo_root, session_id=session_id) == (
+        SESSION_LAYOUT_FOLDED
+    ):
+        return receipts_dir_path(repo_root=repo_root, session_id=session_id)
     return (
         session_dir_path(repo_root=repo_root, session_id=session_id)
         / DELIVERY_RECEIPTS_DIRNAME
     )
+
+
+def git_receipt_filename(
+    *, iteration: int, workflow_id: str, attempt_id: str | None, phase: str, layout: str
+) -> str:
+    """Return the Git boundary receipt filename for a layout.
+
+    Folded receipts are self-describing (``0026_outer_git_after.json``); mirror
+    receipts keep the historical hash-keyed ``git-after-<attempt>.json`` name.
+    """
+
+    if layout == SESSION_LAYOUT_FOLDED:
+        prefix = iteration_dir_name(iteration=iteration, workflow_id=workflow_id)
+        return f"{prefix}_git_{phase}.json"
+    return f"git-{phase}-{attempt_id}.json"
+
+
+def git_receipt_path(
+    *,
+    repo_root: Path,
+    session_id: str,
+    iteration: int,
+    workflow_id: str,
+    attempt_id: str | None,
+    phase: str,
+) -> Path:
+    """Return the Git boundary receipt path for the session's layout."""
+
+    layout = session_layout(repo_root=repo_root, session_id=session_id)
+    return git_receipts_dir_path(
+        repo_root=repo_root, session_id=session_id
+    ) / git_receipt_filename(
+        iteration=iteration,
+        workflow_id=workflow_id,
+        attempt_id=attempt_id,
+        phase=phase,
+        layout=layout,
+    )
+
+
+def git_receipt_ref(
+    *,
+    session_id: str | None,
+    iteration: int,
+    workflow_id: str,
+    attempt_id: str | None,
+    phase: str,
+    layout: str,
+) -> str:
+    """Return the logical reference to a Git boundary receipt for a layout.
+
+    ``session_id`` is ``None`` for a same-session reference (``session:/...``)
+    or the target id for a cross-session reference (``session:<id>:/...``).
+    """
+
+    dirname = (
+        RECEIPTS_DIRNAME if layout == SESSION_LAYOUT_FOLDED else GIT_RECEIPTS_DIRNAME
+    )
+    filename = git_receipt_filename(
+        iteration=iteration,
+        workflow_id=workflow_id,
+        attempt_id=attempt_id,
+        phase=phase,
+        layout=layout,
+    )
+    prefix = f"session:{session_id}:" if session_id else "session:"
+    return f"{prefix}/{dirname}/{filename}"
 
 
 def control_rejected_dir_path(*, repo_root: Path, session_id: str) -> Path:
@@ -1041,6 +1297,51 @@ def trace_ref_path(
             workflow_id=workflow_id,
         )
         / TRACE_REF_FILENAME
+    )
+
+
+def raw_dir_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the session's gitignored, prunable raw-artifact directory."""
+
+    return session_dir_path(repo_root=repo_root, session_id=session_id) / RAW_DIRNAME
+
+
+def raw_attempt_dir_path(
+    *, repo_root: Path, session_id: str, iteration: int, workflow_id: str
+) -> Path:
+    """Return one iteration's raw-artifact directory (folded layout).
+
+    The attempt is identified by its iteration prefix rather than by two nested
+    hash levels; the attempt hash stays available inside the artifacts.
+    """
+
+    return raw_dir_path(
+        repo_root=repo_root, session_id=session_id
+    ) / iteration_dir_name(iteration=iteration, workflow_id=workflow_id)
+
+
+def session_gitignore_path(*, repo_root: Path, session_id: str) -> Path:
+    """Return the per-session ``.gitignore`` path."""
+
+    return (
+        session_dir_path(repo_root=repo_root, session_id=session_id)
+        / SESSION_GITIGNORE_FILENAME
+    )
+
+
+def _write_session_gitignore(*, repo_root: Path, session_id: str) -> None:
+    """Ignore prunable raw noise while keeping the durable session tree."""
+
+    path = session_gitignore_path(repo_root=repo_root, session_id=session_id)
+    if path.exists():
+        return
+    write_text_atomic(
+        path=path,
+        content=(
+            "# Prunable raw attempt artifacts (see `loopy prune-raw`).\n"
+            "# The rest of the session tree is durable evidence.\n"
+            f"{RAW_DIRNAME}/\n"
+        ),
     )
 
 

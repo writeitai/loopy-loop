@@ -52,7 +52,8 @@ from loopy_loop.sessions import eval_checks_dir_path
 from loopy_loop.sessions import eval_readiness_dir_path
 from loopy_loop.sessions import file_sha256
 from loopy_loop.sessions import finished_path
-from loopy_loop.sessions import git_receipts_dir_path
+from loopy_loop.sessions import git_receipt_path
+from loopy_loop.sessions import git_receipt_ref
 from loopy_loop.sessions import GOAL_CHECK_FILENAME
 from loopy_loop.sessions import harness_outputs_dir_path
 from loopy_loop.sessions import iteration_harness_output_root
@@ -61,6 +62,8 @@ from loopy_loop.sessions import pending_finished_request_path
 from loopy_loop.sessions import project_state_dir_path
 from loopy_loop.sessions import session_dir_path
 from loopy_loop.sessions import session_goal_path
+from loopy_loop.sessions import session_layout
+from loopy_loop.sessions import SESSION_LAYOUT_FOLDED
 from loopy_loop.sessions import traces_root_path
 from loopy_loop.sessions import updates_from_user_path
 from loopy_loop.sessions import user_updates_journal_path
@@ -277,6 +280,7 @@ def _run_task(
         workflow_id=task.workflow_id,
     )
     trace_root: Path | None = None
+    scratch_dir: Path | None = None
     assignment: AttemptAssignment | None = None
     assignment_file: Path | None = None
     caller_context: dict[str, object] | None = None
@@ -287,6 +291,7 @@ def _run_task(
             metadata = _read_session_metadata(
                 repo_root=root, session_id=task.session_id
             )
+            layout = session_layout(repo_root=root, session_id=task.session_id)
             attempt_id = (
                 task.attempt_id or f"legacy-{task.iteration}-{task.workflow_id}"
             )
@@ -304,6 +309,7 @@ def _run_task(
                 workflow_id=task.workflow_id,
                 iteration=task.iteration,
                 attempt_id=attempt_id,
+                layout=layout,
             )
             trace_write_json(
                 trace_root=trace_root,
@@ -338,11 +344,20 @@ def _run_task(
             git_before = _capture_git_boundary(
                 repo_root=root,
                 session_id=task.session_id,
+                iteration=task.iteration,
+                workflow_id=task.workflow_id,
                 attempt_id=attempt_id,
                 phase="before",
                 trace_root=trace_root,
             )
-            git_before_ref = f"session:/git_receipts/git-before-{attempt_id}.json"
+            git_before_ref = git_receipt_ref(
+                session_id=None,
+                iteration=task.iteration,
+                workflow_id=task.workflow_id,
+                attempt_id=attempt_id,
+                phase="before",
+                layout=layout,
+            )
             assignment = build_attempt_assignment(
                 repo_root=root,
                 task=attempt_task,
@@ -403,6 +418,10 @@ def _run_task(
                 payload=git_before,
             )
             harness_output_root = trace_root / "harness"
+            if layout == SESSION_LAYOUT_FOLDED:
+                # The whole raw iteration dir is the agent's scratch space; the
+                # team-harness run lives in its harness/ subdir.
+                scratch_dir = trace_root
             relevant_state_paths = [
                 assignment.absolute_paths.get(name)
                 for name in (
@@ -476,6 +495,7 @@ def _run_task(
             workflow_id=task.workflow_id,
             iteration_dir=iteration_dir,
             harness_output_root=harness_output_root,
+            scratch_dir=scratch_dir or harness_output_root,
             workflow_prompt=prompt_text,
             emits_goal_check=workflow_config.emits_goal_check,
             repo_root=root,
@@ -526,9 +546,11 @@ def _run_task(
         harness_output_dir=iteration_result.harness_output_dir,
     )
     trace_problem: str | None = None
+    # Folded raw dirs have no manifest; leave the manifest path empty so the
+    # coordinator's folded completion path (which never seals) is used.
     trace_manifest_path = (
-        str((trace_root / "trace_manifest.json").resolve())
-        if trace_root is not None
+        str((trace_root / TRACE_MANIFEST_FILENAME).resolve())
+        if trace_root is not None and (trace_root / TRACE_MANIFEST_FILENAME).is_file()
         else ""
     )
     if trace_root is not None:
@@ -542,6 +564,8 @@ def _run_task(
             git_after = _capture_git_boundary(
                 repo_root=root,
                 session_id=task.session_id,
+                iteration=task.iteration,
+                workflow_id=task.workflow_id,
                 attempt_id=task.attempt_id or "legacy",
                 phase="after",
                 trace_root=trace_root,
@@ -774,6 +798,7 @@ def _render_prompt(
     workflow_id: str,
     iteration_dir: Path,
     harness_output_root: Path,
+    scratch_dir: Path | None = None,
     workflow_prompt: str,
     emits_goal_check: bool = False,
     repo_root: Path | None = None,
@@ -791,6 +816,7 @@ def _render_prompt(
 
     root = repo_root or Path.cwd()
     session_dir = session_dir_path(repo_root=root, session_id=session_id)
+    scratch = scratch_dir or harness_output_root
     attempt_id = (
         str(assignment.identity.get("attempt_id"))
         if assignment is not None
@@ -829,7 +855,8 @@ def _render_prompt(
         "- project_state/            durable working state for your role",
         "- child_requests/pending/   publish child requests here",
         "- control.json              terminal control",
-        f"- scratch dir (this iteration): {harness_output_root.resolve()}",
+        f"- scratch dir (this iteration): {scratch.resolve()}   "
+        "(raw/verbose output only; evidence goes in the durable tree)",
         f"- paths.json: {paths_json_path}    "
         "full path map, rosters, scheduler view — read if needed",
     ]
@@ -1047,11 +1074,18 @@ def _capture_git_boundary(
     *,
     repo_root: Path,
     session_id: str,
+    iteration: int,
+    workflow_id: str,
     attempt_id: str,
     phase: Literal["before", "after"],
     trace_root: Path,
 ) -> dict[str, object]:
-    """Capture one Git boundary and persist its compact session receipt."""
+    """Capture one Git boundary and persist its compact session receipt.
+
+    The compact receipt name and location follow the session layout: folded
+    sessions get a self-describing ``receipts/<NNNN>_<workflow>_git_<phase>``
+    name, mirror sessions keep the historical ``git_receipts/`` hash name.
+    """
 
     if phase not in {"before", "after"}:
         raise AssignmentContractError(f"invalid git evidence phase: {phase}")
@@ -1092,9 +1126,13 @@ def _capture_git_boundary(
     compact = dict(payload)
     compact["verbose_status_path"] = None
     compact["verbose_diff_path"] = None
-    receipt_path = (
-        git_receipts_dir_path(repo_root=repo_root, session_id=session_id)
-        / f"git-{phase}-{attempt_id}.json"
+    receipt_path = git_receipt_path(
+        repo_root=repo_root,
+        session_id=session_id,
+        iteration=iteration,
+        workflow_id=workflow_id,
+        attempt_id=attempt_id,
+        phase=phase,
     )
     write_json_atomic(path=receipt_path, payload=compact)
     return payload
