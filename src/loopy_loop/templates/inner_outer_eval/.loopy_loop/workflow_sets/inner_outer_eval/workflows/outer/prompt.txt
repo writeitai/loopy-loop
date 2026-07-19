@@ -63,6 +63,10 @@ then atomically publish successful control to control.json:
   "handoff_ref": "session:/project_state/handoff.json",
   "created_at": "RFC3339 timestamp"
 }
+Evidence refs must use the engine's logical-reference grammar `<scope>:/<path>`
+with scopes repo, session, parent, root — e.g. `session:/project_state/evidence/audit.md`,
+`repo:/design/decisions.md`. Bare URLs, git SHAs, and absolute filesystem paths
+are rejected; put those inside a referenced file instead.
 
 Stopping short of the goal is only for a genuinely terminal blocker, after
 autonomous routes are exhausted.
