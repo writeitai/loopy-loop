@@ -54,6 +54,11 @@ Evidence refs must use the engine's logical-reference grammar `<scope>:/<path>`
 with scopes repo, session, parent, root — e.g. `session:/project_state/evidence/audit.md`,
 `repo:/design/decisions.md`. Bare URLs, git SHAs, and absolute filesystem paths
 are rejected; put those inside a referenced file instead.
+Do not include an `eval_refs` field: this stock contract runs eval as advisory
+(no sealed eval receipts are produced), and `eval_refs` only accepts a
+current-session `eval_receipts/*.json` file — citing anything else is rejected.
+Cite eval verdicts through `evidence_refs` pointing at
+`session:/project_state/eval_results.md` instead.
 
 Evaluation, when you use it, is advisory: a failed or missing check is input to
 your judgment, not a veto. Stopping short of the goal is only for a genuinely
