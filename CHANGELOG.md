@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.11.0
+
+- **Engine-emitted contract descriptors (#86).** The engine emits a
+  machine-readable contract file every iteration (referenced from
+  `paths.json`), derived directly from its own models and constants: the
+  active-protocol accepted/required control fields plus a validated
+  `goal_met` example, eval-receipt applicability, the evidence-reference
+  grammar, and the `LayerHandoff` schema. The stock outer/planner prompts
+  drop the hand-restated schema/grammar/eval prose and point at the
+  descriptor, so prompt guidance can no longer drift from what the engine
+  validates (the root cause of repeated rejected-terminal-control cycles).
+- **Operator UX (#85).** `loopy stop --force` reaps the active iteration's
+  tracked agent subprocesses so a hard stop leaves no orphans. `loopy status`
+  adds a last-activity liveness line and surfaces rate-limited model families
+  (from the harness run log), plus `--json`. New `loopy reload` refreshes
+  workflow prompts and coordinator-operational config at the next task
+  boundary without a restart — never the session-frozen goal, model, or
+  workflow contracts/rosters.
+- Docs: cli-reference, troubleshooting, and success-and-control updated for
+  the above.
+
 ## 0.10.1
 
 - **Grok Build opt-in.** Stock configs keep `team_harness_agents` as
