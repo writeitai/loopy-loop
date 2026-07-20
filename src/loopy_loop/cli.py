@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
+from datetime import UTC
 from importlib.resources import files
 from importlib.resources.abc import Traversable
 import json
 from pathlib import Path
 import shutil
+import socket
 import time
 import uuid
 
@@ -26,10 +29,20 @@ from loopy_loop.events import read_events
 from loopy_loop.git_evidence import capture_git_evidence
 from loopy_loop.models import LoopState
 from loopy_loop.models import utc_now
+from loopy_loop.recovery import recover_interrupted_iteration
+from loopy_loop.recovery import RecoveryIncompleteError
+from loopy_loop.recovery import RecoveryOutcome
+from loopy_loop.recovery import RecoveryRefusedError
 from loopy_loop.sessions import append_jsonl_record
+from loopy_loop.sessions import attempt_trace_dir_path
+from loopy_loop.sessions import iteration_harness_output_root
+from loopy_loop.sessions import preflight_reload_request_path
+from loopy_loop.sessions import raw_attempt_dir_path
 from loopy_loop.sessions import raw_dir_path
 from loopy_loop.sessions import RAW_DIRNAME
 from loopy_loop.sessions import session_dir_path
+from loopy_loop.sessions import session_layout
+from loopy_loop.sessions import SESSION_LAYOUT_FOLDED
 from loopy_loop.sessions import SESSION_METADATA_FILENAME
 from loopy_loop.sessions import sessions_root_path
 from loopy_loop.sessions import state_path
@@ -391,11 +404,23 @@ def worker(coordinator_url: str) -> None:
     default=False,
     help="Re-render every 2 seconds until interrupted.",
 )
-def status(watch: bool) -> None:
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Print machine-readable JSON.",
+)
+def status(watch: bool, as_json: bool) -> None:
     """Show loop status (the whole session stack, with usage totals)."""
     repo_root = Path.cwd()
+    if watch and as_json:
+        raise click.ClickException("--watch and --json cannot be used together")
     if not watch:
         try:
+            if as_json:
+                click.echo(json.dumps(_status_payload(repo_root=repo_root), indent=2))
+                return
             lines = _status_lines(repo_root=repo_root)
         except FileLockTimeout:
             raise click.ClickException(
@@ -463,6 +488,7 @@ def _status_lines(*, repo_root: Path, tolerate_lock: bool = False) -> list[str]:
 def _session_status_lines(
     *, repo_root: Path, state: LoopState, indent: str, prices: ModelPrices | None
 ) -> list[str]:
+    observability = _active_iteration_observability(repo_root=repo_root, state=state)
     lines = [
         f"{indent}status: {state.status}",
         f"{indent}session: {state.active_session_id}",
@@ -477,6 +503,21 @@ def _session_status_lines(
             f"session {state.current_task.session_id}, "
             f"started {state.current_task.started_at})"
         )
+    activity_age = observability["last_activity_age_s"]
+    if activity_age is None:
+        lines.append(f"{indent}last activity: unavailable")
+    else:
+        lines.append(f"{indent}last activity: {activity_age}s ago")
+    rate_limits = observability["rate_limited_families"]
+    if rate_limits:
+        rendered = ", ".join(
+            f"{item['family']} until {item['resets_at']}" for item in rate_limits
+        )
+        lines.append(f"{indent}model families rate-limited: {rendered}")
+    elif not observability["rate_limit_data_available"]:
+        lines.append(f"{indent}model families rate-limited: unavailable")
+    else:
+        lines.append(f"{indent}model families rate-limited: none")
     lines.append(f"{indent}stop_reason: {state.stop_reason or 'none'}")
     # Subtree totals: this session's own iterations plus finalized children.
     totals = session_tree_usage_totals(repo_root=repo_root, state=state)
@@ -495,6 +536,220 @@ def _session_status_lines(
     if cost is not None:
         lines.append(f"{indent}subtree_estimated_cost_usd: {cost:.4f}")
     return lines
+
+
+def _status_payload(*, repo_root: Path) -> dict[str, object]:
+    """Return the same session-stack status as a stable JSON object."""
+
+    state = StateStore(repo_root=repo_root).read_state()
+    if state is None:
+        return {"schema_version": 1, "sessions": []}
+    prices = _configured_model_prices(repo_root=repo_root)
+    sessions: list[dict[str, object]] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+    while state.active_session_id not in seen:
+        seen.add(state.active_session_id)
+        sessions.append(
+            _session_status_payload(repo_root=repo_root, state=state, prices=prices)
+        )
+        child_id = state.active_child_session_id
+        if child_id is None:
+            break
+        try:
+            child_state = StateStore(
+                repo_root=repo_root,
+                state_path=state_path(repo_root=repo_root, session_id=child_id),
+            ).read_state()
+        except FileLockTimeout:
+            warnings.append(f"active child {child_id}: state locked; retry shortly")
+            break
+        if child_state is None:
+            warnings.append(
+                f"active_child_session_id points at {child_id}, but its state "
+                "is missing (stale pointer)"
+            )
+            break
+        state = child_state
+    payload: dict[str, object] = {"schema_version": 1, "sessions": sessions}
+    if warnings:
+        payload["warnings"] = warnings
+    return payload
+
+
+def _session_status_payload(
+    *, repo_root: Path, state: LoopState, prices: ModelPrices | None
+) -> dict[str, object]:
+    totals = session_tree_usage_totals(repo_root=repo_root, state=state)
+    cost = estimate_cost_usd(
+        prompt_tokens=totals.prompt_tokens,
+        completion_tokens=totals.completion_tokens,
+        prices=prices,
+    )
+    current_task: dict[str, object] | None = None
+    if state.current_task is not None:
+        current_task = {
+            "workflow_id": state.current_task.workflow_id,
+            "iteration": state.current_task.iteration,
+            "session_id": state.current_task.session_id,
+            "attempt_id": state.current_task.attempt_id,
+            "started_at": state.current_task.started_at.isoformat(),
+        }
+    return {
+        "status": state.status,
+        "session_id": state.active_session_id,
+        "iteration_count": state.iteration_count,
+        "current_task": current_task,
+        "stop_reason": state.stop_reason,
+        "subtree_usage": totals.model_dump(mode="json"),
+        "subtree_estimated_cost_usd": cost,
+        **_active_iteration_observability(repo_root=repo_root, state=state),
+    }
+
+
+def _active_iteration_observability(
+    *, repo_root: Path, state: LoopState
+) -> dict[str, object]:
+    """Best-effort liveness and family health for one session's active task."""
+
+    roots = _active_iteration_output_roots(repo_root=repo_root, state=state)
+    latest_mtime = _latest_tree_mtime(roots=roots)
+    now = time.time()
+    last_activity_at: str | None = None
+    last_activity_age_s: int | None = None
+    if latest_mtime is not None:
+        last_activity_at = (
+            datetime.fromtimestamp(latest_mtime, tz=UTC)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        last_activity_age_s = max(0, int(now - latest_mtime))
+    rate_limits, rate_limit_data_available = _active_rate_limited_families(
+        roots=roots, now=datetime.fromtimestamp(now, tz=UTC)
+    )
+    return {
+        "last_activity_at": last_activity_at,
+        "last_activity_age_s": last_activity_age_s,
+        "rate_limit_data_available": rate_limit_data_available,
+        "rate_limited_families": rate_limits,
+    }
+
+
+def _active_iteration_output_roots(*, repo_root: Path, state: LoopState) -> list[Path]:
+    task = state.current_task
+    if task is None:
+        return []
+    roots: list[Path] = []
+    if session_layout(repo_root=repo_root, session_id=task.session_id) == (
+        SESSION_LAYOUT_FOLDED
+    ):
+        roots.append(
+            raw_attempt_dir_path(
+                repo_root=repo_root,
+                session_id=task.session_id,
+                iteration=task.iteration,
+                workflow_id=task.workflow_id,
+            )
+        )
+    elif task.attempt_id is not None:
+        roots.append(
+            attempt_trace_dir_path(
+                repo_root=repo_root,
+                root_session_id=state.root_session_id or state.active_session_id,
+                session_id=task.session_id,
+                attempt_id=task.attempt_id,
+            )
+        )
+    # Historical runs wrote below harness_outputs instead of the caller-owned
+    # raw trace. Include that location so resumed legacy sessions remain useful.
+    roots.append(
+        iteration_harness_output_root(
+            repo_root=repo_root,
+            session_id=task.session_id,
+            iteration=task.iteration,
+            workflow_id=task.workflow_id,
+        )
+    )
+    return list(dict.fromkeys(roots))
+
+
+def _latest_tree_mtime(*, roots: list[Path]) -> float | None:
+    latest: float | None = None
+    for root in roots:
+        try:
+            candidates = [root, *root.rglob("*")] if root.exists() else []
+            for path in candidates:
+                if path.is_symlink():
+                    continue
+                modified = path.stat().st_mtime
+                latest = modified if latest is None else max(latest, modified)
+        except OSError:
+            continue
+    return latest
+
+
+def _active_rate_limited_families(
+    *, roots: list[Path], now: datetime
+) -> tuple[list[dict[str, str | None]], bool]:
+    """Read active family circuit intervals from caller-owned run.json files."""
+
+    active: dict[str, tuple[datetime, dict[str, str | None]]] = {}
+    data_available = False
+    for root in roots:
+        harness_roots = [root / "harness", root]
+        for path in (
+            candidate
+            for harness_root in harness_roots
+            if harness_root.is_dir() and not harness_root.is_symlink()
+            for candidate in harness_root.glob("*/run.json")
+        ):
+            if path.is_symlink():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            records = payload.get("rate_limited_families")
+            if not isinstance(records, list):
+                continue
+            data_available = True
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                family = record.get("family")
+                resets_at = record.get("resets_at")
+                if not isinstance(family, str) or not family.strip():
+                    continue
+                if not isinstance(resets_at, str):
+                    continue
+                try:
+                    reset = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if reset.tzinfo is None:
+                    reset = reset.replace(tzinfo=UTC)
+                if reset <= now:
+                    continue
+                item = {
+                    "family": family,
+                    "model": (
+                        record.get("model")
+                        if isinstance(record.get("model"), str)
+                        else None
+                    ),
+                    "resets_at": resets_at,
+                    "reason": (
+                        record.get("reason")
+                        if isinstance(record.get("reason"), str)
+                        else None
+                    ),
+                }
+                previous = active.get(family)
+                if previous is None or reset > previous[0]:
+                    active[family] = (reset, item)
+    return [active[family][1] for family in sorted(active)], data_available
 
 
 def _configured_model_prices(*, repo_root: Path) -> ModelPrices | None:
@@ -707,8 +962,14 @@ def _remove_prunable(*, path: Path) -> None:
 
 
 @main.command()
-def stop() -> None:
-    """Request a tree-wide stop at the next safe assignment boundary."""
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Also immediately reap the active iteration's tracked agent processes.",
+)
+def stop(force: bool) -> None:
+    """Request a tree-wide stop, optionally reaping active agent processes."""
     repo_root = Path.cwd()
     store = StateStore(repo_root=repo_root)
 
@@ -738,6 +999,78 @@ def stop() -> None:
             "coordinator state is locked (likely mid-request); retry shortly"
         ) from None
     click.echo("stop requested")
+    if not force:
+        return
+    if state is None or state.current_task is None:
+        click.echo("force reap: no active iteration")
+        return
+    task = state.current_task
+    if task.worker is not None and task.worker.hostname != socket.gethostname():
+        raise click.ClickException(
+            "stop was requested, but force reap cannot reach the active worker "
+            f"on remote host {task.worker.hostname}"
+        )
+    try:
+        outcome = recover_interrupted_iteration(
+            repo_root=repo_root,
+            session_id=task.session_id,
+            iteration=task.iteration,
+            workflow_id=task.workflow_id,
+            policy="reap",
+            drain_timeout_s=0.0,
+            attempt_id=task.attempt_id,
+            force=True,
+        )
+    except RecoveryIncompleteError as exc:
+        if exc.outcome is not None:
+            click.echo(_force_reap_summary(outcome=exc.outcome))
+        raise click.ClickException(
+            f"stop was requested, but force reap was incomplete: {exc}"
+        ) from exc
+    except RecoveryRefusedError as exc:
+        raise click.ClickException(
+            f"stop was requested, but force reap was incomplete: {exc}"
+        ) from exc
+    click.echo(_force_reap_summary(outcome=outcome))
+
+
+def _force_reap_summary(*, outcome: RecoveryOutcome) -> str:
+    """Render recovery counters without exposing team-harness report internals."""
+
+    return (
+        "force reap: "
+        f"harness_runs={outcome.reaped_runs} "
+        f"settled_agents={outcome.settled_workers} "
+        f"unsettled_agents={outcome.unsettled_workers}"
+    )
+
+
+@main.command()
+def reload() -> None:
+    """Reload prompts and coordinator-only config at the next task boundary."""
+
+    repo_root = Path.cwd()
+    try:
+        state = StateStore(repo_root=repo_root).read_state()
+    except FileLockTimeout:
+        raise click.ClickException(
+            "coordinator state is locked (likely mid-request); retry shortly"
+        ) from None
+    if state is None:
+        raise click.ClickException("No loopy-loop state found.")
+    request_id = f"reload-{uuid.uuid4().hex}"
+    write_json_atomic(
+        path=preflight_reload_request_path(repo_root=repo_root),
+        payload={
+            "schema_version": 1,
+            "request_id": request_id,
+            "requested_at": utc_now().isoformat().replace("+00:00", "Z"),
+        },
+    )
+    click.echo(
+        "reload requested; workflow prompts and coordinator-operational config "
+        "will refresh at the next task boundary"
+    )
 
 
 @main.command()

@@ -7,7 +7,9 @@ from typing import Any
 from click.testing import CliRunner
 
 from loopy_loop.cli import main
+from loopy_loop.coordinator_app import create_coordinator_app
 from loopy_loop.models import REQUIRED_V3_WORKER_CAPABILITIES
+from loopy_loop.recovery import RecoveryOutcome
 from loopy_loop.sessions import create_session_dir
 from loopy_loop.state_store import StateStore
 from tests.protocol_helpers import v2_finished_body
@@ -267,6 +269,102 @@ def test_status_and_stop_commands(
     assert stop_result.exit_code == 0
     assert updated is not None
     assert updated.stop_requested is True
+
+
+def test_stop_force_reaps_active_iteration(
+    repo_builder: Any, monkeypatch: Any, state_factory: Any, current_task_factory: Any
+) -> None:
+    repo_root = repo_builder()
+    monkeypatch.chdir(repo_root)
+    store = StateStore(repo_root=repo_root)
+    state = state_factory(
+        current_task=current_task_factory(
+            attempt_id="attempt-force-stop",
+            session_id="20260419_143022_cdbf6975e8a3_ab12cd34",
+        )
+    )
+    create_session_dir(
+        repo_root=repo_root,
+        session_id=state.active_session_id,
+        goal_hash=state.goal_hash,
+        workflow_set=state.workflow_set,
+    )
+    store.write_state(state=state)
+    calls: list[dict[str, Any]] = []
+
+    def fake_recover(**kwargs: Any) -> RecoveryOutcome:
+        calls.append(kwargs)
+        return RecoveryOutcome(
+            policy="reap", reaped_runs=1, settled_workers=2, unsettled_workers=0
+        )
+
+    monkeypatch.setattr("loopy_loop.cli.recover_interrupted_iteration", fake_recover)
+
+    result = CliRunner().invoke(main, ["stop", "--force"])
+
+    updated = store.read_state()
+    assert result.exit_code == 0, result.output
+    assert updated is not None and updated.stop_requested is True
+    assert len(calls) == 1
+    assert calls[0]["policy"] == "reap"
+    assert calls[0]["force"] is True
+    assert calls[0]["attempt_id"] == "attempt-force-stop"
+    assert "harness_runs=1 settled_agents=2 unsettled_agents=0" in result.output
+
+
+def test_reload_refreshes_prompt_and_operational_config_but_not_frozen_snapshot(
+    repo_builder: Any, monkeypatch: Any
+) -> None:
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = repo_builder()
+    monkeypatch.chdir(repo_root)
+    app = create_coordinator_app(repo_root=repo_root, resume=False)
+    service = app.state.service
+    original_state = StateStore(repo_root=repo_root).read_state()
+    assert original_state is not None
+    original_snapshot = original_state.config_snapshot.model_dump()
+    prompt_path = repo_root.joinpath(
+        ".loopy_loop/workflow_sets/main/workflows/planner/prompt.txt"
+    )
+    prompt_path.write_text("Reloaded planner prompt.\n", encoding="utf-8")
+    workflow_config_path = prompt_path.with_name("config.yaml")
+    workflow_config_path.write_text(
+        workflow_config_path.read_text(encoding="utf-8").replace(
+            "description: Plan work.", "description: Changed on disk."
+        ),
+        encoding="utf-8",
+    )
+    config_path = repo_root / "loopy_loop_config.yaml"
+    config_text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(
+        config_text.replace(
+            "team_harness_model: gpt-5.5", "team_harness_model: changed-model"
+        )
+        + "\nrecovery_policy: reap\n",
+        encoding="utf-8",
+    )
+
+    requested = CliRunner().invoke(main, ["reload"])
+    task = TestClient(app).post("/register", json=v2_register_body(repo_root)).json()
+    refreshed = service.preflight
+    persisted = StateStore(repo_root=repo_root).read_state()
+
+    assert requested.exit_code == 0, requested.output
+    planner = next(item for item in refreshed.workflows if item.id == "planner")
+    assert planner.prompt_text == "Reloaded planner prompt.\n"
+    assert planner.description == "Plan work."
+    assert service.preflight.root_config.recovery_policy == "reap"
+    assert service.preflight.root_config.team_harness_model == "gpt-5.5"
+    assert (
+        Path(task["workflow_snapshot"]["workflow_prompt_path"]).read_text(
+            encoding="utf-8"
+        )
+        == "Reloaded planner prompt.\n"
+    )
+    assert persisted is not None
+    assert persisted.config_snapshot.model_dump() == original_snapshot
 
 
 def test_coordinator_requires_resume_for_running_state(

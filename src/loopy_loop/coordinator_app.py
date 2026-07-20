@@ -100,6 +100,7 @@ from loopy_loop.sessions import goal_check_path
 from loopy_loop.sessions import goal_contract_path
 from loopy_loop.sessions import handoff_path
 from loopy_loop.sessions import pending_finished_request_path
+from loopy_loop.sessions import preflight_reload_request_path
 from loopy_loop.sessions import protocol_failures_dir_path
 from loopy_loop.sessions import raw_attempt_dir_path
 from loopy_loop.sessions import result_path
@@ -144,6 +145,17 @@ _COORDINATOR_ONLY_FIELDS = {
     # declarations themselves stay coordinator-side.
     "model_tiers",
     "default_tier",
+}
+
+# These root settings are operational coordinator policy, not part of a
+# session's frozen worker config or model/capability roster. An explicit
+# `loopy reload` may refresh only these fields plus workflow prompt text.
+_HOT_RELOADABLE_ROOT_FIELDS = {
+    "recovery_policy",
+    "recovery_drain_timeout_s",
+    "workflow_consecutive_failures_cap",
+    "max_cost_usd",
+    "model_prices",
 }
 
 _LIVE_CHILD_STATUSES = frozenset({"dispatching", "running"})
@@ -483,6 +495,9 @@ class CoordinatorService:
         self.preflights: dict[str, PreflightResult] = {
             preflight.workflow_set: preflight
         }
+        # A request already present at startup is already reflected by the
+        # startup preflight. Only a later request invalidates this cache.
+        self._preflight_reload_request_id = self._read_preflight_reload_request_id()
         self.state_store = state_store
         # Serializes cross-store transitions (parent<->child handoff and the
         # phase-B commits): FastAPI runs sync endpoints in a threadpool, so
@@ -930,6 +945,7 @@ class CoordinatorService:
         so the three former copies (register, finished no-task, finished
         matched) cannot drift apart.
         """
+        self._reload_preflights_if_requested()
         suspended = self._suspended_parent_response(state=state)
         if suspended is not None:
             return suspended
@@ -3459,6 +3475,7 @@ class CoordinatorService:
         frozen config_snapshot (see _dispatch_child_session_if_requested),
         so a mid-session edit of loopy_loop_config.yaml cannot split the
         session tree across different models or policies."""
+        self._reload_preflights_if_requested()
         preflight = self.preflights.get(workflow_set)
         if preflight is None:
             preflight = run_preflight(
@@ -3466,6 +3483,67 @@ class CoordinatorService:
             )
             self.preflights[workflow_set] = preflight
         return preflight
+
+    def _read_preflight_reload_request_id(self) -> str | None:
+        """Read the explicit operator reload generation, best-effort."""
+
+        path = preflight_reload_request_path(repo_root=self.repo_root)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        request_id = payload.get("request_id")
+        return request_id if isinstance(request_id, str) and request_id else None
+
+    def _reload_preflights_if_requested(self) -> None:
+        """Atomically refresh mutable preflight inputs after `loopy reload`.
+
+        Workflow prompts and coordinator-operational root settings are mutable.
+        Workflow membership/config/cadence, role contracts, the session config
+        snapshot, and model/capability rosters remain frozen for live sessions.
+        """
+
+        request_id = self._read_preflight_reload_request_id()
+        if request_id is None or request_id == self._preflight_reload_request_id:
+            return
+        refreshed: dict[str, PreflightResult] = {}
+        for workflow_set, cached in self.preflights.items():
+            loaded = run_preflight(repo_root=self.repo_root, workflow_set=workflow_set)
+            cached_by_id = {workflow.id: workflow for workflow in cached.workflows}
+            loaded_by_id = {workflow.id: workflow for workflow in loaded.workflows}
+            if set(cached_by_id) != set(loaded_by_id):
+                raise ConfigError(
+                    "hot reload cannot change the session-frozen workflow roster "
+                    f"for {workflow_set!r}; restart with a new session"
+                )
+            workflows = [
+                workflow.model_copy(
+                    update={
+                        "prompt_path": loaded_by_id[workflow.id].prompt_path,
+                        "prompt_text": loaded_by_id[workflow.id].prompt_text,
+                        "prompt_sha256": loaded_by_id[workflow.id].prompt_sha256,
+                    }
+                )
+                for workflow in cached.workflows
+            ]
+            root_config = cached.root_config.model_copy(
+                update={
+                    field: getattr(loaded.root_config, field)
+                    for field in _HOT_RELOADABLE_ROOT_FIELDS
+                }
+            )
+            refreshed[workflow_set] = cached.model_copy(
+                update={"root_config": root_config, "workflows": workflows}
+            )
+        self.preflights = refreshed
+        self.preflight = refreshed[self.preflight.workflow_set]
+        self._preflight_reload_request_id = request_id
+        logger.info(
+            "reloaded workflow prompts and coordinator-operational config (%s)",
+            request_id,
+        )
 
     def _workflows_for(self, *, workflow_set: str) -> list[WorkflowDefinition]:
         return self._preflight_for(workflow_set=workflow_set).workflows

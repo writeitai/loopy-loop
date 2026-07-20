@@ -222,6 +222,16 @@ workflow is selected next.
 dead-worker reclaim, stale-owner completions, bounded recovery, unsettled-writer
 refusal, and salvage records.
 
+`loopy stop --force` is the operator-triggered form of the same mechanism. It
+first projects durable stop intent through the active session stack, then calls
+`recover_interrupted_iteration()` with immediate `reap` policy and
+team-harness's explicit live-parent override. This terminates the current
+iteration's tracked same-host agent process groups without teaching Loopy a
+second process-killing implementation. The command prints processed-run and
+settled/unsettled-agent counts. A remote worker cannot be signalled from the
+coordinator host and is reported as unreachable; absent durable run records are
+reported as zero processed runs rather than a false guarantee.
+
 ---
 
 ## The planner/dispatcher template is executable from a clean init
@@ -275,6 +285,34 @@ The CLI makes that projection useful without adding a dashboard:
 
 These commands live in `src/loopy_loop/cli.py`; stream and CLI behavior are
 covered by `src/tests/test_events_and_usage.py`.
+
+For the deepest active task, `loopy status` also scans the current folded raw
+directory (or the legacy mirror/output location) for the newest mtime. The age
+is an observation, not a heartbeat guarantee: a quiet but computing process can
+have an old timestamp, while a recently written file proves only recent I/O.
+The same best-effort scan reads unexpired `rate_limited_families` entries from
+caller-owned team-harness `run.json` files. Missing or partially written data is
+treated as unavailable, never as a coordinator failure. `status --json`
+publishes the underlying timestamp, age, data-availability flag, and family
+records.
+
+### Explicit preflight-cache reload keeps frozen session policy intact
+
+`loopy reload` atomically writes a generation marker below the ignored sessions
+root. `CoordinatorService._reload_preflights_if_requested()` notices a new
+generation at the next task boundary, validates fresh preflight data for every
+cached workflow set, and swaps all refreshed caches together. The next attempt
+therefore freezes the current workflow prompt instead of the startup copy.
+
+The reload boundary follows the existing durable contracts. It may refresh
+workflow prompt text and the root settings used only by the coordinator:
+recovery policy/timeout, workflow failure cap, cost budget, and model prices.
+It preserves workflow membership and `config.yaml` cadence because
+`workflow_roster.json` is session-frozen. It also preserves the session's goal,
+workflow contract, worker `config_snapshot`, model/retry/system-prompt policy,
+and tree capability roster. Those values change only after restart/new-session
+creation; descendants continue inheriting the parent's frozen execution
+snapshot.
 
 ### Unknown usage stays unknown
 

@@ -52,6 +52,7 @@ USER_UPDATES_JOURNAL_FILENAME = "user_updates.jsonl"
 HARNESS_OUTPUTS_DIRNAME = "harness_outputs"
 TRACES_DIRNAME = "traces"
 TRACE_FINALIZATION_OUTBOX_DIRNAME = "trace_finalization_outbox"
+PREFLIGHT_RELOAD_REQUEST_FILENAME = ".preflight_reload.json"
 UPDATES_FROM_USER_FILENAME = "updates_from_user.md"
 FINISHED_FILENAME = "finished.md"
 PROMPT_FILENAME = "prompt.txt"
@@ -639,6 +640,12 @@ def sessions_root_path(*, repo_root: Path) -> Path:
     """Return the root containing all durable session trees."""
 
     return repo_root / LOOPY_DIRNAME / SESSIONS_DIRNAME
+
+
+def preflight_reload_request_path(*, repo_root: Path) -> Path:
+    """Return the ignored operator trigger for coordinator preflight reloads."""
+
+    return sessions_root_path(repo_root=repo_root) / PREFLIGHT_RELOAD_REQUEST_FILENAME
 
 
 def session_dir_path(*, repo_root: Path, session_id: str) -> Path:

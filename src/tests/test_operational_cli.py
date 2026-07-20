@@ -123,6 +123,108 @@ def test_update_rejects_missing_state_or_unknown_explicit_session(
     assert "session not found: missing" in missing_session.output
 
 
+def test_status_json_includes_liveness_and_tolerates_missing_rate_limit_data(
+    tmp_path: Path, monkeypatch: Any, state_factory: Any, current_task_factory: Any
+) -> None:
+    session_id = "active-session"
+    attempt_id = "attempt-live"
+    _create_session(repo_root=tmp_path, session_id=session_id)
+    state = state_factory(
+        active_session_id=session_id,
+        root_session_id=session_id,
+        current_task=current_task_factory(session_id=session_id, attempt_id=attempt_id),
+    )
+    StateStore(repo_root=tmp_path).write_state(state=state)
+    trace_root, _ = create_attempt_trace(
+        repo_root=tmp_path,
+        root_session_id=session_id,
+        session_id=session_id,
+        request_id=None,
+        work_item_id=None,
+        workflow_set="main",
+        workflow_id="planner",
+        iteration=1,
+        attempt_id=attempt_id,
+    )
+    run_dir = trace_root / "harness" / "run-live"
+    run_dir.mkdir(parents=True)
+    run_dir.joinpath("run.json").write_text(
+        json.dumps({"run_id": "run-live", "turns": []}), encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(main, ["status", "--json"])
+
+    assert result.exit_code == 0, result.output
+    session = json.loads(result.output)["sessions"][0]
+    assert session["last_activity_at"].endswith("Z")
+    assert isinstance(session["last_activity_age_s"], int)
+    assert session["last_activity_age_s"] >= 0
+    assert session["rate_limit_data_available"] is False
+    assert session["rate_limited_families"] == []
+    text_result = CliRunner().invoke(main, ["status"])
+    assert "last activity:" in text_result.output
+    assert "model families rate-limited: unavailable" in text_result.output
+
+
+def test_status_surfaces_active_rate_limited_model_families(
+    tmp_path: Path, monkeypatch: Any, state_factory: Any, current_task_factory: Any
+) -> None:
+    session_id = "rate-limited-session"
+    attempt_id = "attempt-rate-limit"
+    _create_session(repo_root=tmp_path, session_id=session_id)
+    state = state_factory(
+        active_session_id=session_id,
+        root_session_id=session_id,
+        current_task=current_task_factory(session_id=session_id, attempt_id=attempt_id),
+    )
+    StateStore(repo_root=tmp_path).write_state(state=state)
+    trace_root, _ = create_attempt_trace(
+        repo_root=tmp_path,
+        root_session_id=session_id,
+        session_id=session_id,
+        request_id=None,
+        work_item_id=None,
+        workflow_set="main",
+        workflow_id="planner",
+        iteration=1,
+        attempt_id=attempt_id,
+    )
+    run_dir = trace_root / "harness" / "run-limited"
+    run_dir.mkdir(parents=True)
+    run_dir.joinpath("run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-limited",
+                "rate_limited_families": [
+                    {
+                        "family": "claude",
+                        "model": "claude-opus",
+                        "tripped_at": "2098-01-01T00:00:00Z",
+                        "resets_at": "2099-01-01T00:00:00Z",
+                        "reason": "provider returned 429",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    text_status = CliRunner().invoke(main, ["status"])
+    json_status = CliRunner().invoke(main, ["status", "--json"])
+
+    assert text_status.exit_code == 0, text_status.output
+    assert "model families rate-limited: claude until 2099-01-01T00:00:00Z" in (
+        text_status.output
+    )
+    json_session = json.loads(json_status.output)["sessions"][0]
+    assert json_session["rate_limit_data_available"] is True
+    family = json_session["rate_limited_families"][0]
+    assert family["family"] == "claude"
+    assert family["resets_at"] == "2099-01-01T00:00:00Z"
+
+
 def test_trace_commands_list_and_inspect_lifecycle_and_integrity(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

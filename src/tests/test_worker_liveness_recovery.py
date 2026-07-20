@@ -457,6 +457,60 @@ def test_recover_interrupted_iteration_reaps_and_writes_salvage(
     assert len(payload["reports"]) == 2
 
 
+def test_force_recovery_discovers_protocol_v3_folded_run(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    session_id = "folded-session"
+    attempt_id = "folded-attempt"
+    run_json = (
+        tmp_path
+        / ".loopy_loop"
+        / "sessions"
+        / session_id
+        / "raw"
+        / "0001_implement"
+        / "harness"
+        / "run-folded"
+        / "run.json"
+    )
+    run_json.parent.mkdir(parents=True)
+    run_json.write_text(
+        json.dumps(
+            {
+                "run_id": "run-folded",
+                "caller_context": {
+                    "session_id": session_id,
+                    "parent_attempt_id": attempt_id,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    legacy_runs = tmp_path / "legacy-runs"
+    legacy_runs.mkdir()
+    reaper = _FakeReaperModule(["reaped"])
+    monkeypatch.setattr(
+        recovery_module, "_load_reaper", lambda: (reaper, _FakeThConfig(legacy_runs))
+    )
+
+    outcome = recover_interrupted_iteration(
+        repo_root=tmp_path,
+        session_id=session_id,
+        iteration=1,
+        workflow_id="implement",
+        policy="reap",
+        drain_timeout_s=0,
+        attempt_id=attempt_id,
+        force=True,
+    )
+
+    assert outcome.reaped_runs == 1
+    assert outcome.settled_workers == 1
+    assert reaper.calls[0]["run_json"] == run_json
+    assert reaper.calls[0]["policy"] == "reap"
+    assert reaper.calls[0]["force"] is True
+
+
 def test_recover_interrupted_iteration_refusal_propagates(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
