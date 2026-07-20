@@ -11,6 +11,7 @@ from loopy_loop.config import load_workflow_definitions
 from loopy_loop.config import load_workflow_set_preamble
 from loopy_loop.config import run_preflight
 from loopy_loop.scheduler import choose_next_workflow
+from loopy_loop.worker import _render_prompt
 
 TEMPLATES_ROOT = Path(__file__).resolve().parents[1] / "loopy_loop" / "templates"
 TEMPLATE_SETS = ("inner_outer_eval", "pm_planner_dispatcher")
@@ -165,6 +166,53 @@ def test_role_prompts_fit_one_screen() -> None:
             assert line_count <= 80, f"{path} has {line_count} lines"
 
 
+def test_stock_orchestrator_render_stays_within_header_budget(
+    tmp_path: Path, snapshot_factory: Any
+) -> None:
+    """External contract files do not inflate the CI-budgeted prompt header."""
+
+    for template, workflow in (
+        ("inner_outer_eval", "outer"),
+        ("pm_planner_dispatcher", "planner"),
+    ):
+        repo_root = _template_root(template)
+        preflight = run_preflight(repo_root=repo_root)
+        prompt_body = _workflow_prompt(
+            template=template, workflow_set=template, workflow=workflow
+        )
+        snapshot = snapshot_factory(
+            goal=preflight.root_config.goal,
+            workflow_set=template,
+            completion_criteria=preflight.root_config.completion_criteria,
+            stop_criteria=preflight.root_config.stop_criteria,
+        )
+        iteration_dir = tmp_path / template / workflow
+        rendered = _render_prompt(
+            config_snapshot=snapshot,
+            session_id=f"session-{template}",
+            workflow_set=template,
+            iteration=1,
+            workflow_id=workflow,
+            iteration_dir=iteration_dir,
+            harness_output_root=iteration_dir / "harness",
+            workflow_prompt=prompt_body,
+            repo_root=repo_root,
+            workflow_contract=preflight.workflow_contract,
+        )
+
+        before_body = rendered.split("\n\nWorkflow body:", 1)[0]
+        preamble = load_workflow_set_preamble(
+            repo_root=repo_root, workflow_set=template
+        )
+        assert preamble is not None
+        scaffold_bytes = (
+            len(before_body.encode("utf-8"))
+            - len(snapshot.goal.encode("utf-8"))
+            - len(preamble.encode("utf-8"))
+        )
+        assert scaffold_bytes <= 2048, (template, scaffold_bytes)
+
+
 def test_prompts_drop_retired_ceremony_and_model_mandates() -> None:
     """Prompts and the shared preamble carry no retired ceremony or vendor names."""
 
@@ -229,13 +277,32 @@ def test_only_layer_orchestrators_publish_successful_terminal_control() -> None:
     writers: set[tuple[str, str]] = set()
     for template in TEMPLATE_SETS:
         for path in _prompt_paths(template):
-            if '"stop_reason": "goal_met"' in path.read_text(encoding="utf-8"):
+            words = " ".join(path.read_text(encoding="utf-8").split())
+            if "publish successful control to control.json" in words:
                 writers.add((template, path.parent.name))
 
     assert writers == {
         ("inner_outer_eval", "outer"),
         ("pm_planner_dispatcher", "planner"),
     }
+
+
+def test_orchestrator_prompts_point_to_emitted_contracts_without_restatement() -> None:
+    """Outer/planner defer strict artifact shape to engine-emitted contracts."""
+
+    for template, workflow in (
+        ("inner_outer_eval", "outer"),
+        ("pm_planner_dispatcher", "planner"),
+    ):
+        prompt = _workflow_prompt(
+            template=template, workflow_set=template, workflow=workflow
+        )
+
+        assert prompt.count("paths.json → contracts") == 2
+        assert "Fields: schema_version" not in prompt
+        assert "<scope>:/<path>" not in prompt
+        assert "Do not include an `eval_refs` field" not in prompt
+        assert '"stop_reason": "goal_met"' not in prompt
 
 
 def test_dispatcher_teaches_v3_child_request() -> None:

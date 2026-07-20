@@ -18,8 +18,12 @@ TRACES_DIRNAME = "traces"
 TRACE_MANIFEST_FILENAME = "trace_manifest.json"
 
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-_IMPLICIT_SCOPES = frozenset({"repo", "session", "root", "parent"})
-_NAMED_SCOPES = frozenset({"session", "trace"})
+LOGICAL_REFERENCE_IMPLICIT_SCOPES = frozenset({"repo", "session", "root", "parent"})
+LOGICAL_REFERENCE_NAMED_SCOPES = frozenset({"session", "trace"})
+LOGICAL_REFERENCE_PATH_MARKER = ":/"
+LOGICAL_REFERENCE_FORBIDDEN_CHARACTERS = frozenset({"\x00", "\\"})
+LOGICAL_REFERENCE_INVALID_PATH_SEGMENTS = frozenset({"", ".", ".."})
+LOGICAL_REFERENCE_ABSOLUTE_PATH_PREFIX = "/"
 
 
 class LogicalReferenceError(ValueError):
@@ -697,22 +701,26 @@ def _parse_reference(*, reference: str) -> tuple[str, str | None, tuple[str, ...
 
     if not reference:
         raise LogicalReferenceError("logical reference must be a non-empty string")
-    if "\x00" in reference or "\\" in reference:
+    if any(
+        character in reference for character in LOGICAL_REFERENCE_FORBIDDEN_CHARACTERS
+    ):
         raise LogicalReferenceError(
             f"logical reference contains a forbidden character: {reference!r}"
         )
-    marker = ":/"
+    marker = LOGICAL_REFERENCE_PATH_MARKER
     if marker not in reference:
         raise LogicalReferenceError(
             f"logical reference does not match the required grammar: {reference!r}"
         )
     prefix, relative = reference.split(marker, 1)
     prefix_parts = prefix.split(":")
-    if len(prefix_parts) == 1 and prefix_parts[0] in _IMPLICIT_SCOPES:
+    if len(prefix_parts) == 1 and prefix_parts[0] in LOGICAL_REFERENCE_IMPLICIT_SCOPES:
         scope = prefix_parts[0]
         identifier = None
     elif (
-        len(prefix_parts) == 2 and prefix_parts[0] in _NAMED_SCOPES and prefix_parts[1]
+        len(prefix_parts) == 2
+        and prefix_parts[0] in LOGICAL_REFERENCE_NAMED_SCOPES
+        and prefix_parts[1]
     ):
         scope, identifier = prefix_parts
         _validate_id(value=identifier, label=f"{scope} reference ID")
@@ -720,12 +728,14 @@ def _parse_reference(*, reference: str) -> tuple[str, str | None, tuple[str, ...
         raise LogicalReferenceError(
             f"logical reference has an unknown or malformed scope: {reference!r}"
         )
-    if ":/" in relative or relative.startswith("/"):
+    if marker in relative or relative.startswith(
+        LOGICAL_REFERENCE_ABSOLUTE_PATH_PREFIX
+    ):
         raise LogicalReferenceError(f"malformed logical-reference path: {reference!r}")
     if relative == "":
         return scope, identifier, ()
     parts = tuple(relative.split("/"))
-    if any(part in {"", ".", ".."} for part in parts):
+    if any(part in LOGICAL_REFERENCE_INVALID_PATH_SEGMENTS for part in parts):
         raise LogicalReferenceError(
             f"logical-reference path contains an invalid segment: {reference!r}"
         )

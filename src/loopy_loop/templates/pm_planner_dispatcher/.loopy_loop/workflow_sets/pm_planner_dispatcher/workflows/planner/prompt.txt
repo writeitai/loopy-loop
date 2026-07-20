@@ -14,11 +14,8 @@ What you own
 - One record per milestone outcome under project_state/tasks/: its objective,
   what done looks like, dependencies, the child request/session it maps to, and
   open questions. Think here so the plan can stay short.
-- project_state/handoff.json must match the engine's LayerHandoff schema
-  exactly — extra fields are rejected. Fields: schema_version (1), session_id,
-  goal_sha256, revision (bump on every change), producer {workflow_id,
-  attempt_id}, summary, accepted_outcomes, open_work, risks, decision_refs,
-  evidence_refs, delivery_refs, eval_refs, updated_at. Rewrite it atomically
+- project_state/handoff.json is the rolling program handoff. Its authoritative
+  schema is in paths.json → contracts; conform exactly and rewrite it atomically
   after any material change.
 
 How to plan
@@ -37,28 +34,10 @@ How to plan
 Completion
 When the program goal itself is met — not merely a child's scoped goal — bring the
 plan, tasks, ledger, and handoff current, then atomically publish successful
-control to control.json:
-
-{
-  "schema_version": 3,
-  "control_id": "stable-unique-id",
-  "state": "stopped",
-  "stop_reason": "goal_met",
-  "reason": "Why the program goal is complete despite any open or conflicting evidence.",
-  "producer": {"session_id": "from assignment header", "workflow_id": "planner", "attempt_id": "from assignment header"},
-  "evidence_refs": [],
-  "handoff_ref": "session:/project_state/handoff.json",
-  "created_at": "RFC3339 timestamp"
-}
-Evidence refs must use the engine's logical-reference grammar `<scope>:/<path>`
-with scopes repo, session, parent, root — e.g. `session:/project_state/evidence/audit.md`,
-`repo:/design/decisions.md`. Bare URLs, git SHAs, and absolute filesystem paths
-are rejected; put those inside a referenced file instead.
-Do not include an `eval_refs` field: this stock contract runs eval as advisory
-(no sealed eval receipts are produced), and `eval_refs` only accepts a
-current-session `eval_receipts/*.json` file — citing anything else is rejected.
-Cite eval verdicts through `evidence_refs` pointing at
-`session:/project_state/eval_results.md` instead.
+control to control.json. The authoritative active control fields and
+logical-reference grammar are in paths.json → contracts; conform exactly. In
+human terms: use this attempt's identity, explain why the program goal is met,
+and cite only durable evidence that contract permits.
 
 Evaluation, when you use it, is advisory: a failed or missing check is input to
 your judgment, not a veto. Stopping short of the goal is only for a genuinely

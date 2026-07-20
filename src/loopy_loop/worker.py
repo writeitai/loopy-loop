@@ -25,6 +25,7 @@ from loopy_loop.config import ConfigError
 from loopy_loop.config import load_workflow_config
 from loopy_loop.config import load_workflow_set_preamble
 from loopy_loop.config import workflow_set_workflows_dir_path
+from loopy_loop.contract_descriptors import build_contracts_descriptor
 from loopy_loop.git_evidence import capture_git_evidence
 from loopy_loop.git_evidence import GitEvidenceError
 from loopy_loop.harness_runner import run_harness_iteration
@@ -43,9 +44,11 @@ from loopy_loop.models import TaskResponse
 from loopy_loop.models import utc_now
 from loopy_loop.models import WORKER_PROTOCOL_VERSION
 from loopy_loop.models import WorkerIdentity
+from loopy_loop.models import WorkflowSetContract
 from loopy_loop.sessions import append_jsonl_record
 from loopy_loop.sessions import assignment_path
 from loopy_loop.sessions import child_requests_dir_path
+from loopy_loop.sessions import CONTRACTS_FILENAME
 from loopy_loop.sessions import control_path
 from loopy_loop.sessions import ensure_iteration_dir
 from loopy_loop.sessions import eval_checks_dir_path
@@ -283,6 +286,7 @@ def _run_task(
     scratch_dir: Path | None = None
     assignment: AttemptAssignment | None = None
     assignment_file: Path | None = None
+    workflow_contract: WorkflowSetContract | None = None
     caller_context: dict[str, object] | None = None
     fatal_error: str | None = None
     started = time.monotonic()
@@ -326,7 +330,7 @@ def _run_task(
                 workflow_snapshot=task.workflow_snapshot,
                 repository_id=task.repository_id,
             )
-            (config_payload, prompt_text, _, frozen_config_snapshot) = (
+            (config_payload, prompt_text, workflow_contract, frozen_config_snapshot) = (
                 verify_workflow_snapshot(
                     descriptor=task.workflow_snapshot,
                     repo_root=root,
@@ -501,6 +505,7 @@ def _run_task(
             repo_root=root,
             assignment=assignment,
             assignment_file=assignment_file,
+            workflow_contract=workflow_contract,
         )
         write_iteration_inputs(
             iteration_dir=iteration_dir, rendered_prompt=rendered_prompt
@@ -804,6 +809,7 @@ def _render_prompt(
     repo_root: Path | None = None,
     assignment: AttemptAssignment | None = None,
     assignment_file: Path | None = None,
+    workflow_contract: WorkflowSetContract | None = None,
 ) -> str:
     """Render the diet iteration header plus the workflow body.
 
@@ -842,6 +848,7 @@ def _render_prompt(
         emits_goal_check=emits_goal_check,
         assignment=assignment,
         assignment_file=assignment_file,
+        workflow_contract=workflow_contract,
     )
     preamble = load_workflow_set_preamble(repo_root=root, workflow_set=workflow_set)
 
@@ -858,7 +865,9 @@ def _render_prompt(
         f"- scratch dir (this iteration): {scratch.resolve()}   "
         "(raw/verbose output only; evidence goes in the durable tree)",
         f"- paths.json: {paths_json_path}    "
-        "full path map, rosters, scheduler view — read if needed",
+        "full path map, rosters, scheduler view — read if needed; "
+        f"contracts: {(iteration_dir / CONTRACTS_FILENAME).resolve()}    "
+        "engine-derived artifact contracts",
     ]
     criteria: list[str] = []
     if config_snapshot.completion_criteria:
@@ -895,14 +904,15 @@ def _write_iteration_paths(
     emits_goal_check: bool,
     assignment: AttemptAssignment | None,
     assignment_file: Path | None,
+    workflow_contract: WorkflowSetContract | None,
 ) -> None:
     """Write the full machine path map the diet header references by name.
 
     Holds every absolute path the old header inlined plus the complete v3
     assignment path map (rosters, scheduler view, workflow contract as files),
-    and previous_worker_sessions: the prior iteration's team-harness
-    worker_sessions.json for selective session reuse (context-and-eval-economy
-    A4), or null when none exists.
+    the engine-derived artifact contracts, and previous_worker_sessions: the
+    prior iteration's team-harness worker_sessions.json for selective session
+    reuse (context-and-eval-economy A4), or null when none exists.
     """
 
     goal_check_output = (
@@ -930,6 +940,19 @@ def _write_iteration_paths(
         if root_session_id is not None
         else None
     )
+    contracts_path = (path.parent / CONTRACTS_FILENAME).resolve()
+    roster_payload = (
+        assignment.context.get("workflow_roster") if assignment is not None else None
+    )
+    write_json_atomic(
+        path=contracts_path,
+        payload=build_contracts_descriptor(
+            workflow_contract=workflow_contract,
+            workflow_roster=(
+                roster_payload if isinstance(roster_payload, dict) else None
+            ),
+        ),
+    )
     payload: dict[str, object] = {
         "schema_version": 1,
         "session_id": session_id,
@@ -949,6 +972,7 @@ def _write_iteration_paths(
             if previous_worker_sessions is not None
             else None
         ),
+        "contracts": str(contracts_path),
         "session_paths": {
             "goal": str(
                 session_goal_path(repo_root=repo_root, session_id=session_id).resolve()

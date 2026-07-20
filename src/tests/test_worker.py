@@ -8,8 +8,14 @@ from typing import Any
 import httpx
 import pytest
 
+from loopy_loop.models import AttemptAssignment
 from loopy_loop.models import IterationResult
+from loopy_loop.models import LayerHandoff
 from loopy_loop.models import TaskResponse
+from loopy_loop.models import utc_now
+from loopy_loop.models import WorkflowRoster
+from loopy_loop.models import WorkflowRosterRole
+from loopy_loop.models import WorkflowSetContract
 from loopy_loop.sessions import create_session_dir
 from loopy_loop.sessions import eval_readiness_dir_path
 from loopy_loop.sessions import pending_finished_request_path
@@ -214,6 +220,12 @@ def test_worker_reads_prompt_from_disk(
     assert paths["schema_version"] == 1
     assert paths["session_paths"]["project_state"].endswith("project_state")
     assert paths["previous_worker_sessions"] is None
+    contracts_path = Path(paths["contracts"])
+    assert contracts_path == paths_file.parent / "contracts.json"
+    contracts = json.loads(contracts_path.read_text(encoding="utf-8"))
+    assert contracts["layer_handoff"]["json_schema"] == (
+        LayerHandoff.model_json_schema()
+    )
 
 
 def test_worker_includes_goal_check_path_for_emitting_workflow(
@@ -340,6 +352,58 @@ def _render_synthetic_workflow_set(
         else [],
         stop_criteria=stop_criteria if stop_criteria is not None else [],
     )
+    workflow_contract = WorkflowSetContract.model_validate(
+        {
+            "schema_version": 1,
+            "session_protocol_version": 3,
+            "roles": {"outer": {"responsibility": "Orchestrate."}},
+            "orchestration": {
+                "completion_role": "outer",
+                "plan_owner": "outer",
+                "handoff_owner": "outer",
+                "task_acceptance_owner": "outer",
+            },
+            "evaluation": {
+                "advisory": True,
+                "check_author_roles": [],
+                "check_runner_roles": ["outer"],
+            },
+            "terminal_blocker_reporting_roles": ["outer"],
+            "child_interface": "none",
+        }
+    )
+    workflow_roster = WorkflowRoster(
+        session_id=session_id,
+        workflow_contract_sha256="sha256:" + "a" * 64,
+        created_at=utc_now(),
+        completion_role="outer",
+        roles=[
+            WorkflowRosterRole(
+                workflow_id="outer",
+                responsibility="Orchestrate.",
+                cadence={"run_every": 1},
+                expected_outputs=[
+                    "project_state/handoff.json",
+                    "project_state/eval_state.md",
+                ],
+                authorities=["completion", "eval_check_runner"],
+            )
+        ],
+    )
+    assignment = AttemptAssignment(
+        identity={
+            "root_session_id": session_id,
+            "session_id": session_id,
+            "workflow_id": "outer",
+            "attempt_id": "attempt-synthetic-26",
+        },
+        actor={},
+        objective={},
+        absolute_paths={},
+        ownership={},
+        provenance={},
+        context={"workflow_roster": workflow_roster.model_dump(mode="json")},
+    )
     return _render_prompt(
         config_snapshot=snapshot,
         session_id=session_id,
@@ -350,6 +414,8 @@ def _render_synthetic_workflow_set(
         harness_output_root=session_dir / "harness_outputs" / "0026_outer",
         workflow_prompt="Do the synthetic role work.",
         repo_root=repo_root,
+        assignment=assignment,
+        workflow_contract=workflow_contract,
     )
 
 
@@ -378,11 +444,32 @@ def test_render_header_matches_diet_shape(
         "- control.json",
         "- scratch dir (this iteration):",
         "- paths.json:",
+        "contracts:",
     ):
         assert label in prompt
     # No shared preamble → no ground-rules section.
     assert "Shared ground rules:" not in prompt
     assert prompt.rstrip().endswith("Workflow body:\nDo the synthetic role work.")
+
+    contracts = json.loads(
+        (
+            repo_root
+            / ".loopy_loop"
+            / "sessions"
+            / "goal_20260419_143022_ab12cd34"
+            / "iterations"
+            / "0026_outer"
+            / "contracts.json"
+        ).read_text(encoding="utf-8")
+    )
+    terminal_control = contracts["terminal_control"]
+    assert terminal_control["active_protocol_version"] == 3
+    assert terminal_control["eval_receipt_refs"]["applicable"] is False
+    assert "eval_receipt_refs" not in terminal_control["accepted_fields"]
+    assert "eval_receipt_ref" not in terminal_control["accepted_fields"]
+    assert {"control_id", "producer", "created_at"} <= set(
+        terminal_control["required_fields"]
+    )
 
 
 def test_render_includes_preamble_when_present(
