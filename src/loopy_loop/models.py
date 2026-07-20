@@ -4,6 +4,7 @@ from datetime import datetime
 from datetime import UTC
 import re
 from typing import Any
+from typing import ClassVar
 from typing import Literal
 from typing import Self
 
@@ -672,6 +673,17 @@ class SignalProducer(BaseModel):
 
 
 class ControlSignal(BaseModel):
+    _STOPPED_REQUIRED_FIELD_NAMES: ClassVar[frozenset[str]] = frozenset({"stop_reason"})
+    _IDENTITY_BOUND_STOPPED_REQUIRED_FIELD_NAMES: ClassVar[frozenset[str]] = frozenset(
+        {"control_id", "producer", "created_at"}
+    )
+    _V2_GOAL_MET_REQUIRED_FIELD_NAMES: ClassVar[frozenset[str]] = frozenset(
+        {"eval_receipt_ref"}
+    )
+    _IDENTITY_BOUND_BLOCKER_REQUIRED_FIELD_NAMES: ClassVar[frozenset[str]] = frozenset(
+        {"attempted_routes"}
+    )
+
     state: Literal["running", "stopped"] = Field(...)
     reason: str = Field(...)
     stop_reason: Literal["goal_met", "unresolvable_error"] | None = Field(default=None)
@@ -700,6 +712,30 @@ class ControlSignal(BaseModel):
                 fields.discard("eval_receipt_refs")
         return sorted(fields)
 
+    @classmethod
+    def required_field_names(
+        cls,
+        *,
+        schema_version: int | None,
+        state: Literal["running", "stopped"],
+        stop_reason: Literal["goal_met", "unresolvable_error"] | None,
+    ) -> list[str]:
+        """Project model and conditional validator requirements onto one signal."""
+
+        fields = {
+            name for name, field in cls.model_fields.items() if field.is_required()
+        }
+        if state != "stopped":
+            return sorted(fields)
+        fields.update(cls._STOPPED_REQUIRED_FIELD_NAMES)
+        if schema_version in {2, 3}:
+            fields.update(cls._IDENTITY_BOUND_STOPPED_REQUIRED_FIELD_NAMES)
+            if stop_reason == "unresolvable_error":
+                fields.update(cls._IDENTITY_BOUND_BLOCKER_REQUIRED_FIELD_NAMES)
+        if schema_version == 2 and stop_reason == "goal_met":
+            fields.update(cls._V2_GOAL_MET_REQUIRED_FIELD_NAMES)
+        return sorted(fields)
+
     @field_validator("schema_version")
     @classmethod
     def validate_schema_version(cls, value: int) -> int:
@@ -717,31 +753,41 @@ class ControlSignal(BaseModel):
 
         if self.state == "running" and self.stop_reason is not None:
             raise ValueError("running control state must not set stop_reason")
-        if self.state == "stopped" and self.stop_reason is None:
+        if self.state == "stopped" and any(
+            getattr(self, field_name) is None
+            for field_name in self._STOPPED_REQUIRED_FIELD_NAMES
+        ):
             raise ValueError("stopped control state must set stop_reason")
         if self.schema_version in {2, 3} and self.state == "stopped":
-            if (
-                self.control_id is None
-                or self.producer is None
-                or self.created_at is None
+            if any(
+                getattr(self, field_name) is None
+                for field_name in self._IDENTITY_BOUND_STOPPED_REQUIRED_FIELD_NAMES
             ):
                 raise ValueError(
                     "identity-bound stopped control requires control_id, producer, "
                     "and created_at"
                 )
-            if not SAFE_DURABLE_ID_PATTERN.fullmatch(self.control_id):
+            control_id = self.control_id
+            assert control_id is not None
+            if not SAFE_DURABLE_ID_PATTERN.fullmatch(control_id):
                 raise ValueError(
                     "identity-bound control_id must be a filesystem-safe identifier"
                 )
             if not self.reason.strip():
                 raise ValueError("terminal control reason must be nonblank")
         if self.schema_version == 2 and self.state == "stopped":
-            if self.stop_reason == "goal_met" and self.eval_receipt_ref is None:
+            if self.stop_reason == "goal_met" and any(
+                getattr(self, field_name) is None
+                for field_name in self._V2_GOAL_MET_REQUIRED_FIELD_NAMES
+            ):
                 raise ValueError("v2 goal_met control requires eval_receipt_ref")
             if self.eval_receipt_refs or self.handoff_ref is not None:
                 raise ValueError("v2 control must not set v3 reference fields")
             if self.stop_reason == "unresolvable_error":
-                if not self.attempted_routes:
+                if any(
+                    not getattr(self, field_name)
+                    for field_name in self._IDENTITY_BOUND_BLOCKER_REQUIRED_FIELD_NAMES
+                ):
                     raise ValueError("v2 unresolvable_error requires attempted_routes")
                 if any(not route.strip() for route in self.attempted_routes):
                     raise ValueError(
@@ -759,7 +805,10 @@ class ControlSignal(BaseModel):
             if self.handoff_ref is not None and not self.handoff_ref.strip():
                 raise ValueError("v3 handoff_ref must be nonblank when set")
             if self.stop_reason == "unresolvable_error":
-                if not self.attempted_routes:
+                if any(
+                    not getattr(self, field_name)
+                    for field_name in self._IDENTITY_BOUND_BLOCKER_REQUIRED_FIELD_NAMES
+                ):
                     raise ValueError("v3 unresolvable_error requires attempted_routes")
                 if any(not route.strip() for route in self.attempted_routes):
                     raise ValueError(

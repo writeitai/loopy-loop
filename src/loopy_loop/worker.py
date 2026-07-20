@@ -865,7 +865,9 @@ def _render_prompt(
         f"- scratch dir (this iteration): {scratch.resolve()}   "
         "(raw/verbose output only; evidence goes in the durable tree)",
         f"- paths.json: {paths_json_path}    "
-        "full path map, rosters, scheduler view — read if needed",
+        "full path map, rosters, scheduler view — read if needed; "
+        f"contracts: {(iteration_dir / CONTRACTS_FILENAME).resolve()}    "
+        "engine-derived artifact contracts",
     ]
     criteria: list[str] = []
     if config_snapshot.completion_criteria:

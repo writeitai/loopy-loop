@@ -21,6 +21,9 @@ _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 LOGICAL_REFERENCE_IMPLICIT_SCOPES = frozenset({"repo", "session", "root", "parent"})
 LOGICAL_REFERENCE_NAMED_SCOPES = frozenset({"session", "trace"})
 LOGICAL_REFERENCE_PATH_MARKER = ":/"
+LOGICAL_REFERENCE_FORBIDDEN_CHARACTERS = frozenset({"\x00", "\\"})
+LOGICAL_REFERENCE_INVALID_PATH_SEGMENTS = frozenset({"", ".", ".."})
+LOGICAL_REFERENCE_ABSOLUTE_PATH_PREFIX = "/"
 
 
 class LogicalReferenceError(ValueError):
@@ -698,7 +701,9 @@ def _parse_reference(*, reference: str) -> tuple[str, str | None, tuple[str, ...
 
     if not reference:
         raise LogicalReferenceError("logical reference must be a non-empty string")
-    if "\x00" in reference or "\\" in reference:
+    if any(
+        character in reference for character in LOGICAL_REFERENCE_FORBIDDEN_CHARACTERS
+    ):
         raise LogicalReferenceError(
             f"logical reference contains a forbidden character: {reference!r}"
         )
@@ -723,12 +728,14 @@ def _parse_reference(*, reference: str) -> tuple[str, str | None, tuple[str, ...
         raise LogicalReferenceError(
             f"logical reference has an unknown or malformed scope: {reference!r}"
         )
-    if ":/" in relative or relative.startswith("/"):
+    if marker in relative or relative.startswith(
+        LOGICAL_REFERENCE_ABSOLUTE_PATH_PREFIX
+    ):
         raise LogicalReferenceError(f"malformed logical-reference path: {reference!r}")
     if relative == "":
         return scope, identifier, ()
     parts = tuple(relative.split("/"))
-    if any(part in {"", ".", ".."} for part in parts):
+    if any(part in LOGICAL_REFERENCE_INVALID_PATH_SEGMENTS for part in parts):
         raise LogicalReferenceError(
             f"logical-reference path contains an invalid segment: {reference!r}"
         )
