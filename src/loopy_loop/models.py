@@ -685,6 +685,21 @@ class ControlSignal(BaseModel):
     evidence_refs: list[str] = Field(default_factory=list)
     created_at: datetime | None = Field(default=None)
 
+    @classmethod
+    def accepted_field_names(
+        cls, *, schema_version: int | None, eval_receipt_refs_applicable: bool
+    ) -> list[str]:
+        """Project model fields onto one protocol and frozen eval contract."""
+
+        fields = set(cls.model_fields)
+        if schema_version == 2:
+            fields.difference_update({"eval_receipt_refs", "handoff_ref"})
+        elif schema_version == 3:
+            fields.discard("eval_receipt_ref")
+            if not eval_receipt_refs_applicable:
+                fields.discard("eval_receipt_refs")
+        return sorted(fields)
+
     @field_validator("schema_version")
     @classmethod
     def validate_schema_version(cls, value: int) -> int:

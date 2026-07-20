@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from loopy_loop.models import IterationResult
+from loopy_loop.models import LayerHandoff
 from loopy_loop.models import TaskResponse
 from loopy_loop.sessions import create_session_dir
 from loopy_loop.sessions import eval_readiness_dir_path
@@ -214,6 +215,12 @@ def test_worker_reads_prompt_from_disk(
     assert paths["schema_version"] == 1
     assert paths["session_paths"]["project_state"].endswith("project_state")
     assert paths["previous_worker_sessions"] is None
+    contracts_path = Path(paths["contracts"])
+    assert contracts_path == paths_file.parent / "contracts.json"
+    contracts = json.loads(contracts_path.read_text(encoding="utf-8"))
+    assert contracts["layer_handoff"]["json_schema"] == (
+        LayerHandoff.model_json_schema()
+    )
 
 
 def test_worker_includes_goal_check_path_for_emitting_workflow(
