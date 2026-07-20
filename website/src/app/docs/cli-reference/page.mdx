@@ -1,12 +1,12 @@
 export const metadata = {
   title: "CLI Reference",
   description:
-    "Every loopy-loop command: init, coordinator, worker, status, events, and stop, with their flags and usage examples.",
+    "Every loopy-loop command: init, coordinator, worker, status, events, stop, and reload, with their flags and usage examples.",
 };
 
 # CLI Reference
 
-loopy-loop is driven by a single command-line tool with six subcommands: `init` scaffolds a repo, `coordinator` and `worker` run the loop, `status` and `events` inspect it, and `stop` controls it. Every command operates on the current working directory, so run them from the root of your target repository.
+loopy-loop is driven by a single command-line tool: `init` scaffolds a repo, `coordinator` and `worker` run the loop, `status` and `events` inspect it, and `stop` and `reload` control it. Every command operates on the current working directory, so run them from the root of your target repository.
 
 ## Command aliases
 
@@ -85,9 +85,16 @@ current_task: inner (iteration 12, session 20260712_193000_a1b2c3d4e5f6_7a8b9c0d
 stop_reason: none
 subtree_usage: prompt_tokens=12000 completion_tokens=3000 (iterations fully measured: 11, unknown: 0)
 subtree_harness_duration_s: 840
+last activity: 12s ago
+model families rate-limited: none
 ```
 
-`loopy status --watch` clears and re-renders the view every two seconds until interrupted.
+For the active task it also reports two best-effort health signals:
+
+- **`last activity`** — how long ago the running iteration last wrote to its output directory, so you can tell a progressing loop from a wedged one at a glance. Shows `unavailable` when there is no active task or no recent write.
+- **`model families rate-limited`** — any agent model families the harness has recorded as rate-limited (with the reset time), read from the harness run log. Shows `none` when all families are available, or `unavailable` when the running harness version does not report this.
+
+`loopy status --watch` clears and re-renders the view every two seconds until interrupted. `loopy status --json` prints the same information as a machine-readable JSON payload instead of the text layout — use it for scripts and dashboards rather than parsing the text lines.
 
 ## loopy events
 
@@ -107,9 +114,29 @@ Requests a graceful stop by setting `stop_requested=true` in the latest top-leve
 loopy stop
 ```
 
-`stop` takes no options. For how a *workflow* stops the loop on its own — versus this operator-initiated stop — see [Success & Control](/docs/success-and-control).
+For how a *workflow* stops the loop on its own — versus this operator-initiated stop — see [Success & Control](/docs/success-and-control).
 
-`stop` currently targets the latest top-level session. If a child is active, the child does not see the flag; it terminates normally, then the resumed parent honors the request. Child-aware and force-stop behavior remains proposed work.
+`stop` targets the latest top-level session. If a child is active, the child does not see the flag; it terminates normally, then the resumed parent honors the request.
+
+### `--force`
+
+```bash
+loopy stop --force
+```
+
+The cooperative stop above takes effect only at the next assignment boundary, so a long-running iteration keeps going until it finishes. `--force` additionally reaps the active iteration's tracked agent subprocesses right away, so a hard stop does not leave orphaned agent CLIs running after the coordinator exits. It reuses the same recovery/reaper path the engine uses for crash cleanup, and the session remains resumable afterward. Use plain `stop` to let the current work finish; use `--force` when you need the agents killed now.
+
+## loopy reload
+
+```bash
+loopy reload
+```
+
+Applies a fixed workflow prompt or a changed coordinator-operational setting to a **running** program without restarting it. It records a reload request; at the next task boundary the coordinator re-reads the workflow prompts and its reloadable, coordinator-side configuration.
+
+Reload is deliberately narrow. It refreshes workflow prompts and coordinator-operational config (for example recovery and failure-cap settings). It does **not** touch anything frozen per session — the goal, completion/stop criteria, `max_turns`, the harness provider/model/families, or the workflow contracts and rosters — because a session's model and policy are intentionally immutable for its whole lifetime. To change any of those, stop and start a fresh program.
+
+It prints a confirmation on success, reports `No loopy-loop state found.` when nothing is running, and asks you to retry if the coordinator state is momentarily locked mid-request.
 
 ## Where to go next
 

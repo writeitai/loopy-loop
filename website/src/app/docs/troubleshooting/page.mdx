@@ -134,7 +134,55 @@ the session as running.
 stays `running` on disk.
 
 **Fix.** Either pass `--resume` the next time you start the coordinator to reattach,
-or run `loopy stop` first to reach a terminal state before a fresh start.
+or run `loopy stop` first to reach a terminal state before a fresh start. If you kill
+the coordinator while an iteration is mid-flight, its spawned agent CLIs can be left
+running with no parent to reap them — prefer `loopy stop --force`, which reaps the
+active iteration's tracked agent processes as part of stopping.
+
+## Is the loop still making progress?
+
+**Symptom.** `loopy status` shows `running`, but you cannot tell whether the current
+iteration is actually working or wedged.
+
+**Cause.** A running status only means no terminal state was written; it says nothing
+about live activity.
+
+**Fix.** Read the `last activity: Ns ago` line in `loopy status`. It reports how long
+ago the active iteration last wrote to its output directory. A small, steadily
+updating value means the harness is working; a value that stops advancing (or
+`unavailable`) alongside a long-running iteration points at a wedged agent — inspect
+its output, then `loopy stop --force` and `--resume` if needed.
+
+## Agents keep failing and a whole model family is unavailable
+
+**Symptom.** Iterations run slowly and a particular model family (for example Claude)
+seems to keep failing, or `loopy status` lists it under `model families rate-limited`.
+
+**Cause.** That family hit a hard provider rate limit (a weekly cap or an exhausted
+overage). The harness records the tripped family and its reset time, and its circuit
+breaker short-circuits further spawns of that family until the window passes, failing
+over to other families rather than re-launching a subprocess that fails every time.
+
+**Fix.** Usually nothing — the loop keeps delivering on the remaining families until
+the reset time shown in status. Note that this degrades cross-family review, so treat
+the results on security-sensitive work with extra care until the family recovers, or
+raise the limit with your provider. This surfacing needs a harness new enough to
+report it; older versions show `unavailable`.
+
+## A prompt or config fix is not taking effect on a running loop
+
+**Symptom.** You edited a stock workflow prompt (or a coordinator-operational setting)
+on disk, but the running program keeps using the old one.
+
+**Cause.** The coordinator caches its preflight at startup, so on-disk edits are not
+re-read mid-run by default.
+
+**Fix.** Run `loopy reload`. At the next task boundary the coordinator re-reads the
+workflow prompts and its reloadable, coordinator-side config. Reload deliberately does
+**not** change anything frozen per session — goal, criteria, `max_turns`, harness
+model/family, or workflow contracts/rosters — so those still require a fresh program.
+See the [CLI Reference](/docs/cli-reference) for exactly what reload does and does not
+refresh.
 
 ## A worker crashed mid-iteration
 
