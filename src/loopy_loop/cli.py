@@ -122,6 +122,10 @@ team_harness_agent_models:
   claude: "claude-opus-4-8"
   gemini: "gemini-3.5-flash"
 team_harness_agent_reasoning_efforts: {{}}
+# Optional: enable Grok Build when `grok` is installed/authenticated
+# (XAI_API_KEY or `grok login`). Requires team-harness>=0.6.1.
+#   team_harness_agents: [codex, claude, gemini, grok]
+#   team_harness_agent_models: {{..., grok: "grok-4.5"}}
 # Optional coordinator retry controls. Omit to use team-harness defaults.
 # team_harness_max_retries: 8
 # team_harness_retry_base_delay_s: 2.0

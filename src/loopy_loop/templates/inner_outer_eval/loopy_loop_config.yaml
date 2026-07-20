@@ -21,6 +21,13 @@ team_harness_agent_models:
   gemini: "gemini-3.5-flash"
 team_harness_agent_reasoning_efforts:
   codex: "high"
+# Optional: enable Grok Build as a worker family when `grok` is installed and
+# authenticated (XAI_API_KEY or `grok login`). Requires team-harness>=0.6.1.
+# Only list families the worker host can run — the capability roster treats
+# every listed agent with a model cell as available.
+#   team_harness_agents: [codex, claude, gemini, grok]
+#   team_harness_agent_models: {..., grok: "grok-4.5"}
+#   team_harness_agent_reasoning_efforts: {..., grok: "high"}
 # Optional semantic strength tiers. Configure concrete ids here; stock role
 # prompts select by tier and enabled family without naming vendors or models.
 # With default_tier set, REMOVE the two explicit mappings above. Every enabled
@@ -30,14 +37,17 @@ team_harness_agent_reasoning_efforts:
 #     codex: {model: "<frontier model id>", effort: "<frontier effort>"}
 #     claude: {model: "<frontier model id>", effort: "<frontier effort>"}
 #     gemini: {model: "<frontier model id>", effort: "<frontier effort>"}
+#     grok: {model: "grok-4.5", effort: "high"}
 #   strong:
 #     codex: {model: "<strong model id>", effort: "<strong effort>"}
 #     claude: {model: "<strong model id>", effort: "<strong effort>"}
 #     gemini: {model: "<strong model id>", effort: "<strong effort>"}
+#     grok: {model: "grok-4.5", effort: "high"}
 #   standard:
 #     codex: {model: "<standard model id>", effort: "<standard effort>"}
 #     claude: {model: "<standard model id>", effort: "<standard effort>"}
 #     gemini: {model: "<standard model id>", effort: "<standard effort>"}
+#     grok: {model: "grok-4.5", effort: "medium"}
 #   economy:
 #     codex: {model: "<economy model id>", effort: "<economy effort>"}
 #     claude: {model: "<economy model id>", effort: "<economy effort>"}

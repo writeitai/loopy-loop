@@ -12,6 +12,11 @@ team_harness_agent_models:
   codex: "gpt-5.5"
 team_harness_agent_reasoning_efforts:
   codex: "high"
+# Optional: enable Grok Build when `grok` is installed/authenticated
+# (XAI_API_KEY or `grok login`). Requires team-harness>=0.6.1. Only list
+# families the worker host can run.
+#   team_harness_agents: [codex, claude, gemini, grok]
+#   team_harness_agent_models: {..., grok: "grok-4.5"}
 # Optional semantic strength tiers. Configure concrete ids here; stock role
 # prompts select by tier and enabled family without naming vendors or models.
 # This extension also reaches child sessions. With default_tier set, REMOVE the
@@ -22,18 +27,22 @@ team_harness_agent_reasoning_efforts:
 #     codex: {model: "<frontier model id>", effort: "<frontier effort>"}
 #     claude: {model: "<frontier model id>", effort: "<frontier effort>"}
 #     gemini: {model: "<frontier model id>", effort: "<frontier effort>"}
+#     grok: {model: "grok-4.5", effort: "high"}
 #   strong:
 #     codex: {model: "<strong model id>", effort: "<strong effort>"}
 #     claude: {model: "<strong model id>", effort: "<strong effort>"}
 #     gemini: {model: "<strong model id>", effort: "<strong effort>"}
+#     grok: {model: "grok-4.5", effort: "high"}
 #   standard:
 #     codex: {model: "<standard model id>", effort: "<standard effort>"}
 #     claude: {model: "<standard model id>", effort: "<standard effort>"}
 #     gemini: {model: "<standard model id>", effort: "<standard effort>"}
+#     grok: {model: "grok-4.5", effort: "medium"}
 #   economy:
 #     codex: {model: "<economy model id>", effort: "<economy effort>"}
 #     claude: {model: "<economy model id>", effort: "<economy effort>"}
 #     gemini: {model: "<economy model id>", effort: "<economy effort>"}
+#     grok: {model: "grok-4.5", effort: "low"}
 # default_tier: "standard"
 # Optional coordinator retry controls. Omit to use team-harness defaults.
 # team_harness_max_retries: 8

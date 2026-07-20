@@ -63,7 +63,7 @@ Everything about *how* work is executed — which provider, coordinator model, a
 | --- | --- | --- | --- |
 | `team_harness_provider` | string | `"openai_compat"` | The team-harness provider name workers use. `codex` uses local Codex authentication; the shipped templates set this to `"codex"`. |
 | `team_harness_model` | string | `"gpt-5.5"` | The model name passed to team-harness for its **coordinator** model. |
-| `team_harness_agents` | list of strings | `["codex"]` | Agent names team-harness should make available as worker subprocesses, such as `codex`, `claude`, and `gemini`. |
+| `team_harness_agents` | list of strings | `["codex"]` | Agent names team-harness should make available as worker subprocesses, such as `codex`, `claude`, and `gemini`. Optional `grok` (Grok Build CLI; team-harness ≥ 0.6.1) when the binary is installed and authenticated (`XAI_API_KEY` or `grok login`). Only list families the worker host can run. |
 | `team_harness_agent_models` | map | `{}` | Per-agent default worker model overrides, keyed by agent name. |
 | `team_harness_agent_reasoning_efforts` | map | `{}` | Per-agent reasoning-effort overrides, keyed by agent name. Only agents whose templates support a reasoning-effort flag use this value. |
 | `model_tiers` | map | `{}` | Coordinator-side tier name → agent → `{model, effort}` bundles rendered into the harness prompt for per-spawn worker choice. Tier selection is guidance and audit evidence, not enforcement. |

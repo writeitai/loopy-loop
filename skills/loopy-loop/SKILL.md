@@ -101,6 +101,12 @@ team_harness_api_key_env: OPENROUTER_API_KEY
 team_harness_system_prompt_extension: ""
 ```
 
+Optional Grok Build worker family (team-harness ≥ 0.6.1): when `grok` is
+installed and authenticated (`XAI_API_KEY` or `grok login`), append `grok` to
+`team_harness_agents` and add model/effort cells (e.g. `grok-4.5` / `high`).
+Do not list families the worker host cannot run — the capability roster treats
+every listed agent with a model cell as available.
+
 The four canonical strength tiers are:
 
 - `frontier`: hardest architecture, ambiguous debugging, adversarial review,

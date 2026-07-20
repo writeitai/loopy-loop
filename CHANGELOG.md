@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.1
+
+- **Grok Build opt-in.** Stock configs keep `team_harness_agents` as
+  codex/claude/gemini. Commented overlays document how to enable the
+  `grok` worker family when the Grok Build CLI is installed and authenticated
+  (`XAI_API_KEY` or `grok login`). Requires **team-harness ≥ 0.6.1**.
+- Skill and website configuration docs mention the same opt-in path.
+- Dependency lower bound: `team-harness>=0.6.1`.
+
 ## 0.10.0
 
 The session layout, IDs, and traces redesign (session-layout-and-ids.md;
