@@ -103,6 +103,35 @@ after an iteration finishes. When a workflow writes those two values, it is maki
 an explicit, auditable, reversible stop decision. That is the point: a human or an
 agent chose to stop, and you can see exactly why.
 
+### Conform to the emitted contract, not a restated one
+
+The full `control.json` above is the minimal shape. Terminal control (and the layer
+handoff a successor reads) is validated strictly by the engine, and those rules —
+which fields are accepted and required for the active protocol, the logical-reference
+grammar for evidence refs, and the exact handoff schema — depend on the session's
+frozen workflow contract. Rather than have each workflow prompt restate those rules
+in prose (where they drift from the validator and produce rejected control), the
+engine **emits the real contracts as a file every iteration** and points the prompts
+at it.
+
+Each iteration's assignment lists a `contracts` path (in `paths.json` and the prompt
+header). It is a descriptor generated directly from the engine's own models and
+constants, so it cannot drift:
+
+- the accepted and required control fields for the active protocol version, plus a
+  validated minimal `goal_met` example (the raw multi-version JSON schema is included
+  only as subordinate reference — the accepted/required lists are authoritative);
+- whether eval-receipt references apply at all (they do not under the stock advisory-eval
+  contract, so citing them is rejected);
+- the evidence-reference grammar — logical `<scope>:/<path>` refs to files, with the
+  scopes and path-segment rules the reference parser actually enforces;
+- the `LayerHandoff` JSON schema, taken straight from the model the engine validates
+  against.
+
+A workflow author writing a control or handoff step should tell the agent to read
+that contract file and conform to it exactly, instead of hard-coding a field list in
+the prompt.
+
 ## goal_check.json is evidence, not control
 
 The other file people expect to stop the loop is `goal_check.json`. It does not.
