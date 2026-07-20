@@ -234,8 +234,10 @@ own:
   periodic heartbeat; liveness is checked directly against the stored identity.
   **Default: bounded drain** — let an in-flight agent finish within a timeout (fits loopy's
   git-is-truth, cost-conscious profile; no concurrent-writer problem because it runs during
-  recovery), with **reap** as the escape for hung-past-timeout or unsafe-to-finish work. A
-  future force-stop command must reuse this cleanup path rather than inventing another one.
+  recovery), with **reap** as the escape for hung-past-timeout or unsafe-to-finish work.
+  `loopy stop --force` reuses this exact cleanup path with team-harness's explicit
+  live-parent override after recording tree-wide stop intent; it does not implement a
+  second process killer.
   A drained iteration is **never accepted or synthesized from drained outputs**: its
   `result.json` never existed, and fabricating one would trigger the false-closure trap D3
   prevents. If stop conditions still allow the session to continue, the scheduler dispatches
@@ -267,6 +269,9 @@ drain, reap as escape). For identity-tracked same-host runs this makes D6's stat
 verify-dead-before-reclaim rather than optimistic; legacy and remote identities retain the
 documented limitation above. The implemented protocol and salvage boundary are described in
 `designs/long-running-loop-reliability.md`; the process-group mechanism is team-harness TH-D5.
+Force-stop has the same host and durable-run-record boundary: it reports an unreachable remote
+worker or zero discovered runs honestly instead of claiming that untracked processes were
+terminated.
 
 ## D8. Semantic constraints are visible detection with accountable repair or disposition, never hard prevention
 

@@ -418,17 +418,27 @@ Useful operations:
 
 ```bash
 loopy status
+loopy status --json
 loopy status --watch
 loopy events --follow
 loopy update TEXT...
 loopy stop
+loopy stop --force
+loopy reload
 loopy traces list
 loopy traces inspect MANIFEST_OR_ID
 loopy coordinator --resume
 ```
 
-`status` and `events` walk the active session stack. `loopy stop` is the
-tree-wide stop request and applies at a safe register/finish boundary.
+`status` and `events` walk the active session stack. Status includes the active
+attempt's last raw/output write and any unexpired model-family rate-limit
+circuits; `--json` exposes the same observations as structured fields.
+`loopy stop` is the tree-wide stop request and applies at a safe
+register/finish boundary. `loopy stop --force` also invokes the existing
+same-host process-group reaper for the active iteration. `loopy reload`
+refreshes workflow prompts and coordinator-operational recovery/failure/cost
+settings at the next task boundary; it never changes a session-frozen config
+snapshot, workflow roster/contract, or capability roster.
 `--resume` reconstructs the active
 path and continues the deepest live session. Exactly one worker is deliberate;
 a second verifiably live worker is refused.

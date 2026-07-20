@@ -41,6 +41,7 @@ from typing import Any
 from loopy_loop.models import utc_now
 from loopy_loop.sessions import iteration_dir_path
 from loopy_loop.sessions import iteration_harness_output_root
+from loopy_loop.sessions import raw_attempt_dir_path
 from loopy_loop.sessions import traces_root_path
 from loopy_loop.sessions import write_json_atomic
 
@@ -77,6 +78,10 @@ class RecoveryIncompleteError(RuntimeError):
     The salvage record documents exactly which orphans are unresolved; an
     operator can kill them (or wait for them to exit) and register again.
     """
+
+    def __init__(self, message: str, *, outcome: RecoveryOutcome | None = None) -> None:
+        super().__init__(message)
+        self.outcome = outcome
 
 
 class RecoveryRefusedError(RuntimeError):
@@ -125,12 +130,14 @@ def recover_interrupted_iteration(
     policy: str,
     drain_timeout_s: float,
     attempt_id: str | None = None,
+    force: bool = False,
 ) -> RecoveryOutcome:
     """Drain/reap the interrupted iteration's orphaned agents; write salvage.json.
 
     Raises ``RecoveryRefusedError`` when team-harness's parent-liveness guard
     finds the run's owning process still alive — the caller should treat that
-    as "the previous worker is still running".
+    as "the previous worker is still running". Operator force-stop passes
+    ``force=True`` to reuse this path against the current live iteration.
     """
     outcome = RecoveryOutcome(policy=policy)
     loaded = _load_reaper()
@@ -149,6 +156,15 @@ def recover_interrupted_iteration(
         iteration=iteration,
         workflow_id=workflow_id,
     )
+    folded_harness_root = (
+        raw_attempt_dir_path(
+            repo_root=repo_root,
+            session_id=session_id,
+            iteration=iteration,
+            workflow_id=workflow_id,
+        )
+        / "harness"
+    )
     # ONE deadline shared across every discovered run — the advertised
     # timeout bounds the whole recovery, not each run separately.
     deadline = time.monotonic() + drain_timeout_s
@@ -158,6 +174,7 @@ def recover_interrupted_iteration(
             traces_root=traces_root_path(repo_root=repo_root),
             session_id=session_id,
             attempt_id=attempt_id,
+            folded_harness_root=folded_harness_root,
             legacy_runs_root=Path(th_config.RUNS_DIR),
         ):
             if not run_json.exists():
@@ -182,6 +199,7 @@ def recover_interrupted_iteration(
                     run_json,
                     policy=policy,
                     drain_timeout_s=max(0.0, deadline - time.monotonic()),
+                    force=force,
                 )
             except reaper.ReapRefusedError as exc:
                 raise RecoveryRefusedError(str(exc)) from exc
@@ -212,7 +230,8 @@ def recover_interrupted_iteration(
             "(unverifiable identity, probe failure, or a kill that did not "
             "land); refusing to dispatch replacement work. See salvage.json "
             "in the iteration directory, resolve the leftover processes, "
-            "and register again."
+            "and register again.",
+            outcome=outcome,
         )
     return outcome
 
@@ -266,6 +285,7 @@ def _discover_run_records(
     traces_root: Path,
     session_id: str,
     attempt_id: str | None,
+    folded_harness_root: Path,
     legacy_runs_root: Path,
 ) -> list[tuple[str, Path, str]]:
     """Return explicit caller records first, then non-duplicate legacy records."""
@@ -274,6 +294,13 @@ def _discover_run_records(
     if attempt_id and traces_root.is_dir():
         pattern = f"*/sessions/{session_id}/attempts/{attempt_id}/harness/*/run.json"
         for path in sorted(traces_root.glob(pattern)):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            records.append((path.parent.name, path, "caller"))
+    if attempt_id and folded_harness_root.is_dir():
+        for path in sorted(folded_harness_root.glob("*/run.json")):
             resolved = path.resolve()
             if resolved in seen:
                 continue

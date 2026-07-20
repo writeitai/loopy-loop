@@ -155,8 +155,11 @@ Useful control commands:
 
 ```bash
 loopy status
+loopy status --json
 loopy update Prioritize the failing integration test
 loopy stop
+loopy stop --force
+loopy reload
 loopy traces list
 ```
 
@@ -406,6 +409,21 @@ Important rules:
   COORDINATOR model only — agent-CLI subprocesses (codex, claude, gemini)
   bill through their own accounts and are not measurable here.
 
+An explicit `loopy reload` refreshes the running coordinator at the next task
+boundary. It reloads workflow `prompt.txt` contents and these non-frozen,
+coordinator-operational root settings: `recovery_policy`,
+`recovery_drain_timeout_s`, `workflow_consecutive_failures_cap`,
+`max_cost_usd`, and `model_prices`. The update is atomic across the
+coordinator's cached workflow sets.
+
+Reload deliberately does **not** change a live session's frozen goal or
+`config_snapshot` (including harness provider/model/families, retry settings,
+system prompt extension, criteria, and turn limit), its workflow membership or
+`config.yaml` cadence, its workflow contract/roster, or its capability roster.
+Those changes require a coordinator restart and a new session. A later child
+workflow set that has never been loaded still freezes its on-disk definition
+when that child session is created.
+
 Workflow config lives beside each workflow prompt:
 
 ```yaml
@@ -651,13 +669,16 @@ loopy worker --coordinator http://127.0.0.1:8080
 Runs a blocking worker until the coordinator returns `action: "stop"`.
 
 ```bash
-loopy status           # session stack, usage totals, estimated cost
+loopy status           # stack, liveness, family health, usage, estimated cost
+loopy status --json    # the same status as machine-readable JSON
 loopy status --watch   # re-render every 2 seconds
 loopy events           # the active session's event stream
 loopy events --follow  # tail it live (--json for raw lines)
 loopy update TEXT...   # append to the deepest active layer
 loopy update --session SESSION_ID TEXT...
 loopy stop             # tree-wide stop at the next safe boundary
+loopy stop --force     # also reap the active iteration's tracked agent CLIs
+loopy reload           # refresh prompts/operational config at the next boundary
 loopy traces list
 loopy traces inspect MANIFEST_OR_ID
 ```
@@ -665,11 +686,30 @@ loopy traces inspect MANIFEST_OR_ID
 `status` prints the latest session state — the whole session stack while a
 child runs (the live child is shown under its suspended parent), each
 session's subtree token usage, and (with `model_prices` configured) estimated
-cost. `update` appends the input record exactly as supplied; without `--session` it is
-routed to the deepest active layer and later assignments append delivery and
-acknowledgement records rather than editing history. `stop` projects root stop
-intent through the whole active path and takes effect at the next register or
-finish boundary; it does not invent a mid-harness interruption mechanism.
+cost. For an active task it also reports the newest mtime anywhere in that
+attempt's raw/output tree as `last activity: Ns ago`, plus unexpired
+`rate_limited_families` found in the current team-harness `run.json` as
+`model families rate-limited: FAMILY until TIME`. Missing, incomplete, or
+older run records are tolerated. `status --json` exposes per-session
+`last_activity_at`, `last_activity_age_s`, `rate_limit_data_available`, and
+`rate_limited_families` fields.
+
+`update` appends the input record exactly as supplied; without `--session` it
+is routed to the deepest active layer and later assignments append delivery
+and acknowledgement records rather than editing history. `stop` projects root
+stop intent through the whole active path and takes effect at the next
+register or finish boundary. `stop --force` first records that same durable
+tree-wide intent, then invokes the existing recovery reaper with immediate
+`reap` policy and reports harness-run, settled-agent, and unsettled-agent
+counts. Force reaping is limited to tracked process groups on the local host;
+a remote active worker is reported as unreachable rather than pretending its
+agents were stopped.
+
+`reload` writes an ignored, atomic reload generation under the sessions root.
+At the next task boundary, the coordinator reruns preflight and atomically
+refreshes only the prompt/operational fields described in Configuration above.
+It does not mutate an already-frozen attempt; the following attempt receives
+the refreshed prompt in its own immutable workflow snapshot.
 
 Trace commands accept a manifest ID, a trace root, or a manifest path confined
 to this repository's `.loopy_loop/traces/`. `inspect` prints the manifest plus
