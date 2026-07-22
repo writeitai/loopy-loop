@@ -47,5 +47,16 @@ evaluation:
   advisory: true
   check_author_roles: [eval_reviewer, outer]
   check_runner_roles: [outer]
+# D13/D14 currency outputs. handoff: the canonical layer handoff is completion-gated
+# and per-iteration diagnosed (outer must re-stamp it before declaring the goal met).
+# advisory: the eval runner's result file — the engine only diagnoses its absence; it
+# never gates, and freshness is judged by the reading roles (evals stay optional).
+currency_outputs:
+  - path: project_state/handoff.json
+    owner_role: outer
+    kind: handoff
+  - path: project_state/eval_results.md
+    owner_role: eval_runner
+    kind: advisory
 terminal_blocker_reporting_roles: [outer, inner, eval_reviewer, eval_runner]
 child_interface: none

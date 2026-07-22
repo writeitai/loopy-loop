@@ -10,22 +10,32 @@ and the eval reviewer. Choose the judge family and tier deliberately from the
 capability roster; a family different from the implementer and check author is
 useful independence, not a requirement.
 
-Run from the repository root, substituting concrete roster values:
+Run from the repository root, substituting concrete roster values. Pass
+--result-out so eval-banana writes the canonical, provenance-stamped result
+directly to project_state/eval_results.md — do NOT hand-copy a verdict into that
+file yourself (that is how a verdict ends up off-channel or unversioned). Use
+--provenance-attempt with THIS attempt's id (from your assignment header):
 
     eval-banana validate --no-project-config --cwd <repo_root> --check-dir <eval_checks> --harness-agent <judge_family>
-    eval-banana run --no-project-config --flat-output --cwd <repo_root> --check-dir <eval_checks> --output-dir <eval_output_dir> --pass-threshold 1.0 --harness-agent <judge_family> --harness-model <judge_model> --harness-reasoning-effort <judge_effort>
+    eval-banana run --no-project-config --flat-output --cwd <repo_root> --check-dir <eval_checks> --output-dir <eval_output_dir> --pass-threshold 1.0 --harness-agent <judge_family> --harness-model <judge_model> --harness-reasoning-effort <judge_effort> --result-out <project_state>/eval_results.md --provenance-attempt <this_attempt_id>
 
+eval-banana writes project_state/eval_results.md itself — a human-readable report
+with a machine-readable provenance header (the observed commit and dirty state,
+per-check model, verdict).
 Read report.md for the verdicts and reasons — not report.json, which is large and
 machine-oriented. Open an individual per-check artifact only to investigate a
-specific failure.
+failure.
 
-Record the outcome in project_state/eval_results.md: the headline verdict, the
-effective judge family, model, and effort you actually used, each check's
-pass/fail with a one-line reason, and the commit the run observed. Then consume
-the request — fold project_state/eval_request.md into that record with its
-outcome and remove the pending request so it does not fire again. When outer
-asked for this as the final check before declaring the goal met, state the honest
-goal-met verdict here; outer weighs it and owns the control decision.
+eval_results.md belongs to eval-banana now — do NOT write, append to, or edit it
+yourself; hand-editing would corrupt the provenance header the readers rely on.
+Then consume the request: remove project_state/eval_request.md so it does not fire
+again, and record any commentary of your own (judgment on weak or missing check
+definitions, the family/tier you chose and why) in project_state/eval_state.md for
+outer and the eval reviewer — not in eval_results.md. When outer asked for this as
+the final check before declaring the goal met, the honest goal-met verdict is
+already in the result file eval-banana wrote; outer weighs it and owns the control
+decision. If eval-banana is too old to support --result-out, upgrade it; do not
+fall back to hand-transcription.
 
 Keep the full report and verbose logs in your scratch dir. Stopping short is only
 for a genuinely terminal blocker, after autonomous routes are exhausted.

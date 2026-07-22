@@ -20,8 +20,12 @@ What you own
     - Start from: the tile model in the board module and the drop table in the
       design notes.
 - project_state/handoff.json is the rolling layer handoff. Its authoritative
-  schema is in paths.json → contracts; conform exactly and rewrite it atomically
-  after any material change.
+  schema is in paths.json → contracts; conform exactly and rewrite it atomically.
+  It carries a producer identity — re-stamp it with THIS attempt's identity every
+  iteration, and always before declaring completion. A handoff still naming a past
+  attempt is stale continuity: the engine refuses a completion resting on it, and
+  drops a per-iteration staleness note under paths.json → protocol_failures for you
+  to repair next turn. A successor must never inherit a stale summary.
 
 Sizing the work
 Each iteration costs a full coordinator run before any work happens. Prefer work
@@ -30,28 +34,46 @@ iteration; slice only when a package genuinely exceeds one iteration's reach.
 Verification and reconciliation ride along with the work they verify; they are
 rarely their own iteration.
 
+Reconcile against ground truth — do not be misled by a summary
+The handoff and plan are summaries, not authority. Before selecting the next task
+or deciding completion, reconcile them against LIVE state — the working tree, the
+diff, tests, PR and CI facts. When a durable artifact is missing, ambiguous, or
+contradicts the repository (it says "merge X" but the PR is merged; an approval it
+omits), trust live state, not the stale note. Durable summaries live in
+project_state/ (plan.md, tasks/, finished.md, handoff.json, eval_results.md); as a
+fallback the inner attempts' raw traces are at paths.json → raw_root, each
+iteration under raw/<iter>_<workflow>/… — read the SPECIFIC relevant prior
+iteration when a summary is missing or contradicts the repo, don't scan the tree.
+
 Accepting work
 Review inner's attempt on its merits — the diff, the repository state, checks, and
 git/CI facts. A clean harness return or an open PR is not acceptance. Accept it,
 or return it with specific reasons; then select the next task and make its scope
 and observable result unambiguous. Append accepted work to
-project_state/finished.md.
+project_state/finished.md. When the selected work is delivered, its checks are
+green, and an advisory review approves it, accept and advance — record residual
+non-blocking items as new or deferred tasks, not as a reason to reopen a completed
+unit. Do not spin re-polishing done work.
 
 Evaluation
 Eval is advisory and runs on request. When you reach a milestone or intend to
 declare completion, write project_state/eval_request.md — one line naming the
 scope and why now — and let the eval roles run; read their verdict in
-project_state/eval_results.md. A terminal goal check is required before you
-declare the goal met, but a failed or missing check is input to your judgment,
-not a veto.
+project_state/eval_results.md. A terminal eval is available and recommended near
+completion, but you may decide it is unnecessary; a failed or missing check is
+input to your judgment, never a veto. The result file records the commit it
+observed — if that commit is not current HEAD (or the tree was dirty), the verdict
+is stale: re-request it or set it aside rather than relying on a past check.
 
 Completion
-When this layer's goal is met, bring the plan, tasks, ledger, and handoff current,
-then atomically publish successful control to control.json. The authoritative
-active control fields and logical-reference grammar are in
-paths.json → contracts; conform exactly. In human terms: use this attempt's
-identity, explain why the goal is met, and cite only durable evidence that
-contract permits.
+When this layer's goal is met, bring the plan, tasks, ledger, and handoff current
+— re-stamp handoff.json with THIS attempt's identity — then atomically publish
+successful control to control.json, citing the handoff. The authoritative active
+control fields and logical-reference grammar are in paths.json → contracts;
+conform exactly. In human terms: use this attempt's identity, explain why the goal
+is met, and cite only durable evidence that contract permits. A completion that
+rests on a handoff you did not re-stamp this attempt is refused as stale — bring it
+current first.
 
 Stopping short of the goal is only for a genuinely terminal blocker, after
 autonomous routes are exhausted.

@@ -17,6 +17,9 @@ Companion docs:
   accepted v3 contract for orchestration ownership, semantic state/handoff, optional
   evaluation, schedule/capability context, phase-sized PM dispatch, and cross-harness
   review. It is implemented in loopy-loop 0.8.0 and team-harness 0.5.4.
+- `design/designs/deterministic-handoff-and-eval-provenance.md` — the binding design for
+  handoff currency, located+fresh advisory eval output, and orchestrator reconciliation
+  (**D13–D15**), with its eval-banana counterpart spec.
 - `design/proposals/` — forward-looking changes we are *considering* (not decided;
   do not treat them as binding or as descriptions of current behavior).
 - `design/analysis/` — the July 2026 review that produced several of these decisions
@@ -514,3 +517,155 @@ provider-internal bytes remain unavailable, and unavailable channels are stated
 honestly. Raw traces are sensitive local data; correctness-critical facts do not rely
 on their retention. See the [binding design](designs/recursive-loop-layer-contract.md)
 and [session layout](../docs/session-layout.md).
+
+## D13. Layer-handoff currency is a structural-integrity check, hard-gated at completion
+
+**Decision.** The layer handoff (`project_state/handoff.json`) carries the provenance of the
+attempt that authored it (`HandoffProducer{workflow_id, attempt_id}`), and the engine treats its
+**currency** as a structural-integrity property, not a semantic one. The behavior activates for any
+contract that declares the handoff in a typed, validated `currency_outputs` entry (`kind: handoff`,
+which must name the canonical handoff identity: `project_state/handoff.json` owned by
+`orchestration.handoff_owner`); a contract without the declaration is unaffected. (Backward
+compatibility is **waived** — there is no `schema_version` gate and no retrofit story.) When the
+finishing role owns that entry **and the attempt was mechanically successful**, the engine requires
+the handoff to carry `producer == {workflow_id, attempt_id}` of that exact attempt. Disposition is
+**tiered by whether the finish declares completion**:
+
+- **Completion (hard, proven path).** In `_validate_v3_control`, a terminal `goal_met` is rejected
+  when the `accepted_handoff_snapshot` producer ≠ the completing attempt — **independent of whether
+  `handoff_ref` is cited** (it is optional, so a citation-only check is bypassable; the currency
+  check runs regardless, and a `kind: handoff` contract additionally requires the citation).
+  Rejection reuses the existing control-repair machinery (`_reject_v2_control`), re-dispatching the
+  owner. This closes "declare done on stale continuity," evaluated **before** `goal_met` is
+  consumed. It rides the existing control-rejection counters (control + general workflow cap) — a
+  documented, pre-existing property, not a new single-counter disposition.
+- **Non-completion owner finish (pure diagnostic).** Leaving the handoff un-re-stamped raises a
+  `handoff_stale` diagnostic + a repair note the standing owner (`run_every: 1`) reads on its next
+  turn. It has **no failure semantics**: no `success` flip, no cap, no overwrite of the handoff
+  bytes. Making it a hard failure would need a repair-scheduling primitive to force the owner ahead
+  of successors (the scheduler unlocks `inner` next, not an owner repair) — engine surface the
+  completion gate already makes unnecessary.
+
+A same-revision re-stamp is legitimate **only** by a field-level compare of the parsed handoff
+models (producer is the current owner attempt; `updated_at` non-decreasing; every other field equal
+to the accepted snapshot); any other same-revision change stays `non_monotonic`, preserving tamper
+detection. A non-owner finish requires no re-stamp and is unchanged. Eval outputs carry the
+producing attempt's identity for the same reason (D14), so a verdict from a past attempt is visibly
+stale to its reader.
+
+**Context.** An `inner_outer_eval` layer stalled after its work was objectively done: the
+handoff was schema-valid but frozen hours behind the repository, and the engine could not tell.
+The provenance check (`_handoff_producer_is_known`) accepted a handoff stamped by *any* past
+attempt, and an untouched file passed the revision-monotonicity check, so staleness was
+undetectable by construction — and the handoff observation was not wired to any repair path.
+The root cause was a missing determinism guarantee, not a semantic misjudgment: the orchestrator
+was misled by its own stale durable state. See
+`design/analysis/inner-outer-eval-nonconvergence-postmortem.md`.
+
+**Context — why this is not banned by D8.** D8 forbids *semantic* prevention/vetoes but
+explicitly preserves structural protocol integrity: "the engine still validates schemas,
+identity, **current-attempt ownership**, hashes, path confinement… Those checks protect the
+durable machine from corrupt or **stale** input; they do not decide whether the work product is
+semantically good enough." Handoff currency is exactly that — stale-input protection with an
+accountable, visible repair route — so it is a D8-permitted structural check, not a new gate.
+
+**Consequences.** The **hard** guarantee is at the completion boundary: a terminal completion can
+never be accepted unless the completing attempt brought the handoff current. Per-iteration currency
+is a **visible nudge, not a guarantee** — a forgetful (but successful) owner finish can leave a
+briefly stale handoff that a successor might read before the owner's next turn repairs it; the
+honest bound is "stale-but-flagged, and never able to leak into a completion." Protecting successors
+from acting on a stale summary is the **D15 prompt**'s job (reconcile against live state), which is
+the load-bearing convergence fix; D13 keeps the substrate honest so that prompt can trust what it
+reads. Backward compatibility is waived: the behavior applies wherever `currency_outputs` is
+declared and is otherwise inert. See the
+[binding design](designs/deterministic-handoff-and-eval-provenance.md).
+
+**Refined by / refines.** Extends **D8** (structural integrity carve-out) and the **D11** handoff
+ownership model; paired with **D14**/**D15**.
+
+## D14. Advisory evaluation is located by construction and freshness-visible — engine-diagnostic-only, never enforced
+
+**Decision.** Evaluation stays optional and advisory (**D11**). The reliability win is that the
+verdict lands in the right place **by construction** and its freshness is **visible** — not that
+the engine enforces it. Two mechanisms, split by ownership:
+
+- **eval-banana** gains an output-destination capability (`--result-out <abs-path>`): it writes a
+  run's self-describing result atomically to a caller-named path, with a provenance block it
+  **observes** — `commit_before`/`commit_after` plus the working-tree dirty digest recorded with
+  its **algorithm name**, **per-check `model`** (only `model` is a per-check override; `family` and
+  `effort` are run-level harness config), tool version, timestamp, verdict, and a formal
+  status/error envelope for no-checks / pre-report failures. Only the opaque `--provenance-attempt`
+  is caller-echoed. The tool knows nothing of loopy-loop.
+- **loopy-loop** declares the eval output in the typed `currency_outputs` as `kind: advisory` (path
+  + owner role; no literal in engine core). There is **no engine acceptance store** for markdown
+  results, and the engine **never reads or parses** the document — its whole involvement is a single
+  **presence diagnostic** (`eval_missing`) when the declared eval owner finishes and the path is
+  absent. It **never** flips success, respawns, or caps (that would violate D11), and does **no
+  staleness check** (that would require reading the file). `check_runner_roles` is left unchanged
+  (it governs receipt authority + citation validation; repurposing it would silently revoke
+  `outer`'s receipt authority). The freshness *judgment* — observed commit vs live `HEAD`, dirty
+  tree ⇒ re-run — is entirely the **reading agent's**, per the prompt; the orchestrator's
+  acceptance/merge is driven by the task and **live** repo/CI facts, **never gated by a
+  previously-established eval check.**
+
+**Context.** In the M1 stall the decisive approval was hand-transcribed by the eval agent into
+`project_state/evidence/…` instead of the canonical `eval_results.md`, and even the canonical file
+carried no freshness marker. The first draft of this decision over-reached — making a
+missing/stale eval output fail+respawn+cap — which adversarial review (Codex, Grok) correctly
+flagged as a D11 violation and as a broken respawn (the runner deletes its `eval_request.md`
+trigger mid-run, so the scheduler cannot re-elect it). The corrected split fixes the actual M1
+failure (off-channel, unversioned verdict) via eval-banana writing the right file with observed
+provenance + an optional engine diagnostic, **without** making evaluation mandatory. It does not
+revive the reverted v2 overcorrection; completion authority stays with the orchestrator.
+
+**Consequences.** eval-banana ships `--result-out` + observed-git/per-check-`model`/status-envelope
+provenance and is the **required** version (backward compatibility waived — no hand-write
+fallback); if the file is missing/unstamped the engine emits a diagnostic only, never a failure. The
+stock `inner_outer_eval` contract declares `eval_results.md` as a `kind: advisory` currency output;
+the **mandatory-final-eval sentence is removed** from the outer prompt (it contradicted D11).
+Prompts wire the write path (`eval_runner --result-out`) and the read+provenance-check path (outer,
+inner), which own the freshness judgment. Sessions without an advisory currency declaration are
+unaffected; BYO sets opt in by declaring their own. See the
+[binding design](designs/deterministic-handoff-and-eval-provenance.md) and eval-banana
+`design/output-destination-capability.md`.
+
+**Refined by / refines.** Refines **D11** (optional advisory evaluation); paired with **D13**
+(shared provenance stamping) and **D15**.
+
+## D15. The orchestrator reconciles the handoff against live state; raw traces are its bounded fallback
+
+**Decision.** This is the **load-bearing fix** for the M1-class stall: D13/D14 stop the
+orchestrator being *misled*, but the actual convergence behavior lives here, in the (replaceable)
+prompt. The orchestration role treats the handoff as a *summary*, not authority. Before selecting
+the next task or deciding completion it reconciles the handoff against **live repository and CI
+state**; when the handoff is missing, ambiguous, or **contradicts** the repository, it trusts live
+state and, as a bounded fallback, reads **specific relevant prior iterations selected from
+history** (not a tree scan) rather than re-deriving work from a stale summary. To make that
+possible the engine exposes one read-only discoverability path to the orchestration role — the
+session **raw root** (`<session>/raw/`, folded layout, each iteration under
+`raw/<iter>_<workflow>/…`). The anti-over-polish behavior this enables (accept delivered, green,
+approved work; treat residual non-blocking items as new or deferred tasks, not a reopen) is
+**prompt guidance in the replaceable workflow-set**, never an engine rule. The path map names only
+**declared** artifacts (drop undeclared files rather than cite them).
+
+**Context.** The stalled orchestrator was never told the raw inner traces existed or where, and
+was not instructed to reconcile a suspect summary against the repo — so when D13/D14's gaps fed
+it a stale handoff and an empty results file, it looped on stale work. `paths.json` handed it its
+own attempt's `trace_root` but no path to sibling/prior iterations' traces.
+
+**Context — relationship to D12.** D12 says continuity should not *routinely* depend on
+re-reading raw traces; the coordinator promotes conclusions into compact artifacts. This decision
+is consistent: routine continuity still rides the compact artifacts, and trace-reading is the
+safety net for exactly the case where that compact-artifact contract was violated (a stale or
+off-channel summary). Discoverability is best-effort; unreadable traces leave the orchestrator
+reconciling against live git/CI alone, which stays non-gating (D12).
+
+**Consequences.** One new best-effort `paths.json` key for the orchestration role; no new gate.
+The behavioral guidance (path map, reconcile-before-deciding, anti-over-polish) lives in the
+stock `outer` prompt and can be replaced wholesale by a user's own set. This keeps the engine
+minimal and the policy user-owned — the standing bet: fix the substrate, trust capable agents
+and their prompts. See the
+[binding design](designs/deterministic-handoff-and-eval-provenance.md).
+
+**Refined by / refines.** Refines **D12** (trace-retention/continuity) and **D11**
+(orchestrator-owned completion); paired with **D13**/**D14**.

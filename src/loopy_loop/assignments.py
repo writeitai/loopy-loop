@@ -47,6 +47,7 @@ from loopy_loop.sessions import layer_plan_path
 from loopy_loop.sessions import parent_acceptance_dir_path
 from loopy_loop.sessions import project_state_dir_path
 from loopy_loop.sessions import protocol_failures_dir_path
+from loopy_loop.sessions import raw_dir_path
 from loopy_loop.sessions import scheduler_view_path
 from loopy_loop.sessions import session_dir_path
 from loopy_loop.sessions import session_goal_path
@@ -519,6 +520,14 @@ def build_attempt_assignment(
                 "accepted_child_request": None,
             }
         )
+        # D15: expose the session raw-trace root to the orchestration role only,
+        # as a read-only reconciliation fallback (each iteration lives under
+        # raw/<iter>_<workflow>/…). Non-orchestration roles do not receive it.
+        if (
+            contract.orchestration is not None
+            and task.workflow_id == contract.orchestration.completion_role
+        ):
+            paths["raw_root"] = raw_dir_path(repo_root=root, session_id=task.session_id)
     accepted_request_ref = goal_contract.accepted_request_ref
     if accepted_request_ref is not None:
         try:

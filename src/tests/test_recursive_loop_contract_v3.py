@@ -11,6 +11,8 @@ import yaml
 
 from loopy_loop.assignments import repository_id
 from loopy_loop.coordinator_app import create_coordinator_app
+from loopy_loop.events import events_path
+from loopy_loop.events import read_events
 from loopy_loop.models import LoopState
 from loopy_loop.models import REQUIRED_V3_WORKER_CAPABILITIES
 from loopy_loop.models import utc_now
@@ -56,11 +58,12 @@ def _v3_contract(
     completion_role: str,
     check_runner_roles: list[str] | None = None,
     child_interface: str = "none",
+    currency_outputs: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """Return a minimal v3 contract with one durable orchestrator."""
 
     roles = dict.fromkeys([*workflow_ids, completion_role])
-    return {
+    contract: dict[str, object] = {
         "schema_version": 1,
         "session_protocol_version": 3,
         "layer_kind": "delivery",
@@ -87,6 +90,9 @@ def _v3_contract(
         "terminal_blocker_reporting_roles": list(roles),
         "child_interface": child_interface,
     }
+    if currency_outputs is not None:
+        contract["currency_outputs"] = currency_outputs
+    return contract
 
 
 def _write_contract(
@@ -133,6 +139,7 @@ def _build_v3_repo(
     check_runner_roles: list[str] | None = None,
     child_interface: str = "none",
     root_config: dict[str, object] | None = None,
+    currency_outputs: list[dict[str, object]] | None = None,
 ) -> Path:
     """Create a root repository whose selected workflow set uses protocol v3."""
 
@@ -145,6 +152,7 @@ def _build_v3_repo(
             completion_role=completion_role,
             check_runner_roles=check_runner_roles,
             child_interface=child_interface,
+            currency_outputs=currency_outputs,
         ),
     )
     return repo_root
@@ -237,6 +245,9 @@ def _write_handoff(
     task: dict[str, Any],
     state: LoopState,
     producer_attempt_id: str | None = None,
+    revision: int = 1,
+    summary: str = "The assigned outcome is ready.",
+    updated_at: str | None = None,
 ) -> Path:
     """Write one structurally valid handoff with selectable attempt provenance."""
 
@@ -247,12 +258,12 @@ def _write_handoff(
                 "schema_version": 1,
                 "session_id": task["session_id"],
                 "goal_sha256": state.goal_hash,
-                "revision": 1,
+                "revision": revision,
                 "producer": {
                     "workflow_id": task["workflow_id"],
                     "attempt_id": producer_attempt_id or task["attempt_id"],
                 },
-                "summary": "The assigned outcome is ready.",
+                "summary": summary,
                 "accepted_outcomes": ["assigned-outcome"],
                 "open_work": [],
                 "risks": [],
@@ -260,7 +271,11 @@ def _write_handoff(
                 "evidence_refs": [],
                 "delivery_refs": [],
                 "eval_refs": [],
-                "updated_at": utc_now().isoformat().replace("+00:00", "Z"),
+                "updated_at": (
+                    updated_at
+                    if updated_at is not None
+                    else utc_now().isoformat().replace("+00:00", "Z")
+                ),
             },
             indent=2,
         ),
@@ -980,3 +995,480 @@ def test_v3_non_control_child_stop_writes_outcome_and_resumes_parent(
     )
     assert parent_state.active_child_session_id is None
     assert parent_state.stop_reason == "no_eligible_workflow"
+
+
+# ---------------------------------------------------------------------------
+# D13/D14/D15: handoff currency, advisory eval provenance, raw-trace exposure.
+# ---------------------------------------------------------------------------
+
+_HANDOFF_CURRENCY: list[dict[str, object]] = [
+    {"path": "project_state/handoff.json", "owner_role": "outer", "kind": "handoff"}
+]
+
+
+def _outer_inner_workflows() -> dict[str, dict[str, object]]:
+    """Return the alternating outer/inner roles used by the currency tests."""
+
+    return {"outer": _workflow(priority=10), "inner": _workflow(priority=0)}
+
+
+def _advance_to_outer(*, client: TestClient, task: dict[str, Any]) -> dict[str, Any]:
+    """Finish `task` and return the next 'outer' assignment (running interleaved roles).
+
+    The stock cadence alternates outer/inner, so the standing orchestrator's next
+    turn is reached by finishing any interleaved inner attempt.
+    """
+
+    response = client.post("/finished", json=_finish_body(task=task)).json()
+    while response.get("action") == "run" and response["workflow_id"] != "outer":
+        response = client.post("/finished", json=_finish_body(task=response)).json()
+    assert response.get("action") == "run"
+    assert response["workflow_id"] == "outer"
+    return response
+
+
+def _events_of(*, repo_root: Path, session_id: str, event_type: str) -> list[Any]:
+    """Return every emitted event of one type for a session."""
+
+    events = read_events(path=events_path(repo_root=repo_root, session_id=session_id))
+    return [event for event in events if event["type"] == event_type]
+
+
+@pytest.mark.parametrize("cite", [True, False], ids=["cited", "uncited"])
+def test_currency_completion_rejected_when_handoff_not_restamped(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch, cite: bool
+) -> None:
+    """A1: goal_met resting on a stale (past-attempt) handoff is rejected.
+
+    The rejection holds whether or not the completion cites handoff_ref, closing
+    the uncited-goal_met bypass (handoff_ref is optional on control).
+    """
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_v3_repo(
+        repo_builder=repo_builder,
+        workflows=_outer_inner_workflows(),
+        completion_role="outer",
+        currency_outputs=_HANDOFF_CURRENCY,
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task0 = client.post("/register", json=_register_body(repo_root=repo_root)).json()
+    assert task0["workflow_id"] == "outer"
+    state = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    _write_handoff(repo_root=repo_root, task=task0, state=state)
+
+    outer2 = _advance_to_outer(client=client, task=task0)
+    assert outer2["attempt_id"] != task0["attempt_id"]
+    # outer2 declares completion WITHOUT re-stamping the handoff (still task0's).
+    _write_goal_met_control(
+        repo_root=repo_root,
+        task=outer2,
+        handoff_ref="session:/project_state/handoff.json" if cite else None,
+    )
+    response = client.post("/finished", json=_finish_body(task=outer2))
+
+    assert response.status_code == 200
+    final = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    assert final.goal_met is False
+    assert final.history[-1].success is False
+    assert final.history[-1].error == "invalid_control_output"
+    assert final.control_protocol_consecutive_failures == 1
+    # A1 rides the existing control-reject path, which also ticks the general
+    # per-workflow failure cap (documented dual-counter, pre-existing behavior).
+    assert final.workflow_consecutive_failures.get("outer", 0) == 1
+
+
+def test_currency_completion_accepted_when_handoff_restamped(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A1: goal_met resting on a handoff the completing attempt re-stamped closes."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_v3_repo(
+        repo_builder=repo_builder,
+        workflows=_outer_inner_workflows(),
+        completion_role="outer",
+        currency_outputs=_HANDOFF_CURRENCY,
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task0 = client.post("/register", json=_register_body(repo_root=repo_root)).json()
+    state = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    _write_handoff(repo_root=repo_root, task=task0, state=state)
+
+    outer2 = _advance_to_outer(client=client, task=task0)
+    # outer2 re-stamps the handoff with its own identity (provenance-only re-stamp
+    # at the same revision) and cites it.
+    _write_handoff(repo_root=repo_root, task=outer2, state=state)
+    _write_goal_met_control(
+        repo_root=repo_root,
+        task=outer2,
+        handoff_ref="session:/project_state/handoff.json",
+    )
+    response = client.post("/finished", json=_finish_body(task=outer2))
+
+    assert response.status_code == 200
+    assert response.json()["stop_reason"] == "goal_met"
+    final = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    assert final.goal_met is True
+    assert final.history[-1].success is True
+
+
+def test_currency_completion_unaffected_without_declaration(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opt-in: a contract with no currency_outputs keeps prior completion behavior."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_v3_repo(
+        repo_builder=repo_builder,
+        workflows=_outer_inner_workflows(),
+        completion_role="outer",
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task0 = client.post("/register", json=_register_body(repo_root=repo_root)).json()
+    state = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    _write_handoff(repo_root=repo_root, task=task0, state=state)
+
+    outer2 = _advance_to_outer(client=client, task=task0)
+    # Stale handoff (task0's) + goal_met, but no currency declaration → accepted.
+    _write_goal_met_control(repo_root=repo_root, task=outer2)
+    response = client.post("/finished", json=_finish_body(task=outer2))
+
+    assert response.status_code == 200
+    assert response.json()["stop_reason"] == "goal_met"
+    final = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    assert final.goal_met is True
+
+
+def test_currency_handoff_stale_diagnostic_is_pure(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2: an un-re-stamped owner finish emits handoff_stale with no failure."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_v3_repo(
+        repo_builder=repo_builder,
+        workflows=_outer_inner_workflows(),
+        completion_role="outer",
+        currency_outputs=_HANDOFF_CURRENCY,
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task0 = client.post("/register", json=_register_body(repo_root=repo_root)).json()
+    state = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    _write_handoff(repo_root=repo_root, task=task0, state=state)
+    handoff_file = handoff_path(repo_root=repo_root, session_id=task0["session_id"])
+
+    outer2 = _advance_to_outer(client=client, task=task0)
+    bytes_before = handoff_file.read_bytes()
+    # outer2 finishes successfully but never re-stamps the handoff, no control.
+    client.post("/finished", json=_finish_body(task=outer2))
+
+    stale_events = _events_of(
+        repo_root=repo_root, session_id=task0["session_id"], event_type="handoff_stale"
+    )
+    assert len(stale_events) == 1
+    final = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    stale_finish = next(
+        entry for entry in final.history if entry.attempt_id == outer2["attempt_id"]
+    )
+    assert stale_finish.success is True
+    assert final.control_protocol_consecutive_failures == 0
+    # Pure diagnostic: it touches neither the control cap nor the general cap.
+    assert final.workflow_consecutive_failures.get("outer", 0) == 0
+    assert handoff_file.read_bytes() == bytes_before
+
+
+def test_currency_no_stale_diagnostic_on_crashed_attempt(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Currency diagnostics run only after a mechanically successful attempt."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_v3_repo(
+        repo_builder=repo_builder,
+        workflows=_outer_inner_workflows(),
+        completion_role="outer",
+        currency_outputs=_HANDOFF_CURRENCY,
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task0 = client.post("/register", json=_register_body(repo_root=repo_root)).json()
+    state = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    _write_handoff(repo_root=repo_root, task=task0, state=state)
+    outer2 = _advance_to_outer(client=client, task=task0)
+
+    # A crashed attempt (harness failure) must not raise a currency diagnostic.
+    client.post("/finished", json=_finish_body(task=outer2, success=False))
+
+    assert not _events_of(
+        repo_root=repo_root, session_id=task0["session_id"], event_type="handoff_stale"
+    )
+
+
+def test_provenance_only_restamp_vs_tamper_same_revision(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D13: same-revision re-stamp is valid; a same-revision content change is not."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_v3_repo(
+        repo_builder=repo_builder,
+        workflows=_outer_inner_workflows(),
+        completion_role="outer",
+        currency_outputs=_HANDOFF_CURRENCY,
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task0 = client.post("/register", json=_register_body(repo_root=repo_root)).json()
+    state = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    _write_handoff(repo_root=repo_root, task=task0, state=state, revision=1)
+
+    # (a) same revision, provenance-only change by the new owner attempt → valid.
+    outer2 = _advance_to_outer(client=client, task=task0)
+    _write_handoff(repo_root=repo_root, task=outer2, state=state, revision=1)
+    outer4 = _advance_to_outer(client=client, task=outer2)
+    accepted = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    assert accepted.latest_handoff_observation is not None
+    assert accepted.latest_handoff_observation.status == "valid"
+    assert accepted.accepted_handoff_snapshot is not None
+    assert accepted.accepted_handoff_snapshot.handoff.producer is not None
+    assert (
+        accepted.accepted_handoff_snapshot.handoff.producer.attempt_id
+        == outer2["attempt_id"]
+    )
+
+    # (b) same revision, a real content change → non_monotonic (tamper detection).
+    _write_handoff(
+        repo_root=repo_root,
+        task=outer4,
+        state=state,
+        revision=1,
+        summary="A materially different summary at the same revision.",
+    )
+    client.post("/finished", json=_finish_body(task=outer4))
+    tampered = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    assert tampered.latest_handoff_observation is not None
+    assert tampered.latest_handoff_observation.status == "non_monotonic"
+
+
+@pytest.mark.parametrize("write_result", [False, True], ids=["absent", "present"])
+def test_advisory_currency_missing_emits_diagnostic_only(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch, write_result: bool
+) -> None:
+    """D14: an absent advisory output emits eval_missing; never fails the run."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_v3_repo(
+        repo_builder=repo_builder,
+        workflows={
+            "outer": _workflow(priority=0),
+            "eval_runner": _workflow(priority=100),
+        },
+        completion_role="outer",
+        currency_outputs=[
+            *_HANDOFF_CURRENCY,
+            {
+                "path": "project_state/eval_results.md",
+                "owner_role": "eval_runner",
+                "kind": "advisory",
+            },
+        ],
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task = client.post("/register", json=_register_body(repo_root=repo_root)).json()
+    assert task["workflow_id"] == "eval_runner"
+    if write_result:
+        result_path = (
+            handoff_path(repo_root=repo_root, session_id=task["session_id"]).parent
+            / "eval_results.md"
+        )
+        result_path.write_text("# eval result\n", encoding="utf-8")
+
+    client.post("/finished", json=_finish_body(task=task))
+
+    missing = _events_of(
+        repo_root=repo_root, session_id=task["session_id"], event_type="eval_missing"
+    )
+    state = _read_state(repo_root=repo_root, session_id=task["session_id"])
+    assert state.history[-1].success is True
+    if write_result:
+        assert not missing
+    else:
+        assert len(missing) == 1
+        assert missing[0]["payload"]["path"] == "project_state/eval_results.md"
+
+
+def test_orchestration_role_assignment_exposes_raw_root(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D15: only the orchestration role receives the read-only raw-trace root."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_v3_repo(
+        repo_builder=repo_builder,
+        workflows={
+            "outer": _workflow(priority=0),
+            "eval_runner": _workflow(priority=100),
+        },
+        completion_role="outer",
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    eval_task = client.post(
+        "/register", json=_register_body(repo_root=repo_root)
+    ).json()
+    assert eval_task["workflow_id"] == "eval_runner"
+    eval_assignment = json.loads(
+        Path(eval_task["assignment_path"]).read_text(encoding="utf-8")
+    )
+    assert "raw_root" not in eval_assignment["absolute_paths"]
+
+    outer_task = client.post("/finished", json=_finish_body(task=eval_task)).json()
+    assert outer_task["workflow_id"] == "outer"
+    outer_assignment = json.loads(
+        Path(outer_task["assignment_path"]).read_text(encoding="utf-8")
+    )
+    assert "raw_root" in outer_assignment["absolute_paths"]
+    assert outer_assignment["absolute_paths"]["raw_root"].endswith("/raw")
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"path": "project_state/other.json", "owner_role": "outer", "kind": "handoff"},
+        {
+            "path": "project_state/handoff.json",
+            "owner_role": "inner",
+            "kind": "handoff",
+        },
+        {"path": "/etc/passwd", "owner_role": "outer", "kind": "advisory"},
+        {"path": "../escape.md", "owner_role": "outer", "kind": "advisory"},
+        {"path": "x.md", "owner_role": "ghost", "kind": "advisory"},
+    ],
+    ids=["handoff-path", "handoff-owner", "absolute", "traversal", "unknown-owner"],
+)
+def test_currency_outputs_contract_validation_rejects_bad_entries(
+    entry: dict[str, object],
+) -> None:
+    """Contract load validates currency_outputs (path confinement + identity)."""
+
+    contract = _v3_contract(
+        workflow_ids=["outer", "inner"],
+        completion_role="outer",
+        currency_outputs=[entry],
+    )
+    with pytest.raises(ValueError):
+        WorkflowSetContract.model_validate(contract)
+
+
+def test_currency_outputs_contract_validation_rejects_duplicate_paths() -> None:
+    """Duplicate currency_outputs paths are rejected at contract load."""
+
+    contract = _v3_contract(
+        workflow_ids=["outer", "eval_runner"],
+        completion_role="outer",
+        currency_outputs=[
+            {"path": "project_state/x.md", "owner_role": "outer", "kind": "advisory"},
+            {
+                "path": "project_state/x.md",
+                "owner_role": "eval_runner",
+                "kind": "advisory",
+            },
+        ],
+    )
+    with pytest.raises(ValueError):
+        WorkflowSetContract.model_validate(contract)
+
+
+def test_currency_completion_rejected_when_no_handoff_snapshot(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A1: goal_met with no accepted handoff snapshot at all is rejected."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_v3_repo(
+        repo_builder=repo_builder,
+        workflows=_outer_inner_workflows(),
+        completion_role="outer",
+        currency_outputs=_HANDOFF_CURRENCY,
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task = client.post("/register", json=_register_body(repo_root=repo_root)).json()
+    # No handoff is ever written, so there is no accepted snapshot to rest on.
+    _write_goal_met_control(
+        repo_root=repo_root,
+        task=task,
+        handoff_ref="session:/project_state/handoff.json",
+    )
+    response = client.post("/finished", json=_finish_body(task=task))
+
+    assert response.status_code == 200
+    final = _read_state(repo_root=repo_root, session_id=task["session_id"])
+    assert final.goal_met is False
+    assert final.history[-1].success is False
+    assert final.history[-1].error == "invalid_control_output"
+
+
+def test_currency_non_owner_finish_emits_no_stale_diagnostic(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2: only the handoff owner is diagnosed; a non-owner finish is never stale."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_v3_repo(
+        repo_builder=repo_builder,
+        workflows=_outer_inner_workflows(),
+        completion_role="outer",
+        currency_outputs=_HANDOFF_CURRENCY,
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task0 = client.post("/register", json=_register_body(repo_root=repo_root)).json()
+    state = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    _write_handoff(repo_root=repo_root, task=task0, state=state)
+
+    # outer0 re-stamped and finishes; the interleaved inner attempt (a non-owner)
+    # then finishes without touching the handoff.
+    inner1 = client.post("/finished", json=_finish_body(task=task0)).json()
+    assert inner1["workflow_id"] == "inner"
+    client.post("/finished", json=_finish_body(task=inner1))
+
+    assert not _events_of(
+        repo_root=repo_root, session_id=task0["session_id"], event_type="handoff_stale"
+    )
+
+
+def test_provenance_restamp_rejected_when_timestamp_moves_backward(
+    repo_builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D13: a same-revision re-stamp whose updated_at regresses is non_monotonic."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    repo_root = _build_v3_repo(
+        repo_builder=repo_builder,
+        workflows=_outer_inner_workflows(),
+        completion_role="outer",
+        currency_outputs=_HANDOFF_CURRENCY,
+    )
+    client = TestClient(create_coordinator_app(repo_root=repo_root, resume=False))
+    task0 = client.post("/register", json=_register_body(repo_root=repo_root)).json()
+    state = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    _write_handoff(
+        repo_root=repo_root,
+        task=task0,
+        state=state,
+        revision=1,
+        updated_at="2026-07-22T12:00:00Z",
+    )
+
+    outer2 = _advance_to_outer(client=client, task=task0)
+    # Same revision, current owner, but the timestamp regresses → not a valid
+    # provenance-only re-stamp.
+    _write_handoff(
+        repo_root=repo_root,
+        task=outer2,
+        state=state,
+        revision=1,
+        updated_at="2026-07-22T11:00:00Z",
+    )
+    client.post("/finished", json=_finish_body(task=outer2))
+
+    final = _read_state(repo_root=repo_root, session_id=task0["session_id"])
+    assert final.latest_handoff_observation is not None
+    assert final.latest_handoff_observation.status == "non_monotonic"
