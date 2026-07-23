@@ -243,6 +243,26 @@ class WorkflowEvaluationContract(BaseModel):
     check_runner_roles: list[str] = Field(default_factory=list)
 
 
+CANONICAL_HANDOFF_CURRENCY_PATH = "project_state/handoff.json"
+
+
+class CurrencyOutput(BaseModel):
+    """A role output whose currency the engine tracks per the D13/D14 contract.
+
+    ``kind: handoff`` marks the canonical layer handoff as completion-gated and
+    per-iteration diagnosed (structural continuity — D13). ``kind: advisory``
+    marks an optional evidence file (e.g. the eval result) whose *presence* the
+    engine may diagnose but never enforces (D14/D11). The path is repo-relative
+    and confined; the engine reads it from here rather than hard-coding literals.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    owner_role: str
+    kind: Literal["handoff", "advisory"]
+
+
 class WorkflowSetContract(BaseModel):
     """Frozen role and protocol contract for one durable session layer."""
 
@@ -256,6 +276,7 @@ class WorkflowSetContract(BaseModel):
     evaluation: WorkflowEvaluationContract = Field(
         default_factory=WorkflowEvaluationContract
     )
+    currency_outputs: list[CurrencyOutput] = Field(default_factory=list)
     task_acceptance_role: str | None = None
     terminal_blocker_reporting_roles: list[str] = Field(default_factory=list)
     child_interface: Literal["none", "recursive"] = "recursive"
@@ -303,6 +324,77 @@ class WorkflowSetContract(BaseModel):
         ):
             raise ValueError("protocol v3 must use evaluation, not legacy eval owners")
         return self
+
+    @model_validator(mode="after")
+    def validate_currency_outputs(self) -> Self:
+        """Validate declared currency outputs (D13/D14).
+
+        Paths are repo-relative, confined, and unique; every ``owner_role`` names
+        a declared role. A ``kind: handoff`` entry must name the canonical
+        protocol handoff identity (its path is fixed by the engine, and its owner
+        must be the declared ``handoff_owner``) — so ``kind: handoff`` is an
+        opt-in marker on the engine's own handoff, never a user-chosen path; at
+        most one may be declared.
+        """
+
+        if not self.currency_outputs:
+            return self
+        seen_paths: set[str] = set()
+        handoff_entries = 0
+        for entry in self.currency_outputs:
+            path = entry.path
+            if (
+                not path
+                or path.startswith("/")
+                or path.strip() != path
+                or ".." in path.split("/")
+                or "\\" in path
+            ):
+                raise ValueError(
+                    f"currency_outputs path must be repo-relative and confined: {path!r}"
+                )
+            if path in seen_paths:
+                raise ValueError(f"duplicate currency_outputs path: {path!r}")
+            seen_paths.add(path)
+            if entry.owner_role not in self.roles:
+                raise ValueError(
+                    f"currency_outputs owner_role names an unknown role: "
+                    f"{entry.owner_role!r}"
+                )
+            if entry.kind == "handoff":
+                handoff_entries += 1
+                if self.orchestration is None:
+                    raise ValueError(
+                        "a kind: handoff currency output requires an orchestration "
+                        "contract"
+                    )
+                if path != CANONICAL_HANDOFF_CURRENCY_PATH:
+                    raise ValueError(
+                        "a kind: handoff currency output must name the canonical "
+                        f"handoff path {CANONICAL_HANDOFF_CURRENCY_PATH!r}, got {path!r}"
+                    )
+                if entry.owner_role != self.orchestration.handoff_owner:
+                    raise ValueError(
+                        "a kind: handoff currency output must be owned by the "
+                        "declared handoff_owner"
+                    )
+        if handoff_entries > 1:
+            raise ValueError("at most one kind: handoff currency output is allowed")
+        return self
+
+    @property
+    def currency_handoff_owner(self) -> str | None:
+        """Return the role that owns a declared ``kind: handoff`` currency output."""
+
+        for entry in self.currency_outputs:
+            if entry.kind == "handoff":
+                return entry.owner_role
+        return None
+
+    def advisory_currency_outputs(self) -> list[CurrencyOutput]:
+        """Return declared ``kind: advisory`` currency outputs (may be empty)."""
+
+        return [entry for entry in self.currency_outputs if entry.kind == "advisory"]
 
     @property
     def completion_role(self) -> str | None:
@@ -586,7 +678,10 @@ class LoopState(BaseModel):
     # descendants inherit the same exact payload rather than re-reading YAML.
     harness_capability_roster: HarnessCapabilityRoster | None = Field(default=None)
     # Last structurally valid handoff observed after a completed v3 attempt.
-    # This is diagnostic continuity only; it never gates scheduling/control.
+    # The observation never gates scheduling. It gates terminal control only when
+    # the frozen contract declares the handoff a `kind: handoff` currency output
+    # (D13/A1): a `goal_met` must rest on a snapshot the completing attempt
+    # re-stamped. Per-iteration staleness is a pure diagnostic (D13/A2).
     handoff_revision: int = Field(default=0, ge=0)
     handoff_sha256: str | None = Field(default=None)
     accepted_eval_receipt_seals: dict[str, AcceptedEvalReceiptSeal] = Field(

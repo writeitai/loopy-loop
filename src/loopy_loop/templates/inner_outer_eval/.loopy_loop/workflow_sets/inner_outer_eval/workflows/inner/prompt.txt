@@ -18,6 +18,11 @@ check facts. Composing a team for this — whether to delegate at all, how many
 agents, and in what roles — is your judgment; it is equally valid to do the work
 directly.
 
+Base your work on live repository and CI facts, not on stale summaries. If you
+consult project_state/eval_results.md, check the commit its provenance header
+records: a verdict observed against a commit that is not current HEAD (or a dirty
+tree) is stale — treat it as out of date, not as a fact about your change.
+
 Record what changed, what you verified, and what remains in the task's record
 under project_state/tasks/. Do not touch outer-owned selection, status, or
 acceptance fields. Return a short upward result naming the task, the changes, the

@@ -51,10 +51,11 @@ uv sync --extra dev
 The stock protocol-v3 contract spans three owned projects. It requires
 `team-harness>=0.5.4` for caller-owned run records, nested assignment context,
 capability-roster propagation, and canonical agent streams. When a workflow
-uses evaluation, `eval-banana>=0.3.5` supplies hermetic
+uses evaluation, `eval-banana>=0.5.0` supplies hermetic
 `--no-project-config` runs, explicit harness selection, canonical check
-digests, and retained judge evidence. Install compatible releases of all three
-projects together.
+digests, retained judge evidence, and the `--result-out` provenance-stamped
+result the stock `inner_outer_eval` eval runner writes to `eval_results.md`
+(D14). Install compatible releases of all three projects together.
 For coordinated development across the repositories, install the corresponding
 team-harness and eval-banana checkouts as editable dependencies:
 

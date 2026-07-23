@@ -64,6 +64,7 @@ from loopy_loop.models import SchedulerForecast
 from loopy_loop.models import SchedulerView
 from loopy_loop.models import SessionOutcome
 from loopy_loop.models import SessionUsageTotals
+from loopy_loop.models import SignalProducer
 from loopy_loop.models import STOP_ACTION
 from loopy_loop.models import TaskResponse
 from loopy_loop.models import utc_now
@@ -1498,6 +1499,16 @@ class CoordinatorService:
                 active=active,
                 workflow_contract=effective_workflow_contract,
             )
+            # D13 (A2) / D14: currency diagnostics run only after a mechanically
+            # successful attempt so a crashed attempt never fails against, or
+            # archives, the prior valid handoff. These are pure diagnostics — no
+            # success flip, no cap, no counter.
+            if request.success:
+                self._diagnose_currency_outputs(
+                    state=state,
+                    active=active,
+                    workflow_contract=effective_workflow_contract,
+                )
         elif self._workflow_expects_goal_check_signal(current_task=active):
             goal_signal_errors: list[str] = []
             goal_signal = self._read_goal_check_signal(
@@ -5475,6 +5486,18 @@ class CoordinatorService:
                         state=state, reference=signal.handoff_ref
                     )
                 )
+            # D13 (A1): when the contract makes the handoff a currency output, a
+            # terminal completion must be backed by a handoff the *completing*
+            # attempt brought current. This runs independent of whether
+            # handoff_ref is cited (handoff_ref is optional, so a citation-only
+            # check is bypassable); a currency contract additionally requires the
+            # citation so completion always names the handoff it rests on.
+            if workflow_contract.currency_handoff_owner is not None:
+                reasons.extend(
+                    self._validate_completion_handoff_currency(
+                        state=state, producer=producer, cited=signal.handoff_ref
+                    )
+                )
         elif signal.stop_reason == "unresolvable_error":
             if producer.workflow_id not in (
                 workflow_contract.terminal_blocker_reporting_roles
@@ -5576,6 +5599,41 @@ class CoordinatorService:
         ):
             return ["cited handoff lacks a matching engine acceptance snapshot"]
         return []
+
+    def _validate_completion_handoff_currency(
+        self, *, state: LoopState, producer: SignalProducer, cited: str | None
+    ) -> list[str]:
+        """Require completion to rest on a handoff the completing attempt made current.
+
+        D13 (A1): the accepted handoff snapshot must have been (re)stamped by the
+        exact attempt that is declaring ``goal_met``. Evaluated independent of any
+        ``handoff_ref`` citation (the citation is optional and therefore bypassable
+        on its own); a currency contract additionally requires the citation so a
+        completion always names the handoff it rests on. A stale snapshot routes to
+        the existing control-repair path via a non-empty reason.
+        """
+
+        reasons: list[str] = []
+        if cited is None:
+            reasons.append(
+                "goal_met must cite the current handoff when it is a currency output"
+            )
+        snapshot = state.accepted_handoff_snapshot
+        if snapshot is None or snapshot.handoff.producer is None:
+            reasons.append(
+                "no accepted handoff snapshot was (re)stamped by the completing attempt"
+            )
+            return reasons
+        stamped = snapshot.handoff.producer
+        if (
+            stamped.workflow_id != producer.workflow_id
+            or stamped.attempt_id != producer.attempt_id
+        ):
+            reasons.append(
+                "the accepted handoff was not re-stamped by the completing attempt "
+                "(stale continuity); re-stamp the handoff before declaring completion"
+            )
+        return reasons
 
     def _accept_current_eval_receipts(
         self,
@@ -5724,16 +5782,25 @@ class CoordinatorService:
         ):
             status = "invalid"
             reason = "producer attempt is not current or present in session history"
-        if status == "valid" and (
-            handoff.revision < state.handoff_revision
-            or (
-                handoff.revision == state.handoff_revision
-                and state.handoff_sha256 is not None
-                and digest != state.handoff_sha256
+        if status == "valid" and handoff.revision < state.handoff_revision:
+            status = "non_monotonic"
+            reason = "revision moved backward"
+        elif (
+            status == "valid"
+            and handoff.revision == state.handoff_revision
+            and state.handoff_sha256 is not None
+            and digest != state.handoff_sha256
+            and not self._is_provenance_only_restamp(
+                state=state, active=active, handoff=handoff
             )
         ):
+            # D13: a same-revision content change is tampering UNLESS it is a
+            # provenance-only re-stamp by the current owner attempt (producer and
+            # timestamp advance, every other field byte-equal to the accepted
+            # snapshot). That exception keeps "re-stamp without a material change"
+            # expressible without opening a fixed-revision rewrite hole.
             status = "non_monotonic"
-            reason = "revision moved backward or changed without advancing"
+            reason = "revision unchanged but content changed without a valid re-stamp"
         if status == "valid" and handoff.revision >= state.handoff_revision:
             state.handoff_revision = handoff.revision
             state.handoff_sha256 = digest
@@ -5758,6 +5825,114 @@ class CoordinatorService:
                 "sha256": digest,
                 "reason": reason,
             },
+        )
+
+    def _diagnose_currency_outputs(
+        self,
+        *,
+        state: LoopState,
+        active: CurrentTask,
+        workflow_contract: WorkflowSetContract,
+    ) -> None:
+        """Emit non-gating currency diagnostics for the finishing role (D13/D14).
+
+        These never change harness success, respawn, or touch a cap. For the
+        handoff (`kind: handoff`) a successful owner finish that did not re-stamp
+        the handoff raises ``handoff_stale`` and leaves a repair note the standing
+        owner reads on its next turn (correctness is enforced separately at the
+        completion boundary, A1). For an advisory output (`kind: advisory`, e.g.
+        the eval result) an absent declared path raises ``eval_missing``; the
+        engine never reads the file — freshness is the reading agent's judgment.
+        """
+
+        session_dir = session_dir_path(
+            repo_root=self.repo_root, session_id=state.active_session_id
+        )
+        if active.workflow_id == workflow_contract.currency_handoff_owner:
+            snapshot = state.accepted_handoff_snapshot
+            stamped = snapshot.handoff.producer if snapshot is not None else None
+            if (
+                stamped is None
+                or stamped.workflow_id != active.workflow_id
+                or stamped.attempt_id != active.attempt_id
+            ):
+                failure_id = f"handoff-currency-{uuid.uuid4().hex[:12]}"
+                write_json_atomic(
+                    path=protocol_failures_dir_path(
+                        repo_root=self.repo_root, session_id=state.active_session_id
+                    )
+                    / f"{failure_id}.json",
+                    payload={
+                        "schema_version": 1,
+                        "failure_id": failure_id,
+                        "kind": "stale_handoff",
+                        "reasons": [
+                            "the handoff owner finished without re-stamping "
+                            "project_state/handoff.json with this attempt's "
+                            "producer identity; re-stamp it on your next turn so a "
+                            "successor never reads stale continuity"
+                        ],
+                        "finishing_attempt": {
+                            "workflow_id": active.workflow_id,
+                            "attempt_id": active.attempt_id,
+                        },
+                        "created_at": utc_now().isoformat().replace("+00:00", "Z"),
+                    },
+                )
+                self._emit(
+                    session_id=state.active_session_id,
+                    event_type="handoff_stale",
+                    payload={
+                        "workflow_id": active.workflow_id,
+                        "attempt_id": active.attempt_id,
+                        "protocol_failure_ref": (
+                            f"session:/protocol_failures/{failure_id}.json"
+                        ),
+                    },
+                )
+        for entry in workflow_contract.advisory_currency_outputs():
+            if active.workflow_id != entry.owner_role:
+                continue
+            declared_path = session_dir / entry.path
+            if not declared_path.is_file():
+                self._emit(
+                    session_id=state.active_session_id,
+                    event_type="eval_missing",
+                    payload={
+                        "workflow_id": active.workflow_id,
+                        "attempt_id": active.attempt_id,
+                        "path": entry.path,
+                    },
+                )
+
+    @staticmethod
+    def _is_provenance_only_restamp(
+        *, state: LoopState, active: CurrentTask, handoff: LayerHandoff
+    ) -> bool:
+        """Return whether a same-revision handoff is a legitimate re-stamp (D13).
+
+        A re-stamp is legitimate only when the current owner attempt advances the
+        provenance and timestamp of an otherwise-identical handoff: the producer
+        is exactly this finishing attempt, ``updated_at`` does not move backward,
+        and every field other than ``producer``/``updated_at`` equals the accepted
+        snapshot. Anything else at the same revision is tampering.
+        """
+
+        snapshot = state.accepted_handoff_snapshot
+        producer = handoff.producer
+        if snapshot is None or producer is None:
+            return False
+        if (
+            active.session_id != state.active_session_id
+            or producer.workflow_id != active.workflow_id
+            or producer.attempt_id != active.attempt_id
+        ):
+            return False
+        if handoff.updated_at < snapshot.handoff.updated_at:
+            return False
+        ignore = {"producer", "updated_at"}
+        return handoff.model_dump(exclude=ignore) == snapshot.handoff.model_dump(
+            exclude=ignore
         )
 
     @staticmethod
