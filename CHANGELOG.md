@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.12.0
+
+- **Deterministic handoff currency, located+fresh advisory eval, orchestrator
+  reconciliation (#88, D13–D15).** Fixes an `inner_outer_eval` non-convergence
+  where the orchestrator stalls after the work is done because it is misled by
+  its own durable state. Opt-in via a typed, validated `currency_outputs`
+  contract field (a contract without it is inert; backward compatibility waived):
+  - **D13 handoff currency.** A terminal `goal_met` that rests on a handoff the
+    completing attempt did not re-stamp is rejected via the existing control-
+    repair path — independent of whether `handoff_ref` is cited. A non-completion
+    owner finish that leaves the handoff un-re-stamped emits a pure `handoff_stale`
+    diagnostic (no failure, no cap). A same-revision re-stamp is accepted only by
+    an exact field-level provenance compare, preserving tamper detection.
+  - **D14 advisory eval.** The engine never reads the eval result; it emits at
+    most an `eval_missing` presence diagnostic and never gates (D11). Requires
+    `eval-banana>=0.5.0`, whose `--result-out` writes the provenance-stamped
+    `project_state/eval_results.md` directly instead of the runner hand-copying it.
+  - **D15 reconciliation.** The orchestration role receives the session raw-trace
+    root in `paths.json`; the stock `outer` prompt gains reconcile-against-live-
+    state and anti-over-polish guidance and drops the mandatory-final-eval line.
+
 ## 0.11.0
 
 - **Engine-emitted contract descriptors (#86).** The engine emits a
